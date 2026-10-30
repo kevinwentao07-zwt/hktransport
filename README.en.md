@@ -14,6 +14,8 @@ Location is requested only while the nearby-bus page is visible and stays in mem
 
 The nearby menu expands as **station → routes at this station → next two arrivals**. Same-name platforms within 100 m share a station entry while retaining their original operator and stop sequence for ETA requests. Distant stops with the same name stay separate. Distance is measured to the station's closest boarding platform.
 
+The map supports native trackpad pinch-to-zoom and two-finger panning, plus on-map zoom buttons. **My location** recenters the map around your location.
+
 Double-click **Start hktransport.command** to build and open the app. Later starts reuse the build unless the source has changed. Double-click **Close hktransport.command** to quit. These shortcuts use the installed Xcode Command Line Tools; full Xcode isn't required.
 
 On some upgraded Command Line Tools installations, a redundant legacy `SwiftBridging` module map can cause a long compile followed by module-redefinition errors. Both shortcuts automatically detect identical duplicate declarations and apply a project-local compiler filesystem overlay. System files are never modified and administrator access is not required. Compatibility files live in the ignored `build/.toolchain/` directory. The first build can still take a few minutes.

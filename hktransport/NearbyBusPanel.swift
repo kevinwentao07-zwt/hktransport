@@ -37,8 +37,13 @@ struct NearbyBusPanel: View {
                 locationStatus
             }
             HStack(alignment: .top, spacing: 12) {
-                map
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(alignment: .leading, spacing: 6) {
+                    map
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Text(model.t("雙指開合縮放 · 雙指滑動平移", "Pinch to zoom · Two-finger scroll to pan"))
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 stopList
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -71,7 +76,7 @@ struct NearbyBusPanel: View {
     }
 
     private var map: some View {
-        Map(position: $position, selection: $selectedStopID) {
+        Map(position: $position, interactionModes: .all, selection: $selectedStopID) {
             if let fix = location.location {
                 MapCircle(center: fix.coordinate, radius: max(20, fix.horizontalAccuracy))
                     .foregroundStyle(.blue.opacity(0.10))
@@ -91,7 +96,7 @@ struct NearbyBusPanel: View {
             }
         }
         .mapStyle(.standard(pointsOfInterest: .excludingAll))
-        .mapControls { MapCompass(); MapScaleView() }
+        .mapControls { MapCompass(); MapScaleView(); MapZoomStepper() }
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .accessibilityLabel(model.t("附近巴士站 Apple 地圖", "Apple Map of nearby bus stops"))
     }
