@@ -1,0 +1,42 @@
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+__MACOSX/
+
+# Xcode user state and build output
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+build/
+DerivedData/
+.derivedData/
+*.dSYM
+*.dSYM.zip
+*.xcarchive
+
+# Swift and JavaScript dependency caches
+.build/
+.swiftpm/
+node_modules/
+
+# Local packaging and temporary output
+dist/
+/tmp/
+*.dmg
+*.app/
+*.log
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.local.json
+*.pem
+*.key
+
+# Reference project snapshots (see THIRD_PARTY_NOTICES.md)
+/Notch-Triage-main/
+/hk-independent-bus-eta-master/
