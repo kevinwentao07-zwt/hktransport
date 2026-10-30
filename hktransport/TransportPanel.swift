@@ -9,6 +9,7 @@ struct TransportPanel: View {
     @State private var category: TransportCategory = .saved
     @State private var selectedStation: String?
     @State private var selectedLightRailStation: String?
+    @StateObject private var busLocation = BusLocationModel()
     @FocusState private var searchFocused: Bool
 
     var body: some View {
@@ -39,6 +40,8 @@ struct TransportPanel: View {
                         FerryPanel(model: model, query: query)
                     } else if category == .notice {
                         NoticePanel(model: model, query: query)
+                    } else if category == .bus && query.trimmingCharacters(in: .whitespaces).isEmpty && pickedRouteKey == nil {
+                        NearbyBusPanel(model: model, location: busLocation)
                     } else {
                         ScrollView {
                             LazyVStack(spacing: 6) { content }

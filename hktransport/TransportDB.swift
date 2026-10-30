@@ -100,6 +100,21 @@ private struct LooseString: Decodable {
 
 struct Stop: Decodable, Sendable {
     let name: Name
+    let location: StopLocation?
+
+    init(name: Name, location: StopLocation? = nil) {
+        self.name = name
+        self.location = location
+    }
+}
+
+struct StopLocation: Decodable, Hashable, Sendable {
+    let lat: Double
+    let lng: Double
+
+    var isValid: Bool {
+        lat.isFinite && lng.isFinite && (-90...90).contains(lat) && (-180...180).contains(lng)
+    }
 }
 
 struct TransportDB: Decodable, Sendable {
@@ -107,6 +122,7 @@ struct TransportDB: Decodable, Sendable {
     let stopList: [String: Stop]
     /// Route keys for supported operators, in natural route-number order.
     private(set) var sortedRouteKeys: [String] = []
+    private(set) var busStopIndex = BusStopIndex()
 
     private enum CodingKeys: String, CodingKey {
         case routeList, stopList
@@ -121,6 +137,7 @@ struct TransportDB: Decodable, Sendable {
                 return order == .orderedSame ? a.key < b.key : order == .orderedAscending
             }
             .map(\.key)
+        db.busStopIndex = BusStopIndex.build(routes: db.routeList, stops: db.stopList)
         return db
     }
 }

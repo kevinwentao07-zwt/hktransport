@@ -64,6 +64,8 @@ if [[ "$needs_build" == true ]]; then
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSLocationUsageDescription</key><string>在 Apple 地圖顯示你的位置，並按距離排列附近巴士站。位置只在使用附近巴士功能時取得。</string>
+<key>NSLocationWhenInUseUsageDescription</key><string>在 Apple 地圖顯示你的位置，並按距離排列附近巴士站。</string>
 </dict></plist>
 PLIST
 

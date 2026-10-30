@@ -8,6 +8,10 @@ It combines the notch shell from [Notch Triage](https://github.com/0Hyacinth0/No
 
 ## Using it
 
+The Bus page shows an embedded Apple Map and a list of nearby bus stops when the search field is empty. Click **Use my location** and allow the macOS location prompt. Stops are sorted by straight-line distance within a selectable 500 m / 1 km / 3 km radius (up to 30 stops). Select a map marker or list entry, then a route to preview its next two arrivals without saving it. Location accuracy and the last fix time are shown; **My location** requests a new fix and recenters the map. Route-number search remains available.
+
+Location is requested only while the nearby-bus page is visible and stays in memory. Apple Maps connects to Apple's map services; ETA requests contain route/stop codes, not your coordinates. Denied permissions and unavailable location fixes have recovery controls on the page.
+
 Double-click **Start hktransport.command** to build and open the app. Later starts reuse the build unless the source has changed. Double-click **Close hktransport.command** to quit. These shortcuts use the installed Xcode Command Line Tools; full Xcode isn't required.
 
 On some upgraded Command Line Tools installations, a redundant legacy `SwiftBridging` module map can cause a long compile followed by module-redefinition errors. Both shortcuts automatically detect identical duplicate declarations and apply a project-local compiler filesystem overlay. System files are never modified and administrator access is not required. Compatibility files live in the ignored `build/.toolchain/` directory. The first build can still take a few minutes.

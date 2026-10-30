@@ -56,7 +56,7 @@ struct StopPickerRow: View {
     }
 }
 
-private struct StopArrivalPreview: View {
+struct StopArrivalPreview: View {
     @ObservedObject var model: AppModel
     let route: Route
     let stop: SavedStop
