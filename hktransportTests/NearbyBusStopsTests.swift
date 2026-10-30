@@ -53,4 +53,25 @@ final class NearbyBusStopsTests: XCTestCase {
         XCTAssertEqual(route.stopIDs[visit.seq], "D")
         XCTAssertEqual(route.bound["ctb"], "I")
     }
+
+    func testAdjacentPlatformsShareOneStationMenuButDistantNamesDoNotMerge() {
+        func stop(_ code: String, lat: Double) -> Stop {
+            Stop(name: Name(en: "UNIVERSITY (\(code))", zh: "大學 (\(code))"),
+                 location: StopLocation(lat: lat, lng: 114.17))
+        }
+        let stops = ["P1": stop("TP1", lat: 22.3), "P2": stop("TP2", lat: 22.3003),
+                     "FAR": stop("TP3", lat: 22.31), "END": stop("TP4", lat: 22.4)]
+        let routes = Dictionary(uniqueKeysWithValues: ["74K", "75K", "263C"].enumerated().map { i, number in
+            (number, Route(route: number, co: ["kmb"], orig: .empty, dest: .empty, serviceType: "1",
+                           stops: ["kmb": [["P1", "P2", "FAR"][i], "END"]], bound: ["kmb": "O"], gtfsId: nil, nlbId: nil))
+        })
+        let index = BusStopIndex.build(routes: routes, stops: stops)
+        XCTAssertEqual(index.sites.count, 2)
+        let group = index.sites.first { $0.platformIDs.contains("P1") }!
+        XCTAssertEqual(group.name.zh, "大學")
+        XCTAssertEqual(Set(group.platformIDs), ["P1", "P2"])
+        XCTAssertEqual(group.routeNumbers, ["74K", "75K"])
+        XCTAssertEqual(Set(group.visits.map(\.routeKey)), ["74K", "75K"])
+        XCTAssertEqual(index.nearby(to: StopLocation(lat: 22.3, lng: 114.17)).first?.distance, 0)
+    }
 }

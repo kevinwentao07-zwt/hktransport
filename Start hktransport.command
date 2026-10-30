@@ -74,7 +74,9 @@ PLIST
     "$project_root/Close hktransport.command"
     ditto --norsrc --noextattr "$staging_dir/hktransport.app" "$app_bundle"
     clear_bundle_metadata
-    codesign --force --options runtime --sign - "$app_bundle"
+    codesign --force --options runtime \
+        --entitlements "$project_root/Config/hktransport.entitlements" \
+        --sign - "$app_bundle"
     print 'Build complete. Opening hktransport…'
 fi
 

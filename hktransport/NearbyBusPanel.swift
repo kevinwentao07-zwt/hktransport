@@ -225,7 +225,7 @@ private struct NearbyBusStopCard: View {
             .accessibilityValue(isSelected ? model.t("已展開", "Expanded") : model.t("已收起", "Collapsed"))
             if isSelected {
                 Divider()
-                Text(model.t("點選路線查看最近兩班", "Select a route for the next two arrivals"))
+                Text(model.t("此站路線 · 點選查看最近兩班", "Routes at this stop · select for arrivals"))
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                 NearbyBusRoutes(model: model, visits: stop.site.visits)
                     .id(stop.id)
@@ -266,6 +266,8 @@ private struct NearbyBusRoutes: View {
                     }
                     .buttonStyle(.plain)
                     if expandedVisit == visit.id {
+                        Text(db.stopList[route.stopIDs[visit.seq]]?.name.text(model.language) ?? "")
+                            .font(.system(size: 10)).foregroundStyle(.secondary)
                         StopArrivalPreview(model: model, route: route,
                                            stop: SavedStop(routeKey: visit.routeKey, seq: visit.seq))
                             .id(visit.id)
