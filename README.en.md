@@ -23,8 +23,8 @@ Click **×** or press `⌘W` while the notch panel is active to close the panel.
 | Click | Your saved stops with live ETAs, plus route search |
 
 1. Click the notch and type a route number (`1A`, `960`, `TML`, `505`). Press Return to open the first match.
-2. Click a stop to save it (star). Click it again to remove it.
-3. Esc steps back: stop list → search results → clear search → close the panel.
+2. Click a stop name to expand the next two arrivals directly below it, without saving. Click again to collapse, or choose another stop. The preview refreshes at your configured interval and has a manual refresh button. Use the separate star button to save or unsave the stop.
+3. Esc steps back: collapse the arrival preview → search results → clear search → close the panel.
 4. Right-click a saved stop to move it to the top (that one shows on the notch) or remove it.
 5. Right-click the notch to switch between 中文 and English, or to quit.
 6. Choose **Settings** in the sidebar, press `⌘,` while the panel is active, or right-click the notch and choose **Settings…**, to change language, arrival refresh frequency (1, 15, 30 or 60 seconds), or launch at login. Changes save automatically; press Esc or click Back to return to routes.

@@ -5,6 +5,7 @@ struct TransportPanel: View {
     @ObservedObject var model: AppModel
     @State private var query = ""
     @State private var pickedRouteKey: String?
+    @State private var expandedStop: SavedStop?
     @State private var category: TransportCategory = .saved
     @State private var selectedStation: String?
     @State private var selectedLightRailStation: String?
@@ -61,9 +62,14 @@ struct TransportPanel: View {
             query = ""
             pickedRouteKey = nil
         }
+        .onChange(of: pickedRouteKey) { _, _ in
+            expandedStop = nil
+        }
         .onExitCommand {
             if model.isShowingSettings {
                 model.hideSettings()
+            } else if expandedStop != nil {
+                expandedStop = nil
             } else if pickedRouteKey != nil {
                 pickedRouteKey = nil
             } else if !query.isEmpty {
@@ -180,8 +186,8 @@ struct TransportPanel: View {
             searchResults
         } else if filteredSavedStops.isEmpty {
             hint(model.t(
-                "輸入路線號碼，選擇車站加入。這裏會顯示即時到站時間。",
-                "Type a route number and pick a stop to save it. Live arrivals show up here."
+                "輸入路線號碼，點選車站查看最近兩班到站時間；按星號收藏。",
+                "Type a route number, then click a stop for the next two arrivals. Use the star to save it."
             ))
         } else {
             ForEach(filteredSavedStops) { stop in
@@ -248,30 +254,12 @@ struct TransportPanel: View {
 
         ForEach(Array(route.stopIDs.indices), id: \.self) { seq in
             let stop = SavedStop(routeKey: routeKey, seq: seq)
-            let saved = model.isSaved(stop)
-            Button {
-                model.toggleSaved(stop)
-            } label: {
-                HStack(spacing: 10) {
-                    Text("\(seq + 1)")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22, alignment: .trailing)
-                    Text(model.stopName(route, seq: seq))
-                        .font(.system(size: 13))
-                        .lineLimit(1)
-                    Spacer()
-                    Image(systemName: saved ? "star.fill" : "star")
-                        .foregroundStyle(saved ? Color.yellow : Color.secondary)
+            StopPickerRow(model: model, route: route, stop: stop, isExpanded: expandedStop == stop) {
+                withAnimation(model.motion(.easeInOut(duration: 0.16))) {
+                    expandedStop = expandedStop == stop ? nil : stop
                 }
-                .padding(.horizontal, 10)
-                .frame(height: 32)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(model.stopName(route, seq: seq))
-            .accessibilityValue(saved ? model.t("已儲存", "Saved") : "")
+            .id(stop)
         }
     }
 
