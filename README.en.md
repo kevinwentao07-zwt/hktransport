@@ -10,6 +10,10 @@ It combines the notch shell from [Notch Triage](https://github.com/0Hyacinth0/No
 
 Double-click **Start hktransport.command** to build and open the app. Later starts reuse the build unless the source has changed. Double-click **Close hktransport.command** to quit. These shortcuts use the installed Xcode Command Line Tools; full Xcode isn't required.
 
+On some upgraded Command Line Tools installations, a redundant legacy `SwiftBridging` module map can cause a long compile followed by module-redefinition errors. Both shortcuts automatically detect identical duplicate declarations and apply a project-local compiler filesystem overlay. System files are never modified and administrator access is not required. Compatibility files live in the ignored `build/.toolchain/` directory. The first build can still take a few minutes.
+
+Compiled apps are cached under `~/Library/Caches/hktransport/`, separately for each project directory, to keep signed bundles outside iCloud/File Provider-managed source folders.
+
 Click **×** or press `⌘W` while the notch panel is active to close the panel. To quit the app, click **Quit** in Settings, press `⌘Q` while the panel is active, or use the notch's right-click menu.
 
 | Where | What you see |

@@ -31,6 +31,10 @@ cd hktransport
 ./"Close hktransport.command"
 ```
 
+若曾更新過 Command Line Tools，系統可能殘留重複的 `SwiftBridging` 模組宣告，令編譯長時間沒有結果並最終報錯。啟動及結束腳本會自動檢查這個特定問題，使用專案內的檔案映射略過重複宣告，不修改系統檔案，也不需要管理員權限。相容檔案保存在忽略提交的 `build/.toolchain/`；首次編譯仍可能需要數分鐘。
+
+啟動腳本將編譯好的應用儲存在 `~/Library/Caches/hktransport/`，每個專案目錄使用獨立快取，避免 iCloud／File Provider 對原始碼資料夾附加的中繼資料影響應用簽署。
+
 ### 操作方式
 
 1. 懸停劉海查看預覽，點擊打開完整面板。

@@ -1,8 +1,12 @@
 #!/bin/zsh
 set -euo pipefail
 
+project_root="${0:A:h}"
+source "$project_root/Config/SwiftToolchain.zsh"
+hktransport_prepare_swift "$project_root"
+
 # Ask the app to quit normally so its shutdown handler can finish.
-xcrun swift - <<'SWIFT'
+xcrun swift "${hktransport_swift_flags[@]}" - <<'SWIFT'
 import AppKit
 
 let bundleIDs = ["local.hktransport.debug", "local.hktransport"]
