@@ -95,7 +95,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path != '/api/ai':
             return self.send(404, {'error': 'Not found'})
-        self.send(200, {'available': bool(api_key())})
+        # Maps need their key in the browser. It is locked to this site in the MapTiler account.
+        self.send(200, {'available': bool(api_key()), 'mapKey': os.environ.get('MAPTILER_KEY', '').strip() or None})
 
     def do_POST(self):
         if self.path != '/api/ai':

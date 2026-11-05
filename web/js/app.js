@@ -171,17 +171,28 @@ function historyBar(box, pick) {
 // MARK: Map
 
 const mapView = (() => {
-  let map, content, base, flying = false;
+  let map, content, base, mapKey = null, flying = false;
   const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
-  const style = () => `https://tiles.openfreemap.org/styles/${darkMode.matches ? 'dark' : 'liberty'}`;
+  const style = () => {
+    const dark = darkMode.matches;
+    return mapKey
+      ? `https://api.maptiler.com/maps/${dark ? 'streets-v2-dark' : 'streets-v2'}/style.json?key=${encodeURIComponent(mapKey)}`
+      : `https://tiles.openfreemap.org/styles/${dark ? 'dark' : 'liberty'}`;
+  };
+  const OSM = '<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>';
+  const credit = () => (mapKey
+    ? `<a href="https://www.maptiler.com/copyright/" target="_blank" rel="noopener">MapTiler</a> © ${OSM}`
+    : `<a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a> © ${OSM}`);
   /** The maps label everything in both languages; show just the one being read. */
   const localize = () => {
-    const gl = base.getMaplibreMap();
+    const gl = base?.getMaplibreMap();
+    if (!gl) return;
     const label = state.lang === 'zh'
-      ? ['coalesce', ['get', 'name:nonlatin'], ['get', 'name'], ['get', 'name_en']]
-      : ['coalesce', ['get', 'name_en'], ['get', 'name:latin'], ['get', 'name']];
+      ? ['coalesce', ['get', 'name:zh-Hant'], ['get', 'name:zh'], ['get', 'name:nonlatin'], ['get', 'name'], ['get', 'name_en']]
+      : ['coalesce', ['get', 'name:en'], ['get', 'name_en'], ['get', 'name:latin'], ['get', 'name']];
     for (const layer of gl.getStyle()?.layers ?? []) {
-      if (layer.type === 'symbol' && layer.layout?.['text-field']) gl.setLayoutProperty(layer.id, 'text-field', label);
+      // Road number shields use other fields, and keep them.
+      if (layer.type === 'symbol' && JSON.stringify(layer.layout?.['text-field'] ?? '').includes('name')) gl.setLayoutProperty(layer.id, 'text-field', label);
     }
   };
   const point = (l) => [l.lat, l.lng];
@@ -195,16 +206,27 @@ const mapView = (() => {
   return {
     init() {
       map = L.map('map', { zoomControl: false, attributionControl: true, minZoom: 10, maxZoom: 19 }).setView([22.34, 114.15], 11);
-      base = L.maplibreGL({
-        style: style(), localIdeographFontFamily: '-apple-system, "PingFang HK", "Noto Sans TC", sans-serif',
-        attribution: '<a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>',
-      }).addTo(map);
-      base.getMaplibreMap().on('style.load', localize);
-      darkMode.addEventListener('change', () => base.getMaplibreMap().setStyle(style(), { diff: false }));
       content = L.layerGroup().addTo(map);
       const markZoom = () => $('map').classList.toggle('far', map.getZoom() < 15);
       map.on('zoomend', markZoom);
       markZoom();
+    },
+    /** Draws the base map: MapTiler with a key, and OpenFreeMap without one or once it stops working. */
+    useBase(key) {
+      mapKey = key;
+      base = L.maplibreGL({
+        style: style(), localIdeographFontFamily: '-apple-system, "PingFang HK", "Noto Sans TC", sans-serif', attribution: credit(),
+      }).addTo(map);
+      const gl = base.getMaplibreMap();
+      gl.on('style.load', localize);
+      gl.on('error', ({ error }) => {
+        if (!mapKey || ![401, 403, 429].includes(error?.status)) return;
+        map.attributionControl.removeAttribution(credit());
+        mapKey = null;
+        map.attributionControl.addAttribution(credit());
+        gl.setStyle(style(), { diff: false });
+      });
+      darkMode.addEventListener('change', () => gl.setStyle(style(), { diff: false }));
     },
     setLanguage() { localize(); },
     resize() { map?.invalidateSize(); },
@@ -304,14 +326,15 @@ async function locateOnOpen() {
   if (state.tab === 'plan' && !state.from && !state.to && !state.destination && state.phase === 'idle' && inHongKong(fix)) mapView.follow(fix, 15);
 }
 
-/** The server shares its AI with every visitor; elsewhere, such as GitHub Pages, there is none. */
-async function checkSharedAI() {
+/** What the server shares with every visitor. Elsewhere, such as GitHub Pages, there is no server. */
+async function checkServer() {
+  let shared = null;
   try {
-    const response = await fetch('api/ai');
-    state.sharedAI = response.ok && (await response.json()).available === true;
-  } catch {
-    state.sharedAI = false;
-  }
+    const response = await fetch('api/ai', { signal: AbortSignal.timeout(3000) });
+    if (response.ok) shared = await response.json();
+  } catch { /* The page works without it. */ }
+  mapView.useBase(shared?.mapKey || null);
+  state.sharedAI = shared?.available === true;
   if (state.sharedAI) renderTab();
 }
 
@@ -1294,7 +1317,7 @@ function settingsSheet() {
     h('div', { class: 'card' },
       h('div', { class: 'bold' }, t('安裝到手機', 'Install on your phone')),
       h('div', { class: 'small muted' }, t('iPhone：在 Safari 按分享，再選「加入主畫面」。Android：在 Chrome 選單按「安裝應用程式」。', 'iPhone: in Safari, tap Share, then Add to Home Screen. Android: in the Chrome menu, tap Install app.'))),
-    h('div', { class: 'tiny muted' }, t('路線資料來自 hkbus.app；地圖來自 OpenFreeMap 及 OpenStreetMap；地點搜尋來自政府地理資訊及 OpenStreetMap。', 'Route data from hkbus.app; maps from OpenFreeMap and OpenStreetMap; place search from Government GIS and OpenStreetMap.')),
+    h('div', { class: 'tiny muted' }, t('路線資料來自 hkbus.app；地圖來自 MapTiler、OpenFreeMap 及 OpenStreetMap；地點搜尋來自政府地理資訊及 OpenStreetMap。', 'Route data from hkbus.app; maps from MapTiler, OpenFreeMap and OpenStreetMap; place search from Government GIS and OpenStreetMap.')),
     h('a', { class: 'tiny link', href: 'https://github.com/kevinwentao07-zwt/hktransport', target: '_blank', rel: 'noopener' }, t('GitHub 原始碼（GPL-3.0）', 'Source on GitHub (GPL-3.0)')),
   ];
 }
@@ -1327,20 +1350,36 @@ const sheet = {
     $('grabber').setAttribute('aria-valuetext', name);
   },
   attach() {
-    const grabber = $('grabber'), panel = $('panel');
-    let startY = 0, startHeight = 0, moved = false, lastY = 0, lastTime = 0, speed = 0;
-    grabber.addEventListener('pointerdown', (event) => {
-      grabber.setPointerCapture(event.pointerId);
+    const grabber = $('grabber'), panel = $('panel'), list = $('sheet');
+    let startX = 0, startY = 0, startHeight = 0, lastY = 0, lastTime = 0, speed = 0;
+    let tracking = false, dragging = false, fromGrabber = false, swallowClick = false;
+    // The whole sheet is a handle. Once it is full, the list scrolls instead.
+    panel.addEventListener('pointerdown', (event) => {
+      swallowClick = false;
+      if (event.button !== 0 || !grabber.offsetParent || event.target === document.activeElement) return;
+      if (this.current === 'full' && list.contains(event.target)) return;
+      fromGrabber = grabber.contains(event.target);
+      startX = event.clientX;
       startY = lastY = event.clientY;
       lastTime = event.timeStamp;
       startHeight = panel.offsetHeight;
-      moved = false;
       speed = 0;
-      panel.classList.add('dragging');
+      tracking = true;
+      dragging = false;
     });
-    grabber.addEventListener('pointermove', (event) => {
-      if (!panel.classList.contains('dragging')) return;
-      moved ||= Math.abs(event.clientY - startY) > 4;
+    panel.addEventListener('pointermove', (event) => {
+      if (!tracking) return;
+      if (!dragging) {
+        const across = Math.abs(event.clientX - startX), along = Math.abs(event.clientY - startY);
+        if (Math.max(across, along) <= 6) return;
+        if (across > along) { // A sideways swipe belongs to whatever is under the finger.
+          tracking = false;
+          return;
+        }
+        dragging = true;
+        panel.setPointerCapture(event.pointerId);
+        panel.classList.add('dragging');
+      }
       const elapsed = event.timeStamp - lastTime;
       if (elapsed > 0) speed = (lastY - event.clientY) / elapsed; // Pixels per ms; up is positive.
       lastY = event.clientY;
@@ -1351,19 +1390,29 @@ const sheet = {
       this.apply(height);
     });
     const finish = () => {
-      if (!panel.classList.contains('dragging')) return;
+      if (!tracking) return;
+      tracking = false;
+      const order = ['peek', 'half', 'full'], index = order.indexOf(this.current);
+      if (!dragging) {
+        if (fromGrabber) this.snap(order[(index + 1) % order.length]); // A tap steps through the sizes.
+        return;
+      }
       panel.classList.remove('dragging');
+      swallowClick = true;
       const heights = this.heights(), height = panel.offsetHeight;
-      const order = ['peek', 'half', 'full'];
-      // A tap steps through the sizes; a drag lands on the nearest one.
       const nearest = order.reduce((best, key) => (Math.abs(heights[key] - height) < Math.abs(heights[best] - height) ? key : best));
       // A quick flick moves on a step, wherever the finger let go.
-      const flicked = Math.abs(speed) > 0.5 ? order[Math.max(0, Math.min(2, order.indexOf(this.current) + Math.sign(speed)))] : nearest;
-      const next = moved ? flicked : order[(order.indexOf(this.current) + 1) % order.length];
-      this.snap(next);
+      this.snap(Math.abs(speed) > 0.5 ? order[Math.max(0, Math.min(2, index + Math.sign(speed)))] : nearest);
     };
-    grabber.addEventListener('pointerup', finish);
-    grabber.addEventListener('pointercancel', finish);
+    panel.addEventListener('pointerup', finish);
+    panel.addEventListener('pointercancel', finish);
+    // Letting go of a drag over a button doesn't press it.
+    panel.addEventListener('click', (event) => {
+      if (!swallowClick) return;
+      swallowClick = false;
+      event.preventDefault();
+      event.stopPropagation();
+    }, true);
     grabber.addEventListener('keydown', (event) => {
       const order = ['peek', 'half', 'full'], index = order.indexOf(this.current);
       if (event.key === 'ArrowUp') this.snap(order[Math.min(2, index + 1)]);
@@ -1483,7 +1532,7 @@ $('locate').addEventListener('click', async () => {
   mapView.follow(fix, 15);
 });
 locateOnOpen();
-checkSharedAI();
+checkServer();
 loadDB();
 setInterval(() => { if (state.tab === 'saved') renderSheet(); }, 30_000);
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

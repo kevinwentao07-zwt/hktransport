@@ -75,6 +75,14 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.post({'task': 'chat', 'message': 'x'})[0], 429)
         self.assertEqual(self.post({'task': 'chat', 'message': 'x'}, visitor='2.2.2.2')[0], 200)
 
+    def test_status_shares_the_map_key_but_not_the_ai_key(self):
+        os.environ['MAPTILER_KEY'] = 'map-key'
+        connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port)
+        connection.request('GET', '/api/ai')
+        text = connection.getresponse().read().decode()
+        self.assertEqual(json.loads(text), {'available': True, 'mapKey': 'map-key'})
+        self.assertNotIn(SECRET, text)
+
     def test_upstream_errors_reveal_nothing(self):
         def fail(system, message):
             raise urllib.error.HTTPError('u', 401, f'bad key {SECRET}', {}, None)

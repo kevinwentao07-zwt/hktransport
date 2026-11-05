@@ -3,7 +3,7 @@
 The phone version: a static page, published at <https://kevinwentao07-zwt.github.io/hktransport/>.
 
 Every data source allows direct browser calls, so only the AI goes through a server:
-route data from hkbus.app, arrivals from the operators, maps from OpenFreeMap, place
+route data from hkbus.app, arrivals from the operators, maps from MapTiler with a key and OpenFreeMap without one, place
 search from the Government, shops from OpenStreetMap's Photon, and AI from DeepSeek.
 On your own server, `server/ai_proxy.py` holds the DeepSeek key and every visitor can use the AI.
 Without it, as on GitHub Pages, riders add their own key in Settings.
@@ -25,7 +25,8 @@ python3 -m http.server 8642 --directory web
 
 To publish to your own server, put `DEPLOY_HOST`, `DEPLOY_KEY` and `DEPLOY_DOMAIN` in `.env.deploy`
 (ignored by git) and run `Deploy web.command`. Run `Set AI key.command` once to put the DeepSeek key
-on the server. It never goes into the repository or the web folder.
+on the server. It never goes into the repository or the web folder. Run `Set map key.command` to add a
+MapTiler key. Browsers can see that key, so limit it to your domain in the MapTiler account.
 
 To publish to GitHub Pages, push `web/` to the `gh-pages` branch:
 

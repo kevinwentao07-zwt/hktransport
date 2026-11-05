@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 ExecStart=/usr/bin/python3 -I /opt/hktransport-ai/ai_proxy.py
 EnvironmentFile=-/etc/hktransport/ai.env
+EnvironmentFile=-/etc/hktransport/map.env
 DynamicUser=yes
 Restart=on-failure
 RestartSec=3
