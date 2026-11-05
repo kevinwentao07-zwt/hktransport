@@ -1,5 +1,5 @@
 // Keeps the route search off the main thread so the page stays responsive.
-import { buildNetwork, plan } from './transit.js';
+import { buildNetwork, plan } from './transit.js?v=dev';
 
 let network = null;
 

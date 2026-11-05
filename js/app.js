@@ -3,10 +3,10 @@ import {
   OP_COLORS, OP_LABELS, MODES, buildStopIndex, exactSite, instruction, journeyID, journeyPath, lineColor, lineName,
   nameText, normalizeDB, partialSite, primaryMode, progressAt, retime, rides, score, searchRoutes, siteHasMode, stopName, stopsNear,
   totalMinutes, transfers, walkingMeters,
-} from './transit.js';
-import { fetchETA, liveArrivalCache } from './eta.js';
-import { chatMessage, deepSeek, isCurrentLocation, normalizedOrigin, parseFollowUp, parseWish, searchMessage } from './ai.js';
-import { cleanArea, districtAt, inHongKong, isNearby, lookupPlace, photonSearch, verifyPlaces, withinArea } from './places.js';
+} from './transit.js?v=dev';
+import { fetchETA, liveArrivalCache } from './eta.js?v=dev';
+import { chatMessage, deepSeek, isCurrentLocation, normalizedOrigin, parseFollowUp, parseWish, searchMessage } from './ai.js?v=dev';
+import { cleanArea, districtAt, inHongKong, isNearby, lookupPlace, photonSearch, verifyPlaces, withinArea } from './places.js?v=dev';
 
 // MARK: Storage
 
@@ -75,6 +75,43 @@ function h(tag, props = {}, ...children) {
   return element;
 }
 const $ = (id) => document.getElementById(id);
+
+const ICONS = {
+  route: ['M6 19a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z', 'M18 10a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z', 'M8.5 16.5H15a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h6.5'],
+  pin: ['M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21Z', 'M12 12a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z'],
+  bus: ['M6 17V6.5A2.5 2.5 0 0 1 8.5 4h7A2.5 2.5 0 0 1 18 6.5V17a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1Z', 'M6 12h12', 'M8.5 18v2', 'M15.5 18v2', 'M9 15h.01', 'M15 15h.01'],
+  star: ['M12 3.5l2.6 5.3 5.9.9-4.2 4.1 1 5.8-5.3-2.8-5.3 2.8 1-5.8-4.2-4.1 5.9-.9L12 3.5Z'],
+  settings: ['M4 7h10', 'M18 7h2', 'M4 17h2', 'M10 17h10', 'M16 9.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z', 'M8 19.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z'],
+  mic: ['M12 15a3.5 3.5 0 0 0 3.5-3.5v-5a3.5 3.5 0 0 0-7 0v5A3.5 3.5 0 0 0 12 15Z', 'M5.5 11.5a6.5 6.5 0 0 0 13 0', 'M12 18v3'],
+  stop: ['M7 7h10v10H7z'],
+  send: ['M12 19V5', 'M6 11l6-6 6 6'],
+  search: ['M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14Z', 'M20 20l-3.8-3.8'],
+  swap: ['M8 4v15', 'M4 15l4 4 4-4', 'M16 20V5', 'M12 9l4-4 4 4'],
+  locate: ['M12 18a6 6 0 1 0 0-12 6 6 0 0 0 0 12Z', 'M12 3v3', 'M12 18v3', 'M3 12h3', 'M18 12h3', 'M12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z'],
+  walk: ['M13 5.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z', 'M9 21l2.5-6.5', 'M16 21l-2.5-6-1-5', 'M7 12l1.5-3.5 4-1.5 2.5 3.5 2.5 1'],
+  close: ['M6 6l12 12', 'M18 6L6 18'],
+  down: ['M6 9l6 6 6-6'],
+  up: ['M6 15l6-6 6 6'],
+  next: ['M9 6l6 6-6 6'],
+  back: ['M15 6l-6 6 6 6'],
+  spark: ['M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z', 'M19 16l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7.7-2Z'],
+  navigate: ['M12 3l7 18-7-4-7 4 7-18Z'],
+};
+
+function icon(key, size = 20, solid = false) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', `icon${solid ? ' solid' : ''}`);
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', size);
+  svg.setAttribute('height', size);
+  svg.setAttribute('aria-hidden', 'true');
+  for (const d of ICONS[key]) {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', d);
+    svg.append(path);
+  }
+  return svg;
+}
 const clear = (element, ...children) => element.replaceChildren(...children.flat(Infinity).filter(Boolean));
 const distanceText = (m) => (m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(1)} km`);
 const clock = (ms) => new Date(ms).toLocaleTimeString(state.lang === 'zh' ? 'zh-HK' : 'en-HK', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Hong_Kong' });
@@ -121,8 +158,19 @@ function historyBar(box, pick) {
 // MARK: Map
 
 const mapView = (() => {
-  let map, content, labels;
-  const tile = (path) => `https://mapapi.geodata.gov.hk/gs/api/v1.0.0/xyz/${path}/wgs84/{z}/{x}/{y}.png`;
+  let map, content, base;
+  const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
+  const style = () => `https://tiles.openfreemap.org/styles/${darkMode.matches ? 'dark' : 'liberty'}`;
+  /** The maps label everything in both languages; show just the one being read. */
+  const localize = () => {
+    const gl = base.getMaplibreMap();
+    const label = state.lang === 'zh'
+      ? ['coalesce', ['get', 'name:nonlatin'], ['get', 'name'], ['get', 'name_en']]
+      : ['coalesce', ['get', 'name_en'], ['get', 'name:latin'], ['get', 'name']];
+    for (const layer of gl.getStyle()?.layers ?? []) {
+      if (layer.type === 'symbol' && layer.layout?.['text-field']) gl.setLayoutProperty(layer.id, 'text-field', label);
+    }
+  };
   const point = (l) => [l.lat, l.lng];
   const pin = (html, cls, color) => {
     const element = document.createElement('div');
@@ -134,30 +182,36 @@ const mapView = (() => {
   return {
     init() {
       map = L.map('map', { zoomControl: false, attributionControl: true, minZoom: 10, maxZoom: 19 }).setView([22.34, 114.15], 11);
-      L.tileLayer(tile('basemap'), {
-        maxZoom: 19, attribution: '<a href="https://portal.csdi.gov.hk" target="_blank" rel="noopener">© 地政總署 Lands Department</a>',
+      base = L.maplibreGL({
+        style: style(), localIdeographFontFamily: '-apple-system, "PingFang HK", "Noto Sans TC", sans-serif',
+        attribution: '<a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>',
       }).addTo(map);
-      labels = L.tileLayer(tile(`label/hk/${state.lang === 'zh' ? 'tc' : 'en'}`), { maxZoom: 19 });
-      // Areas with no text have no tile, so Leaflet would keep the giant blurred parent on screen.
-      labels._retainParent = () => false;
-      labels.addTo(map);
+      base.getMaplibreMap().on('style.load', localize);
+      darkMode.addEventListener('change', () => base.getMaplibreMap().setStyle(style(), { diff: false }));
       content = L.layerGroup().addTo(map);
       const markZoom = () => $('map').classList.toggle('far', map.getZoom() < 15);
       map.on('zoomend', markZoom);
       markZoom();
     },
-    setLanguage() { labels?.setUrl(tile(`label/hk/${state.lang === 'zh' ? 'tc' : 'en'}`)); },
+    setLanguage() { localize(); },
     resize() { map?.invalidateSize(); },
     clear() { content?.clearLayers(); },
     fit(points, maxZoom = 16) {
       if (!points.length) return;
-      map.fitBounds(L.latLngBounds(points.map(point)).pad(0.15), { maxZoom, animate: false });
+      // Frame the part of the map the search card and panel leave uncovered.
+      const wide = window.matchMedia('(min-width: 820px)').matches;
+      const top = ($('top').offsetHeight || 0) + 24;
+      map.fitBounds(L.latLngBounds(points.map(point)), {
+        maxZoom, animate: false,
+        paddingTopLeft: [wide ? 440 : 24, wide ? 30 : top],
+        paddingBottomRight: [wide ? 30 : 24, wide ? 30 : sheet.coveredHeight() + 24],
+      });
     },
     home() { map?.setView([22.34, 114.15], 11); },
     follow(location) { map.setView(point(location), Math.max(map.getZoom(), 16)); },
     ends(from, to) {
-      if (from) L.marker(point(from.location), { icon: pin('●', 'pin', '#35c759'), title: from.name }).addTo(content);
-      if (to) L.marker(point(to.location), { icon: pin('⚑', 'pin', '#ff453a'), title: to.name }).addTo(content);
+      if (from) L.marker(point(from.location), { icon: pin('', 'pin start'), title: from.name }).addTo(content);
+      if (to) L.marker(point(to.location), { icon: pin('', 'pin end', '#ff3b30'), title: to.name, zIndexOffset: 500 }).addTo(content);
     },
     path(path) {
       // A few station names always fit; a long bus route's only fit up close.
@@ -184,7 +238,7 @@ const mapView = (() => {
     },
     numbered(suggestions, choose) {
       suggestions.forEach((suggestion, index) => {
-        L.marker(point(suggestion.place.location), { icon: pin(String(index + 1), 'pin', '#ff9f0a'), title: suggestion.place.name })
+        L.marker(point(suggestion.place.location), { icon: pin(String(index + 1), 'pin', '#007aff'), title: suggestion.place.name })
           .on('click', () => choose(suggestion)).addTo(content);
       });
     },
@@ -220,7 +274,7 @@ function getFix(refresh = false) {
 // MARK: Data
 
 const DB_SOURCES = ['https://data.hkbus.app/routeFareList.min.json', 'https://hkbus.github.io/hk-bus-crawling/routeFareList.min.json'];
-const worker = new Worker(new URL('./planner.worker.js', import.meta.url), { type: 'module' });
+const worker = new Worker(new URL('./planner.worker.js?v=dev', import.meta.url), { type: 'module' });
 let requestID = 0;
 const pending = new Map();
 worker.onmessage = ({ data }) => {
@@ -506,6 +560,7 @@ async function startNavigation(journey) {
     renderNavBanner();
   }, { enableHighAccuracy: true, maximumAge: 3_000, timeout: 20_000 }) ?? null;
   try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* Screen may dim; navigation still works. */ }
+  sheet.snap('peek');
   renderSheet();
   renderNavBanner();
 }
@@ -531,9 +586,9 @@ function renderNavBanner() {
   const text = issue === 'denied' ? t('導航需要定位權限，請在瀏覽器設定開啟。', 'Navigation needs Location access. Turn it on in your browser settings.')
     : !progress ? (issue ? t('暫時未能定位，稍後會再試。', "Can't find you right now. Still trying.") : t('正在取得你的位置…', 'Finding your location…'))
       : instruction(path, progress, state.lang, name);
-  $('map').append(h('div', { id: 'nav-banner', class: 'nav-banner' },
+  $('app').append(h('div', { id: 'nav-banner', class: 'nav-banner' }, icon('navigate', 20, true),
     h('span', { class: 'grow' }, text),
-    h('button', { class: 'primary', onclick: () => { stopNavigation(); renderSheet(); drawMap(); fitPlanMap(); } }, progress?.hasArrived ? t('完成', 'Done') : t('結束', 'End'))));
+    h('button', { onclick: () => { stopNavigation(); renderSheet(); drawMap(); fitPlanMap(); } }, progress?.hasArrived ? t('完成', 'Done') : t('結束', 'End'))));
 }
 
 // MARK: Voice
@@ -572,8 +627,8 @@ function toggleSpeech() {
 function renderChatControls() {
   const mic = $('mic');
   if (mic) {
-    mic.textContent = state.listening ? '■' : '🎤';
-    mic.style.color = state.listening ? 'var(--red)' : '';
+    clear(mic, icon(state.listening ? 'stop' : 'mic', 20, state.listening));
+    mic.style.color = state.listening ? 'var(--danger)' : '';
   }
   const input = $('chat-input');
   if (input) input.placeholder = chatPrompt();
@@ -679,7 +734,7 @@ function planTo(site) {
 // MARK: Arrival widgets
 
 function etaWidget(route, seq, op) {
-  const root = h('div', { class: 'eta-grid' }, h('div', { class: 'row small muted' }, h('span', { class: 'spinner' }), t('查詢中…', 'Loading…')));
+  const root = h('div', { class: 'eta-grid' }, h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('查詢中…', 'Loading…')));
   fetchETA(route, seq, state.db, state.lang, op).then((etas) => {
     const now = Date.now(), timed = etas.filter((eta) => eta.date != null && eta.date >= now - 60_000).slice(0, 2);
     if (!timed.length) {
@@ -690,7 +745,7 @@ function etaWidget(route, seq, op) {
       const minutes = Math.max(0, Math.floor((eta.date - now) / 60_000));
       return h('div', { class: 'eta-box' },
         h('div', { class: 'tiny muted' }, index ? t('第二班', 'Then') : t('下一班', 'Next')),
-        h('div', { class: 'bold' }, minutes ? t(`${minutes} 分鐘`, `${minutes} min`) : t('即到', 'Now')),
+        h('div', { class: 'when' }, minutes ? t(`${minutes} 分鐘`, `${minutes} min`) : t('即到', 'Now')),
         h('div', { class: 'tiny muted ellipsis' }, nameText(eta.remark, state.lang) || clock(eta.date)));
     }));
   }).catch(() => clear(root, h('div', { class: 'notice' }, t('未能取得到站時間', "Couldn't get arrivals"))));
@@ -703,12 +758,19 @@ function toggleSaved(key, seq, op) {
   store.set('saved', state.saved);
 }
 function starButton(key, seq, op) {
-  const button = h('button', { class: 'icon-button', 'aria-label': t('收藏', 'Save') }, isSaved(key, seq, op) ? '★' : '☆');
+  const draw = () => {
+    const saved = isSaved(key, seq, op);
+    button.classList.toggle('on', saved);
+    button.setAttribute('aria-pressed', String(saved));
+    clear(button, icon('star', 20, saved));
+  };
+  const button = h('button', { class: 'icon-button', 'aria-label': t('收藏', 'Save') });
   button.addEventListener('click', (event) => {
     event.stopPropagation();
     toggleSaved(key, seq, op);
-    button.textContent = isSaved(key, seq, op) ? '★' : '☆';
+    draw();
   });
+  draw();
   return button;
 }
 
@@ -752,7 +814,7 @@ function renderChatHistory(show) {
 }
 
 function renderPlanTop() {
-  const place = (field, dot, placeholder, trailing) => h('label', { class: 'field' }, h('span', { class: `dot${dot}` }),
+  const place = (field, placeholder, trailing) => h('label', { class: 'place' },
     h('input', {
       id: `${field}-input`, value: state[field], placeholder, enterkeyhint: 'search', autocomplete: 'off',
       oninput: (event) => { state[field] = event.target.value; },
@@ -761,16 +823,18 @@ function renderPlanTop() {
       onkeydown: (event) => { if (event.key === 'Enter') search(); },
     }), trailing);
   clear($('top'),
-    h('div', { class: 'row' },
-      h('div', { class: 'grow', style: 'display:flex;flex-direction:column;gap:6px' },
-        place('origin', '', t('我的位置', 'My location'), h('button', {
-          class: 'icon-button', 'aria-label': t('由我的位置出發', 'Start from my location'),
+    h('div', { class: 'search-card' },
+      h('div', { class: 'places' },
+        h('div', { class: 'rail' }, h('i'), h('b'), h('i', { class: 'end' })),
+        place('origin', t('我的位置', 'My location'), h('button', {
+          class: 'icon-button on', 'aria-label': t('由我的位置出發', 'Start from my location'),
           onclick: (event) => { event.preventDefault(); state.origin = ''; syncPlaceInputs(); getFix(true); },
-        }, '◎')),
-        place('destination', ' red', t('要去哪裡？', 'Where to?'))),
-      h('div', { style: 'display:flex;flex-direction:column;gap:6px;align-items:center' },
-        h('button', { class: 'icon-button', 'aria-label': t('對調起點及目的地', 'Swap start and destination'), onclick: swapEnds }, '⇅'),
-        h('button', { class: 'primary', onclick: search }, t('搜尋', 'Search')))),
+        }, icon('locate', 19))),
+        h('hr'),
+        place('destination', t('要去哪裡？', 'Where to?'))),
+      h('div', { class: 'stack', style: 'align-items:center' },
+        h('button', { class: 'icon-button', 'aria-label': t('對調起點及目的地', 'Swap start and destination'), onclick: swapEnds }, icon('swap', 19)),
+        h('button', { class: 'go', 'aria-label': t('搜尋', 'Search'), onclick: search }, icon('search', 19)))),
     h('div', { id: 'place-history' }));
 }
 
@@ -778,52 +842,59 @@ function journeyCard(journey) {
   const id = journeyID(journey), isOpen = state.expanded === id, isNavigating = state.nav?.id === id;
   const shown = journey.legs.filter((leg) => leg.type === 'ride' || leg.minutes >= 0.5);
   const changes = transfers(journey);
-  return h('div', { class: 'card' },
+  const arrive = clock(journey.departure + totalMinutes(journey) * 60_000);
+  return h('div', { class: `card${isOpen ? ' open' : ''}` },
     h('button', {
-      class: 'tap', onclick: () => {
+      class: 'tap', 'aria-expanded': String(isOpen), onclick: () => {
         state.expanded = isOpen ? null : id;
         renderSheet();
         drawMap();
         fitPlanMap();
       },
     },
-      h('div', { class: 'row' },
-        h('span', { class: 'big' }, Math.round(totalMinutes(journey))),
-        h('span', { class: 'small muted grow' }, t(`分鐘 · 到達 ${clock(journey.departure + totalMinutes(journey) * 60_000)}`, `min · arrive ${clock(journey.departure + totalMinutes(journey) * 60_000)}`)),
-        rides(journey).some((ride) => ride.liveDeparture) && h('span', { class: 'tiny green' }, t('實時', 'Live')),
-        h('span', { class: 'muted' }, isOpen ? '⌃' : '⌄')),
-      h('div', { class: 'chips', style: 'margin-top:6px' }, shown.flatMap((leg, index) => [
-        index > 0 && h('span', { class: 'muted tiny' }, '›'),
-        leg.type === 'walk' ? h('span', { class: 'small muted' }, `🚶${Math.max(1, Math.round(leg.minutes))}`) : badge(leg.op, leg.route),
+      h('div', { class: 'row', style: 'align-items:baseline' },
+        h('span', { class: 'minutes' }, Math.round(totalMinutes(journey))),
+        h('span', { class: 'small muted' }, t('分鐘', 'min')),
+        h('span', { class: 'grow' }),
+        rides(journey).some((ride) => ride.liveDeparture) && h('span', { class: 'row tiny live bold', style: 'gap:6px' }, h('i', { class: 'pulse' }), t('實時', 'Live')),
+        h('span', { class: 'small muted' }, t(`${arrive} 到達`, `Arrive ${arrive}`))),
+      h('div', { class: 'chips', style: 'margin-top:9px' }, shown.flatMap((leg, index) => [
+        index > 0 && icon('next', 13),
+        leg.type === 'walk' ? h('span', { class: 'walk' }, icon('walk', 15), Math.max(1, Math.round(leg.minutes))) : badge(leg.op, leg.route),
       ])),
-      h('div', { class: 'tiny muted', style: 'margin-top:5px' }, `${changes ? t(`轉 ${changes} 次`, `${changes} change${changes > 1 ? 's' : ''}`) : t('直達', 'Direct')} · ${t(`步行 ${Math.round(walkingMeters(journey))} 米`, `walk ${Math.round(walkingMeters(journey))} m`)}`)),
-    isOpen && h('div', { class: 'divider' }),
-    isOpen && journey.legs.map(legDetail),
+      h('div', { class: 'tiny muted', style: 'margin-top:7px' }, `${changes ? t(`轉 ${changes} 次`, `${changes} change${changes > 1 ? 's' : ''}`) : t('直達', 'Direct')} · ${t(`步行 ${Math.round(walkingMeters(journey))} 米`, `walk ${Math.round(walkingMeters(journey))} m`)}`)),
+    isOpen && h('div', { class: 'timeline' }, journey.legs.map(legDetail)),
     isOpen && h('button', {
-      class: `primary wide ${isNavigating ? 'danger' : 'blue'}`,
+      class: `primary wide${isNavigating ? ' danger' : ''}`,
       onclick: () => { if (isNavigating) { stopNavigation(); renderSheet(); drawMap(); fitPlanMap(); } else { stopNavigation(); startNavigation(journey); } },
-    }, isNavigating ? t('結束導航', 'End navigation') : t('開始導航', 'Start navigation')));
+    }, icon(isNavigating ? 'stop' : 'navigate', 18, true), isNavigating ? t('結束導航', 'End navigation') : t('開始導航', 'Start navigation')));
 }
 
 function legDetail(leg) {
   if (leg.type === 'walk') {
     const minutes = Math.max(1, Math.round(leg.minutes)), target = leg.to ? name(leg.to) : t('目的地', 'destination');
-    return h('div', { class: 'small muted' }, t(`🚶 步行約 ${minutes} 分鐘（${Math.round(leg.meters)} 米）到 ${target}`, `🚶 Walk about ${minutes} min (${Math.round(leg.meters)} m) to ${target}`));
+    return h('div', { class: 'leg walking' }, h('div', { class: 'track' }),
+      h('div', { class: 'body small muted' }, t(`步行約 ${minutes} 分鐘（${Math.round(leg.meters)} 米）到 ${target}`, `Walk about ${minutes} min (${Math.round(leg.meters)} m) to ${target}`)));
   }
   const wait = Math.round(leg.waitMinutes), platform = leg.livePlatform ? ` · ${nameText(leg.livePlatform, state.lang)}` : '';
   const when = !leg.liveDeparture ? t(`估算：等候約 ${wait} 分鐘（暫無實時資料）`, `Estimate: about ${wait} min wait (no live data)`)
     : leg.isProjected ? t(`實時推算：約 ${clock(leg.liveDeparture)} 開出（等候約 ${wait} 分鐘）`, `Projected from live: about ${clock(leg.liveDeparture)} (${wait} min wait)`) + platform
       : t(`實時：${clock(leg.liveDeparture)} 開出（等候約 ${wait} 分鐘）`, `Live: departs ${clock(leg.liveDeparture)} (${wait} min wait)`) + platform;
-  return h('div', { class: 'row', style: 'align-items:flex-start' }, badge(leg.op, leg.route),
-    h('div', { class: 'grow' },
-      h('div', { class: 'small bold' }, t(`${name(leg.boardStopID)} 上車 · 往 ${leg.dest.zh}`, `Board at ${name(leg.boardStopID)} · to ${leg.dest.en}`)),
-      h('div', { class: `tiny ${leg.liveDeparture ? 'green' : 'muted'}` }, when),
-      h('div', { class: 'small muted' }, t(`${name(leg.alightStopID)} 落車 · ${leg.alightPosition - leg.boardPosition} 個站 · 約 ${Math.round(leg.rideMinutes)} 分鐘`, `Alight at ${name(leg.alightStopID)} · ${leg.alightPosition - leg.boardPosition} stops · about ${Math.round(leg.rideMinutes)} min`))));
+  const stops = leg.alightPosition - leg.boardPosition, element = h('div', { class: 'leg' },
+    h('div', { class: 'track' }, h('i', { class: 'node' })),
+    h('div', { class: 'body' },
+      h('div', { class: 'row' }, h('span', { class: 'bold ellipsis' }, name(leg.boardStopID)), badge(leg.op, leg.route)),
+      h('div', { class: 'tiny muted' }, t(`往 ${leg.dest.zh}`, `To ${leg.dest.en}`)),
+      h('div', { class: `tiny ${leg.liveDeparture ? 'live' : 'muted'}` }, when),
+      h('div', { class: 'tiny muted', style: 'margin-top:4px' }, t(`${stops} 個站 · 約 ${Math.round(leg.rideMinutes)} 分鐘`, `${stops} stops · about ${Math.round(leg.rideMinutes)} min`)),
+      h('div', { class: 'bold small', style: 'margin-top:4px' }, t(`${name(leg.alightStopID)} 下車`, `Get off at ${name(leg.alightStopID)}`))));
+  element.style.setProperty('--leg', lineColor(leg.op, leg.route));
+  return element;
 }
 
 function suggestionList({ wish, areaName, suggestions }) {
   return [
-    h('div', { class: 'row' }, h('span', { class: 'bold grow' }, t(`${areaName}的${wish.want}：選一個地點`, `${wish.want} around ${areaName}: pick one`)),
+    h('div', { class: 'row' }, h('span', { class: 'title grow' }, t(`${areaName}的${wish.want}`, `${wish.want} around ${areaName}`)),
       h('button', { class: 'link', onclick: () => { state.discovery = { stage: 'asking', wish: { ...wish, area: null } }; renderSheet(); drawMap(); renderBottomStatus(); } }, t('換範圍', 'Change area'))),
     h('div', { class: 'tiny muted' }, suggestions[0]?.isNamedByAI
       ? t('由 AI 推薦，並已在地圖核實。AI 的資料可能過時，出發前請確認仍在營業。', 'Recommended by AI and found on the map. AI knowledge can be out of date, so check before you go.')
@@ -833,7 +904,7 @@ function suggestionList({ wish, areaName, suggestions }) {
         h('div', { class: 'grow' },
           h('div', { class: 'row' }, h('span', { class: 'bold ellipsis grow' }, suggestion.place.name), h('span', { class: 'tiny muted' }, distanceText(suggestion.place.meters))),
           suggestion.place.address && h('div', { class: 'tiny muted ellipsis' }, suggestion.place.address),
-          suggestion.reason && h('div', { class: 'small yellow' }, suggestion.reason))))),
+          suggestion.reason && h('div', { class: 'small ai', style: 'margin-top:3px' }, suggestion.reason))))),
   ];
 }
 
@@ -850,13 +921,13 @@ function planSheet() {
   if (!state.db) {
     items.push(state.dbError
       ? [h('div', { class: 'notice' }, state.dbError), h('button', { class: 'primary', onclick: loadDB }, t('重試', 'Retry'))]
-      : h('div', { class: 'row small muted' }, h('span', { class: 'spinner' }), t('正在載入路線資料…', 'Loading route data…')));
+      : h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('正在載入路線資料…', 'Loading route data…')));
     return items;
   }
-  if (PHASES[state.phase]) items.push(h('div', { class: 'row small muted' }, h('span', { class: 'spinner' }), PHASES[state.phase]()));
+  if (PHASES[state.phase]) items.push(h('div', { class: 'status' }, h('span', { class: 'spinner' }), PHASES[state.phase]()));
   if (state.error) items.push(h('div', { class: 'notice' }, state.error));
   if (state.from && state.to) {
-    items.push(h('div', { class: 'row small bold' }, h('span', { class: 'ellipsis' }, state.from.name), h('span', { class: 'muted' }, '→'), h('span', { class: 'ellipsis grow' }, state.to.name)));
+    items.push(h('div', { class: 'row title' }, h('span', { class: 'ellipsis' }, state.from.name), icon('next', 16), h('span', { class: 'ellipsis grow' }, state.to.name)));
   }
   if (state.journeys.length) {
     items.push(segments([['fastest', t('最快', 'Fastest')], ['fewerTransfers', t('少轉車', 'Fewer changes')], ['lessWalking', t('少行路', 'Less walking')]], state.preference, (preference) => {
@@ -867,16 +938,17 @@ function planSheet() {
   }
   if (state.discovery?.stage === 'choosing') {
     if (state.journeys.length || state.phase !== 'idle') {
-      items.push(h('button', { class: 'link', style: 'text-align:left', onclick: backToSuggestions }, t('‹ 返回推薦地點', '‹ Back to recommendations')));
+      items.push(h('button', { class: 'back', onclick: backToSuggestions }, icon('back', 17), t('返回推薦地點', 'Back to recommendations')));
     } else {
       items.push(suggestionList(state.discovery));
     }
   }
   items.push(state.journeys.map(journeyCard));
   if (!state.journeys.length && state.phase === 'idle' && !state.error && !state.discovery) {
-    items.push(h('div', { class: 'small muted' }, t(
-      '在上方輸入目的地；起點留空時由你目前的位置出發。也可以在下方用文字或語音告訴 AI，例如「我想吃螺螄粉」。',
-      'Type a destination above; with no start, your current location is used. You can also tell the AI below by text or voice.')));
+    const examples = state.lang === 'zh' ? ['沙田到中環', '去機場不想轉車', '我想吃螺螄粉'] : ['Sha Tin to Central', 'Airport, no transfers'];
+    items.push(h('div', { class: 'title' }, t('今日想去邊？', 'Where to today?')),
+      h('div', { class: 'small muted' }, t('輸入目的地，或者直接告訴 AI。起點留空時由你目前的位置出發。', 'Type a destination, or just tell the AI. With no start, your current location is used.')),
+      h('div', { class: 'examples' }, examples.map((text) => h('button', { onclick: () => { state.chat = text; sendChat(); } }, text))));
   }
   return items;
 }
@@ -889,17 +961,16 @@ function renderBottomStatus() {
   if (wish) {
     const options = (wish.areaOptions.length ? wish.areaOptions : ['旺角', '銅鑼灣', '尖沙咀', '中環']).filter((option) => option !== '附近').slice(0, 4);
     area = h('div', { class: 'area' },
-      h('div', { class: 'row' }, h('span', { class: 'bold yellow grow' }, t(`想找${wish.want}，要在哪裡找？`, `Where should I look for ${wish.want}?`)),
-        h('button', { class: 'icon-button', 'aria-label': t('取消', 'Cancel'), onclick: () => { state.discovery = null; renderBottomStatus(); renderChatControls(); renderSheet(); } }, '✕')),
+      h('div', { class: 'row' }, icon('spark', 17), h('span', { class: 'bold grow' }, t(`想找${wish.want}，要在哪裡找？`, `Where should I look for ${wish.want}?`)),
+        h('button', { 'aria-label': t('取消', 'Cancel'), class: 'muted', onclick: () => { state.discovery = null; renderBottomStatus(); renderChatControls(); renderSheet(); } }, icon('close', 17))),
       h('div', { class: 'choices' },
         h('button', { onclick: () => discover(wish, '附近', false) }, t('附近（本區）', 'Nearby (this district)')),
         options.map((option) => h('button', { onclick: () => discover(wish, option, false) }, option))),
       h('div', { class: 'tiny muted' }, t('或在下方輸入更精確的範圍，例如：朗豪坊附近、要平啲', 'Or type a more exact area below')));
   }
   clear(slot,
-    state.lastChat && h('div', { class: 'tiny muted ellipsis' }, state.lastChat),
-    state.explanation && h('div', { class: 'small yellow' }, `✦ ${state.explanation}`),
-    state.explaining && !state.explanation && h('div', { class: 'small muted' }, t('AI 整理建議中…', 'AI is summarising…')),
+    state.explanation && h('div', { class: 'reply' }, icon('spark', 15), h('span', {}, state.explanation)),
+    state.explaining && !state.explanation && h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('AI 整理建議中…', 'AI is summarising…')),
     state.aiNotice && h('div', { class: 'tiny muted' }, state.aiNotice),
     area);
   renderChatControls();
@@ -909,7 +980,7 @@ function renderPlanBottom() {
   const hasKey = !!store.get('apiKey', '');
   const speechLabels = { 'zh-HK': t('粵語', 'Cantonese'), 'zh-CN': t('普通話', 'Mandarin'), 'en-US': 'English' };
   const speechButton = Recognition && h('button', {
-    class: 'link', onclick: (event) => {
+    class: 'lang', onclick: (event) => {
       const order = Object.keys(speechLabels);
       state.speechLang = order[(order.indexOf(state.speechLang) + 1) % order.length];
       store.set('speechLang', state.speechLang);
@@ -920,7 +991,7 @@ function renderPlanBottom() {
     h('div', { id: 'ai-status', style: 'display:flex;flex-direction:column;gap:4px' }),
     h('div', { id: 'chat-history' }),
     h('div', { class: 'field' },
-      h('span', { class: hasKey ? 'yellow' : 'muted' }, '✦'),
+      h('span', { class: hasKey ? 'ai' : 'muted' }, icon('spark', 18)),
       h('input', {
         id: 'chat-input', value: state.chat, placeholder: chatPrompt(), enterkeyhint: 'send', autocomplete: 'off',
         oninput: (event) => { state.chat = event.target.value; },
@@ -929,9 +1000,9 @@ function renderPlanBottom() {
         onkeydown: (event) => { if (event.key === 'Enter') sendChat(); },
       }),
       speechButton,
-      Recognition && h('button', { id: 'mic', class: 'icon-button', 'aria-label': t('語音輸入', 'Voice input'), onclick: toggleSpeech }, '🎤'),
-      h('button', { class: 'icon-button yellow', 'aria-label': t('傳送', 'Send'), onclick: sendChat }, '↑')),
-    !hasKey && h('button', { class: 'tiny muted', style: 'text-align:left', onclick: () => setTab('settings') }, t('未連接 AI：現時使用基本解析。按此到設定加入 DeepSeek API key。', 'AI not connected: using basic parsing. Tap to add a DeepSeek API key in Settings.')));
+      Recognition && h('button', { id: 'mic', class: 'icon-button', 'aria-label': t('語音輸入', 'Voice input'), onclick: toggleSpeech }, icon('mic', 20)),
+      h('button', { class: 'go', 'aria-label': t('傳送', 'Send'), onclick: sendChat }, icon('send', 19))),
+    !hasKey && h('button', { class: 'tiny muted', style: 'text-align:left;padding:0 6px', onclick: () => setTab('settings') }, t('未連接 AI，現時使用基本解析。到設定加入 key', 'AI not connected, using basic parsing. Add a key in Settings')));
   renderBottomStatus();
 }
 
@@ -939,34 +1010,35 @@ function renderPlanBottom() {
 
 function renderStopsTop() {
   clear($('top'),
-    h('div', { class: 'row' },
-      h('label', { class: 'field' }, h('input', {
-        id: 'stop-input', value: state.stopQuery, placeholder: t('輸入站名或地點，例如：旺角、朗豪坊', 'Stop or place, e.g. Mong Kok'), enterkeyhint: 'search', autocomplete: 'off',
+    h('div', { class: 'search-card single' },
+      h('span', { class: 'muted' }, icon('search', 19)),
+      h('input', {
+        id: 'stop-input', value: state.stopQuery, placeholder: t('站名或地點，例如：旺角、朗豪坊', 'Stop or place, e.g. Mong Kok'), enterkeyhint: 'search', autocomplete: 'off',
         oninput: (event) => { state.stopQuery = event.target.value; },
         onkeydown: (event) => { if (event.key === 'Enter') { event.target.blur(); searchStops(); } },
-      })),
-      h('button', { class: 'icon-button', 'aria-label': t('查看我附近的站點', 'Show stops around me'), onclick: () => searchStops(true) }, '◎'),
-      h('button', { class: 'primary', onclick: () => searchStops() }, t('搜尋', 'Search'))),
+      }),
+      h('button', { class: 'icon-button on', 'aria-label': t('查看我附近的站點', 'Show stops around me'), onclick: () => searchStops(true) }, icon('locate', 20))),
     historyBar('stops', (text) => {
       state.stopQuery = text;
       $('stop-input').value = text;
       searchStops();
-    }),
+    }));
+}
+
+function stopFilters() {
+  return [
     segments([['all', t('全部', 'All')], ['bus', t('巴士', 'Bus')], ['minibus', t('小巴', 'Minibus')], ['mtr', t('港鐵', 'MTR')], ['lightRail', t('輕鐵', 'LRT')]], state.stopMode, (mode) => {
       state.stopMode = mode;
-      renderStopsTop();
       renderSheet();
       drawMap();
     }),
     segments([[300, '300 m'], [500, '500 m'], [1000, '1 km']], state.stopRadius, (radius) => {
       state.stopRadius = radius;
-      renderStopsTop();
-      if (state.stopPlace) {
-        state.stops = stopsNear(siteIndex(), state.stopPlace.location, radius);
-        renderSheet();
-        drawMap();
-      }
-    }));
+      state.stops = state.stopPlace ? stopsNear(siteIndex(), state.stopPlace.location, radius) : [];
+      renderSheet();
+      drawMap();
+    }),
+  ];
 }
 
 const visibleStops = () => state.stops.filter((stop) => siteHasMode(stop.site, state.stopMode));
@@ -974,26 +1046,27 @@ const visibleStops = () => state.stops.filter((stop) => siteHasMode(stop.site, s
 function stopCard(stop, isNearest) {
   const isOpen = state.stopOpen === stop.site.id;
   const numbers = [...new Set(stop.site.visits.map((v) => lineName(v.op, state.db.routes[v.routeKey].route, state.lang)))];
-  return h('div', { class: 'card', id: `stop-${stop.site.id}` },
-    h('button', { class: 'tap', onclick: () => { state.stopOpen = isOpen ? null : stop.site.id; renderSheet(); } },
+  return h('div', { class: `card${isOpen ? ' open' : ''}`, id: `stop-${stop.site.id}` },
+    h('button', { class: 'tap', 'aria-expanded': String(isOpen), onclick: () => { state.stopOpen = isOpen ? null : stop.site.id; renderSheet(); } },
       h('div', { class: 'row' }, h('span', { class: 'bold grow' }, nameText(stop.site.name, state.lang)),
-        h('span', { class: `small ${isNearest ? 'yellow' : 'muted'}` }, distanceText(stop.distance)), h('span', { class: 'muted' }, isOpen ? '⌃' : '⌄')),
+        h('span', { class: `small ${isNearest ? 'live bold' : 'muted'}` }, distanceText(stop.distance)), h('span', { class: 'muted' }, icon(isOpen ? 'up' : 'down', 16))),
       h('div', { class: 'tiny muted ellipsis' }, numbers.slice(0, 8).join(' · ') + (numbers.length > 8 ? ` +${numbers.length - 8}` : ''))),
     isOpen && [
-      h('button', { class: 'primary wide', onclick: () => planTo(stop.site) }, t('規劃路線到這裡', 'Plan a trip here')),
+      h('button', { class: 'primary wide', onclick: () => planTo(stop.site) }, icon('route', 18), t('規劃路線到這裡', 'Plan a trip here')),
       h('div', { class: 'tiny muted' }, t('此站路線 · 點選查看最近兩班', 'Routes at this stop · tap for arrivals')),
       stop.site.visits.filter(MODES[state.stopMode]).map(visitRow),
     ]);
 }
 
 function stopsSheet() {
-  if (!state.db) return h('div', { class: 'row small muted' }, h('span', { class: 'spinner' }), t('正在載入站點資料…', 'Loading stops…'));
+  if (!state.db) return h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('正在載入站點資料…', 'Loading stops…'));
   const stops = visibleStops();
   return [
-    state.stopBusy && h('div', { class: 'row small muted' }, h('span', { class: 'spinner' }), t('搜尋中…', 'Searching…')),
+    state.stopBusy && h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('搜尋中…', 'Searching…')),
     state.stopError && h('div', { class: 'notice' }, state.stopError),
-    state.stopPlace && !state.stopBusy && h('div', { class: 'bold' }, t(`${state.stopPlace.name}附近 ${stops.length} 個站點`, `${stops.length} stops around ${state.stopPlace.name}`)),
-    !state.stopPlace && !state.stopBusy && !state.stopError && h('div', { class: 'small muted' }, t('輸入站名或地點後，附近所有巴士站、小巴站、港鐵及輕鐵站都會顯示在這裡；點開站點可查看路線及到站時間，或直接規劃路線。', 'Search a stop or place to see all stops around it. Open one for routes and arrivals, or to plan a trip there.')),
+    state.stopPlace && !state.stopBusy && [h('div', { class: 'title' }, t(`${state.stopPlace.name}附近 ${stops.length} 個站點`, `${stops.length} stops around ${state.stopPlace.name}`)), stopFilters()],
+    !state.stopPlace && !state.stopBusy && !state.stopError && [h('div', { class: 'title' }, t('附近有咩車？', "What's around here?")),
+      h('div', { class: 'small muted' }, t('輸入站名或地點，查看附近所有巴士、小巴、港鐵及輕鐵站，以及到站時間。', 'Search a stop or place to see every stop around it, with arrivals.'))],
     state.stopPlace && !stops.length && !state.stopBusy && h('div', { class: 'small muted' }, t('此範圍內沒有這類站點，可擴大範圍或改選「全部」。', 'No stops of this kind here. Try a larger radius or All.')),
     stops.map((stop, index) => stopCard(stop, index === 0)),
   ];
@@ -1003,7 +1076,7 @@ function stopsSheet() {
 
 function renderRoutesTop() {
   clear($('top'),
-    h('label', { class: 'field' }, h('input', {
+    h('label', { class: 'search-card single' }, h('span', { class: 'muted' }, icon('search', 19)), h('input', {
       id: 'route-input', value: state.routeQuery, placeholder: t('搜尋路線，例如 1A、960、505', 'Search routes, e.g. 1A, 960, 505'), enterkeyhint: 'search', autocomplete: 'off',
       oninput: (event) => { state.routeQuery = event.target.value; state.routeKey = null; renderSheet(); },
       onkeydown: (event) => { if (event.key === 'Enter') { history.add('routes', state.routeQuery); event.target.blur(); } },
@@ -1017,17 +1090,17 @@ function renderRoutesTop() {
 }
 
 function routesSheet() {
-  if (!state.db) return h('div', { class: 'row small muted' }, h('span', { class: 'spinner' }), t('正在載入路線資料…', 'Loading route data…'));
+  if (!state.db) return h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('正在載入路線資料…', 'Loading route data…'));
   if (state.routeKey) {
     const route = state.db.routes[state.routeKey], op = route.operators[0];
     return [
-      h('button', { class: 'link', style: 'text-align:left', onclick: () => { state.routeKey = null; renderSheet(); } }, t('‹ 返回', '‹ Back')),
+      h('button', { class: 'back', onclick: () => { state.routeKey = null; renderSheet(); } }, icon('back', 17), t('返回', 'Back')),
       h('div', { class: 'row' }, badge(op, route.route), h('span', { class: 'bold' }, `${nameText(route.orig, state.lang)} → ${nameText(route.dest, state.lang)}`)),
       route.stops[op].map((id, seq) => stopRow(route, seq, id, op)),
     ];
   }
   const routes = searchRoutes(state.db, state.routeQuery);
-  if (!state.routeQuery.trim()) return h('div', { class: 'small muted' }, t('輸入路線號碼，查看沿線站點及到站時間，並可按 ☆ 收藏。', 'Type a route number to see its stops and arrivals. Press ☆ to save a stop.'));
+  if (!state.routeQuery.trim()) return [h('div', { class: 'page-title' }, t('路線', 'Routes')), h('div', { class: 'small muted' }, t('輸入路線號碼，查看沿線站點及到站時間。按星號可收藏常用車站。', 'Type a route number to see its stops and arrivals. Press the star to save a stop.'))];
   if (!routes.length) return h('div', { class: 'small muted' }, t('找不到這條路線。', 'No such route.'));
   return routes.map((route) => h('button', {
     class: 'card tap', onclick: () => { history.add('routes', state.routeQuery); state.routeKey = route.key; renderSheet(); $('sheet').scrollTop = 0; },
@@ -1054,18 +1127,19 @@ function stopRow(route, seq, id, op) {
 // MARK: Saved tab
 
 function savedSheet() {
-  if (!state.db) return h('div', { class: 'row small muted' }, h('span', { class: 'spinner' }), t('正在載入…', 'Loading…'));
-  if (!state.saved.length) return h('div', { class: 'small muted' }, t('還沒有收藏。在「路線」或「站點」按 ☆ 加入常用的車站。', 'Nothing saved yet. Press ☆ on the Routes or Stops page.'));
-  return state.saved.flatMap((saved) => {
+  if (!state.db) return h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('正在載入…', 'Loading…'));
+  const heading = h('div', { class: 'page-title' }, t('收藏', 'Saved'));
+  if (!state.saved.length) return [heading, h('div', { class: 'small muted' }, t('還沒有收藏。在「路線」或「站點」按星號，常用車站就會出現在這裡。', 'Nothing saved yet. Press the star on the Routes or Stops page.'))];
+  return [heading, ...state.saved.flatMap((saved) => {
     const route = state.db.routes[saved.routeKey];
     if (!route) return [];
     const id = route.stops[saved.op]?.[saved.seq];
     return [h('div', { class: 'card' },
       h('div', { class: 'row' }, badge(saved.op, route.route),
         h('div', { class: 'grow' }, h('div', { class: 'small bold ellipsis' }, `→ ${nameText(route.dest, state.lang)}`), h('div', { class: 'tiny muted ellipsis' }, name(id))),
-        h('button', { class: 'icon-button', 'aria-label': t('移除', 'Remove'), onclick: () => { toggleSaved(saved.routeKey, saved.seq, saved.op); renderSheet(); } }, '★')),
+        h('button', { class: 'icon-button on', 'aria-label': t('移除', 'Remove'), onclick: () => { toggleSaved(saved.routeKey, saved.seq, saved.op); renderSheet(); } }, icon('star', 20, true))),
       etaWidget(route, saved.seq, saved.op))];
-  });
+  })];
 }
 
 // MARK: Settings tab
@@ -1073,6 +1147,7 @@ function savedSheet() {
 function settingsSheet() {
   const keyInput = h('input', { type: 'password', placeholder: store.get('apiKey', '') ? t('已設定，輸入新 key 以取代', 'Saved. Type a new key to replace it') : t('貼上 DeepSeek API key', 'Paste a DeepSeek API key'), autocomplete: 'off' });
   return [
+    h('div', { class: 'page-title' }, t('設定', 'Settings')),
     h('div', { class: 'card' },
       h('div', { class: 'row' }, h('span', { class: 'grow' }, t('語言', 'Language')),
         segments([['zh', '繁體中文'], ['en', 'English']], state.lang, (lang) => {
@@ -1084,7 +1159,7 @@ function settingsSheet() {
         }))),
     h('div', { class: 'card' },
       h('div', { class: 'bold' }, t('AI 路線助手（DeepSeek）', 'AI assistant (DeepSeek)')),
-      h('label', { class: 'field' }, keyInput),
+      h('label', { class: 'field plain' }, keyInput),
       h('div', { class: 'row' },
         h('button', { class: 'primary', onclick: () => { if (keyInput.value.trim()) { store.set('apiKey', keyInput.value.trim()); renderTab(); } } }, t('儲存', 'Save')),
         store.get('apiKey', '') && h('button', { class: 'link', onclick: () => { store.set('apiKey', ''); renderTab(); } }, t('移除', 'Remove'))),
@@ -1097,16 +1172,82 @@ function settingsSheet() {
     h('div', { class: 'card' },
       h('div', { class: 'bold' }, t('安裝到手機', 'Install on your phone')),
       h('div', { class: 'small muted' }, t('iPhone：在 Safari 按分享，再選「加入主畫面」。Android：在 Chrome 選單按「安裝應用程式」。', 'iPhone: in Safari, tap Share, then Add to Home Screen. Android: in the Chrome menu, tap Install app.'))),
-    h('div', { class: 'tiny muted' }, t('路線資料來自 hkbus.app；地圖來自地政總署；地點搜尋來自政府地理資訊及 OpenStreetMap。', 'Route data from hkbus.app; maps from the Lands Department; place search from Government GIS and OpenStreetMap.')),
+    h('div', { class: 'tiny muted' }, t('路線資料來自 hkbus.app；地圖來自 OpenFreeMap 及 OpenStreetMap；地點搜尋來自政府地理資訊及 OpenStreetMap。', 'Route data from hkbus.app; maps from OpenFreeMap and OpenStreetMap; place search from Government GIS and OpenStreetMap.')),
     h('a', { class: 'tiny link', href: 'https://github.com/kevinwentao07-zwt/hktransport', target: '_blank', rel: 'noopener' }, t('GitHub 原始碼（GPL-3.0）', 'Source on GitHub (GPL-3.0)')),
   ];
 }
 
+// MARK: Bottom sheet
+
+/** The panel over the map: dragged between peek, half and full. */
+const sheet = {
+  current: 'half',
+  heights() {
+    const app = $('app').clientHeight, tabs = $('tabs').offsetHeight;
+    const top = $('top').offsetHeight ? $('top').offsetTop + $('top').offsetHeight + 8 : 0;
+    const peek = $('grabber').offsetHeight + $('bottom').offsetHeight + 56;
+    const full = app - tabs - top;
+    return { peek: Math.min(peek, full), half: Math.max(peek, Math.min(full, Math.round((app - tabs) * 0.5))), full };
+  },
+  measure() {
+    const root = $('app').style;
+    root.setProperty('--tabs-h', `${$('tabs').offsetHeight}px`);
+    root.setProperty('--top-h', `${$('top').offsetHeight}px`);
+    this.apply(this.heights()[$('app').classList.contains('page') ? 'full' : this.current]);
+  },
+  apply(height) {
+    $('app').style.setProperty('--panel-h', `${height}px`);
+  },
+  coveredHeight() {
+    return $('panel').offsetHeight + $('tabs').offsetHeight;
+  },
+  snap(name) {
+    if (!$('app').classList.contains('page') && name !== 'full') this.current = name;
+    if (!$('app').classList.contains('page') && name === 'full') this.current = 'full';
+    this.apply(this.heights()[name]);
+    $('grabber').setAttribute('aria-valuetext', name);
+  },
+  attach() {
+    const grabber = $('grabber'), panel = $('panel');
+    let startY = 0, startHeight = 0, moved = false;
+    grabber.addEventListener('pointerdown', (event) => {
+      grabber.setPointerCapture(event.pointerId);
+      startY = event.clientY;
+      startHeight = panel.offsetHeight;
+      moved = false;
+      panel.classList.add('dragging');
+    });
+    grabber.addEventListener('pointermove', (event) => {
+      if (!panel.classList.contains('dragging')) return;
+      moved ||= Math.abs(event.clientY - startY) > 4;
+      const { peek, full } = this.heights();
+      this.apply(Math.min(full, Math.max(peek, startHeight + startY - event.clientY)));
+    });
+    const finish = () => {
+      if (!panel.classList.contains('dragging')) return;
+      panel.classList.remove('dragging');
+      const heights = this.heights(), height = panel.offsetHeight;
+      const order = ['peek', 'half', 'full'];
+      // A tap steps through the sizes; a drag lands on the nearest one.
+      const next = moved ? order.reduce((best, key) => (Math.abs(heights[key] - height) < Math.abs(heights[best] - height) ? key : best))
+        : order[(order.indexOf(this.current) + 1) % order.length];
+      this.snap(next);
+    };
+    grabber.addEventListener('pointerup', finish);
+    grabber.addEventListener('pointercancel', finish);
+    grabber.addEventListener('keydown', (event) => {
+      const order = ['peek', 'half', 'full'], index = order.indexOf(this.current);
+      if (event.key === 'ArrowUp') this.snap(order[Math.min(2, index + 1)]);
+      if (event.key === 'ArrowDown') this.snap(order[Math.max(0, index - 1)]);
+    });
+  },
+};
+
 // MARK: Rendering
 
 const TABS = [
-  ['plan', '↗', () => t('規劃', 'Plan')], ['stops', '◉', () => t('站點', 'Stops')], ['routes', '☰', () => t('路線', 'Routes')],
-  ['saved', '★', () => t('收藏', 'Saved')], ['settings', '⚙', () => t('設定', 'Settings')],
+  ['plan', 'route', () => t('規劃', 'Plan')], ['stops', 'pin', () => t('站點', 'Stops')], ['routes', 'bus', () => t('路線', 'Routes')],
+  ['saved', 'star', () => t('收藏', 'Saved')], ['settings', 'settings', () => t('設定', 'Settings')],
 ];
 
 function renderSheet() {
@@ -1144,12 +1285,11 @@ function fitPlanMap() {
 }
 
 function renderTab() {
-  clear($('tabs'), TABS.map(([id, glyph, label]) => h('button', {
+  clear($('tabs'), TABS.map(([id, key, label]) => h('button', {
     'aria-current': state.tab === id ? 'page' : null, onclick: () => setTab(id),
-  }, h('span', { class: 'glyph' }, glyph), label())));
+  }, icon(key, 25, state.tab === id && key === 'star'), label())));
   const showsMap = state.tab === 'plan' || state.tab === 'stops';
-  $('map').classList.toggle('hidden', !showsMap);
-  $('app').classList.toggle('no-map', !showsMap);
+  $('app').classList.toggle('page', !showsMap);
   clear($('top'));
   clear($('bottom'));
   if (state.tab === 'plan') {
@@ -1161,6 +1301,8 @@ function renderTab() {
     renderRoutesTop();
   }
   renderSheet();
+  sheet.measure();
+  sheet.snap(showsMap ? sheet.current : 'full');
   mapView.resize();
   drawMap();
   renderNavBanner();
@@ -1175,9 +1317,13 @@ function setTab(tab) {
 }
 
 new ResizeObserver(() => mapView.resize()).observe($('map'));
+new ResizeObserver(() => sheet.measure()).observe($('top'));
+new ResizeObserver(() => sheet.measure()).observe($('bottom'));
+sheet.attach();
 
 mapView.init();
 renderTab();
+mapView.fit([{ lat: 22.2, lng: 113.92 }, { lat: 22.5, lng: 114.3 }], 12);
 loadDB();
 setInterval(() => { if (state.tab === 'saved') renderSheet(); }, 30_000);
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

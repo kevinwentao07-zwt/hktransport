@@ -1,5 +1,5 @@
 // Per-operator arrival fetchers. A port of ETAService.swift.
-import { trainServes } from './transit.js';
+import { trainServes } from './transit.js?v=dev';
 
 const text = (value) => (value == null ? '' : String(value));
 const int = (value) => (value === '' || value == null || Number.isNaN(Number(value)) ? null : Number(value));

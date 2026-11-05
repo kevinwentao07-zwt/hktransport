@@ -1,6 +1,6 @@
 // Finding places: the Government's location search for landmarks and buildings,
 // and Photon (OpenStreetMap) for shops. Nothing here needs an API key.
-import { meters } from './transit.js';
+import { meters } from './transit.js?v=dev';
 
 const HK_BBOX = '113.82,22.13,114.45,22.58';
 export const inHongKong = (l) => l.lat >= 22.13 && l.lat <= 22.58 && l.lng >= 113.82 && l.lng <= 114.45;

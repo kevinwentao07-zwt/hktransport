@@ -4,8 +4,8 @@ The phone version: a static page with no server, published at
 <https://kevinwentao07-zwt.github.io/hktransport/>.
 
 Every data source allows direct browser calls, so nothing needs proxying:
-route data from hkbus.app, arrivals from the operators, maps and place search
-from the Government, shops from OpenStreetMap's Photon, and AI from DeepSeek
+route data from hkbus.app, arrivals from the operators, maps from OpenFreeMap, place
+search from the Government, shops from OpenStreetMap's Photon, and AI from DeepSeek
 with the rider's own key.
 
 | File | Purpose |
