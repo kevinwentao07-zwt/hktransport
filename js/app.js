@@ -5,7 +5,7 @@ import {
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache } from './eta.js?v=dev';
-import { chatMessage, deepSeek, isCurrentLocation, normalizedOrigin, parseFollowUp, parseWish, searchMessage } from './ai.js?v=dev';
+import { chatMessage, deepSeek, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseWish, searchMessage } from './ai.js?v=dev';
 import { cleanArea, districtAt, inHongKong, isNearby, lookupPlace, photonSearch, verifyPlaces, withinArea } from './places.js?v=dev';
 
 // MARK: Storage
@@ -56,7 +56,8 @@ const t = (zh, en) => (state.lang === 'zh' ? zh : en);
 const name = (id) => stopName(id, state.db, state.lang);
 const client = () => {
   const key = store.get('apiKey', '');
-  return key ? deepSeek(key, store.get('model', '') || undefined) : null;
+  if (key) return deepSeek(key, store.get('model', '') || undefined);
+  return state.sharedAI ? sharedAI() : null;
 };
 const siteIndex = () => (state.index ??= buildStopIndex(state.db));
 
@@ -221,7 +222,12 @@ const mapView = (() => {
       else map.flyToBounds(bounds, { ...options, duration: 0.9, easeLinearity: 0.2 });
       flying = true;
     },
-    follow(location, zoom = 16) { map.flyTo(point(location), Math.max(map.getZoom(), zoom), { duration: calm.matches ? 0 : 0.8 }); },
+    follow(location, zoom = 16) {
+      // Centred in the part of the map the sheet leaves showing.
+      const level = Math.max(map.getZoom(), zoom);
+      const target = map.unproject(map.project(point(location), level).add([0, sheet.targetHeight() / 2]), level);
+      map.flyTo(target, level, { duration: calm.matches ? 0 : 0.8 });
+    },
     ends(from, to) {
       if (from) L.marker(point(from.location), { icon: pin('', 'pin start'), title: from.name }).addTo(content);
       if (to) L.marker(point(to.location), { icon: pin('', 'pin end', '#ff3b30'), title: to.name, zIndexOffset: 500 }).addTo(content);
@@ -278,15 +284,35 @@ const mapView = (() => {
 // MARK: Location
 
 /** One position per visit; only the location buttons and navigation ask again. */
+let fixRequest = null;
 function getFix(refresh = false) {
   if (state.fix && !refresh) return Promise.resolve(state.fix);
-  return new Promise((resolve) => {
+  return fixRequest ??= new Promise((resolve) => {
     if (!navigator.geolocation) return resolve(null);
     navigator.geolocation.getCurrentPosition((position) => {
       state.fix = { lat: position.coords.latitude, lng: position.coords.longitude, accuracy: position.coords.accuracy };
       resolve(state.fix);
     }, () => resolve(state.fix), { enableHighAccuracy: true, timeout: 12_000, maximumAge: 60_000 });
-  });
+  }).finally(() => { fixRequest = null; });
+}
+
+/** Asks as the page opens, and moves the map only if the rider hasn't started on something. */
+async function locateOnOpen() {
+  const fix = await getFix();
+  if (!fix) return;
+  drawMap();
+  if (state.tab === 'plan' && !state.from && !state.to && !state.destination && state.phase === 'idle' && inHongKong(fix)) mapView.follow(fix, 15);
+}
+
+/** The server shares its AI with every visitor; elsewhere, such as GitHub Pages, there is none. */
+async function checkSharedAI() {
+  try {
+    const response = await fetch('api/ai');
+    state.sharedAI = response.ok && (await response.json()).available === true;
+  } catch {
+    state.sharedAI = false;
+  }
+  if (state.sharedAI) renderTab();
 }
 
 // MARK: Data
@@ -1068,7 +1094,7 @@ function renderBottomStatus() {
 }
 
 function renderPlanBottom() {
-  const hasKey = !!store.get('apiKey', '');
+  const hasKey = !!client();
   const speechLabels = { 'zh-HK': t('粵語', 'Cantonese'), 'zh-CN': t('普通話', 'Mandarin'), 'en-US': 'English' };
   const speechButton = Recognition && h('button', {
     class: 'lang', onclick: (event) => {
@@ -1254,16 +1280,17 @@ function settingsSheet() {
         }))),
     h('div', { class: 'card' },
       h('div', { class: 'bold' }, t('AI 路線助手（DeepSeek）', 'AI assistant (DeepSeek)')),
+      state.sharedAI && h('div', { class: 'small muted' }, t('本站已提供 AI，不用設定就能使用。想用自己的額度才需要填寫 key。', 'AI is included with this site, with nothing to set up. Add a key only to use your own quota.')),
       h('label', { class: 'field plain' }, keyInput),
       h('div', { class: 'row' },
         h('button', { class: 'primary', onclick: () => { if (keyInput.value.trim()) { store.set('apiKey', keyInput.value.trim()); renderTab(); } } }, t('儲存', 'Save')),
         store.get('apiKey', '') && h('button', { class: 'link', onclick: () => { store.set('apiKey', ''); renderTab(); } }, t('移除', 'Remove'))),
-      h('div', { class: 'tiny muted' }, t('key 只保存在這部裝置的瀏覽器內，並由瀏覽器直接傳送給 DeepSeek，不經任何其他伺服器。不要在共用裝置上儲存。', 'The key stays in this browser and goes straight to DeepSeek, through no other server. Don\'t save it on a shared device.'))),
+      h('div', { class: 'tiny muted' }, t('你自己的 key 只保存在這部裝置的瀏覽器內，並由瀏覽器直接傳送給 DeepSeek，不經任何其他伺服器。不要在共用裝置上儲存。', 'Your own key stays in this browser and goes straight to DeepSeek, through no other server. Don\'t save it on a shared device.'))),
     h('div', { class: 'card' },
       h('div', { class: 'bold' }, t('私隱', 'Privacy')),
       h('div', { class: 'small muted' }, t(
-        '此網站沒有伺服器，不收集任何資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會傳送給 OpenStreetMap 的 Photon 服務以確定所在地區；傳送給 DeepSeek 的只有你輸入的文字、地區、站名及路線號碼，不包括座標。',
-        'This site has no server and collects nothing. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go to OpenStreetMap\'s Photon service to work out your district; DeepSeek only receives your text, the district, stop names and route numbers, never coordinates.'))),
+        '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會傳送給 OpenStreetMap 的 Photon 服務以確定所在地區。AI 請求經本站伺服器轉送給 DeepSeek，內容只有你輸入的文字、地區、站名及路線號碼，不包括座標，伺服器亦不會保存。',
+        'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go to OpenStreetMap\'s Photon service to work out your district. AI requests pass through this site\'s server to DeepSeek and carry only your text, the district, stop names and route numbers, never coordinates, and the server keeps none of it.'))),
     h('div', { class: 'card' },
       h('div', { class: 'bold' }, t('安裝到手機', 'Install on your phone')),
       h('div', { class: 'small muted' }, t('iPhone：在 Safari 按分享，再選「加入主畫面」。Android：在 Chrome 選單按「安裝應用程式」。', 'iPhone: in Safari, tap Share, then Add to Home Screen. Android: in the Chrome menu, tap Install app.'))),
@@ -1376,6 +1403,8 @@ function markScene(scene) {
 function drawMap() {
   markScene(`${state.tab}|${state.expanded ?? ''}|${state.nav?.id ?? ''}|${state.to?.name ?? ''}|${state.discovery?.stage ?? ''}|${state.stopPlace?.name ?? ''}`);
   mapView.clear();
+  const here = state.nav?.here ?? state.fix;
+  if (here) mapView.me(here);
   if (state.tab === 'stops') {
     if (state.stopPlace) {
       mapView.ends(null, state.stopPlace);
@@ -1393,7 +1422,6 @@ function drawMap() {
   const choosing = state.discovery?.stage === 'choosing' && !state.journeys.length && state.phase === 'idle';
   if (choosing) mapView.numbered(state.discovery.suggestions, choosePlace);
   mapView.ends(state.from, state.to);
-  if (state.nav?.here) mapView.me(state.nav.here);
 }
 
 function fitPlanMap() {
@@ -1452,9 +1480,10 @@ $('locate').addEventListener('click', async () => {
   const fix = await getFix(true);
   if (!fix) return;
   drawMap();
-  mapView.me(fix);
   mapView.follow(fix, 15);
 });
+locateOnOpen();
+checkSharedAI();
 loadDB();
 setInterval(() => { if (state.tab === 'saved') renderSheet(); }, 30_000);
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

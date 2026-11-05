@@ -223,3 +223,19 @@ test('AI requests keep thinking off, send no coordinates and report failures', a
   globalThis.fetch = async () => ({ status: 401, json: async () => ({ error: { message: 'bad key' } }) });
   await assert.rejects(A.deepSeek('x').intent('y'), /bad key/);
 });
+
+test('the shared AI sends a task name and the text, never a prompt or a key', async () => {
+  const sent = [];
+  globalThis.fetch = async (url, options) => {
+    sent.push({ url, headers: options.headers, body: JSON.parse(options.body) });
+    return { ok: true, status: 200, json: async () => ({ reply: '{"places":[{"name":"真店"}]}' }) };
+  };
+  await A.sharedAI().suggest('螺螄粉', '旺角', null, 'en');
+  assert.equal(sent[0].url, 'api/ai');
+  assert.deepEqual(Object.keys(sent[0].body), ['task', 'message']);
+  assert.equal(sent[0].body.task, 'suggest_en');
+  assert.ok(A.PROMPTS[sent[0].body.task]);
+  assert.equal(sent[0].headers.Authorization, undefined);
+  globalThis.fetch = async () => ({ ok: false, status: 429, json: async () => ({ error: '太頻繁' }) });
+  await assert.rejects(A.sharedAI().chat('去中環'), /太頻繁/);
+});

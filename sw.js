@@ -21,7 +21,7 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  if (event.request.method !== 'GET') return;
+  if (event.request.method !== 'GET' || url.pathname.endsWith('/api/ai')) return;
   if (url.pathname.endsWith(DATABASE)) {
     // Show the saved copy at once and refresh it for next time.
     event.respondWith(caches.open(VERSION).then(async (cache) => {

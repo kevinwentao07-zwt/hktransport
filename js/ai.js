@@ -121,6 +121,13 @@ Use only the facts given. Do not invent routes, stops, times or fares.
 When an option's first departure is marked live, you may mention that it is based on real-time arrivals.
 ${lang === 'zh' ? 'Write in Traditional Chinese as used in Hong Kong.' : 'Write in English.'} No Markdown, no lists.`;
 
+/** Every job the AI does. The server is sent a name from this list, never a prompt. */
+export const PROMPTS = {
+  intent: INTENT_PROMPT, chat: CHAT_PROMPT, area: AREA_PROMPT,
+  suggest_zh: suggestPrompt('zh'), suggest_en: suggestPrompt('en'),
+  explain_zh: explainPrompt('zh'), explain_en: explainPrompt('en'),
+};
+
 function jsonObject(reply) {
   const start = reply.indexOf('{'), end = reply.lastIndexOf('}');
   if (start < 0 || end <= start) return null;
@@ -167,39 +174,57 @@ export function parseCompletion(json, status) {
 
 /** Thinking stays off: it made no difference to the answers and took ten times as long. */
 export function deepSeek(apiKey, model = 'deepseek-flash') {
-  const complete = async (system, user) => {
+  return assistant(async (task, user) => {
     const response = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model, temperature: 0.2, max_tokens: 4000, stream: false, thinking: { type: 'disabled' },
-        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+        messages: [{ role: 'system', content: PROMPTS[task] }, { role: 'user', content: user }],
       }),
       signal: AbortSignal.timeout(60_000),
     });
     return parseCompletion(await response.json().catch(() => null), response.status);
-  };
+  });
+}
+
+/** The AI this site's server provides, which holds the key. */
+export function sharedAI() {
+  return assistant(async (task, message) => {
+    const response = await fetch('api/ai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task, message }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const json = await response.json().catch(() => null);
+    if (!response.ok || !json?.reply) throw new Error(json?.error ?? `HTTP ${response.status}`);
+    return json.reply;
+  });
+}
+
+function assistant(complete) {
   return {
     async intent(message) {
-      const intent = decodeIntent(await complete(INTENT_PROMPT, message));
+      const intent = decodeIntent(await complete('intent', message));
       if (!intent) throw new Error('DeepSeek reply was not valid trip JSON');
       return intent;
     },
     async chat(message) {
-      const reply = decodeChat(await complete(CHAT_PROMPT, message));
+      const reply = decodeChat(await complete('chat', message));
       if (!reply) throw new Error('DeepSeek reply was not valid trip JSON');
       return reply;
     },
     async area(text, want) {
-      const object = jsonObject(await complete(AREA_PROMPT, `Looking for: ${want}\nRider says: ${text}`));
+      const object = jsonObject(await complete('area', `Looking for: ${want}\nRider says: ${text}`));
       if (!clean(object?.area)) throw new Error('DeepSeek reply was not valid area JSON');
       return { area: clean(object.area), extra: clean(object.extra) || null };
     },
     async suggest(want, area, extra, lang) {
       const lines = [`Looking for: ${want}`, `Area: ${area}`];
       if (extra) lines.push(`Also wants: ${extra}`);
-      return decodePlaces(await complete(suggestPrompt(lang), lines.join('\n')));
+      return decodePlaces(await complete(`suggest_${lang}`, lines.join('\n')));
     },
-    explain: (summary, lang) => complete(explainPrompt(lang), summary),
+    explain: (summary, lang) => complete(`explain_${lang}`, summary),
   };
 }
