@@ -191,11 +191,13 @@ struct NearbyBusPanel: View {
     }
 }
 
-private struct NearbyBusStopCard: View {
+struct NearbyBusStopCard: View {
     @ObservedObject var model: AppModel
     let stop: NearbyBusStop
     let isNearest: Bool
     let isSelected: Bool
+    /// Offers a route to this stop when set.
+    var planRoute: (() -> Void)?
     let toggleSelected: () -> Void
 
     var body: some View {
@@ -216,8 +218,8 @@ private struct NearbyBusStopCard: View {
                         if isNearest {
                             Text(model.t("最近", "Closest")).foregroundStyle(.yellow)
                         }
-                        Text(stop.site.routeNumbers.prefix(8).joined(separator: " · ")
-                             + (stop.site.routeNumbers.count > 8 ? " +\(stop.site.routeNumbers.count - 8)" : ""))
+                        Text(routeNames.prefix(8).joined(separator: " · ")
+                             + (routeNames.count > 8 ? " +\(routeNames.count - 8)" : ""))
                             .foregroundStyle(.secondary).lineLimit(2)
                     }
                     .font(.system(size: 10))
@@ -230,6 +232,13 @@ private struct NearbyBusStopCard: View {
             .accessibilityValue(isSelected ? model.t("已展開", "Expanded") : model.t("已收起", "Collapsed"))
             if isSelected {
                 Divider()
+                if let planRoute {
+                    Button(action: planRoute) {
+                        Label(model.t("規劃路線到這裡", "Plan a trip here"), systemImage: "arrow.triangle.turn.up.right.diamond.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
                 Text(model.t("此站路線 · 點選查看最近兩班", "Routes at this stop · select for arrivals"))
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                 NearbyBusRoutes(model: model, visits: stop.site.visits)
@@ -238,6 +247,11 @@ private struct NearbyBusStopCard: View {
         }
         .padding(12)
         .background(.white.opacity(isSelected ? 0.09 : 0.04), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// Line names for MTR codes; other routes keep their numbers.
+    private var routeNames: [String] {
+        stop.site.routeNumbers.map { MTRNetwork.lineName($0).text(model.language) }
     }
 
     private var distanceText: String {
@@ -258,7 +272,7 @@ private struct NearbyBusRoutes: View {
                         expandedVisit = expandedVisit == visit.id ? nil : visit.id
                     } label: {
                         HStack(spacing: 8) {
-                            RouteBadge(route: route, compact: true)
+                            RouteBadge(route: route, compact: true, language: model.language)
                             Text("→ " + route.dest.text(model.language))
                                 .font(.system(size: 12)).lineLimit(2)
                             Spacer(minLength: 0)

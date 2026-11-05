@@ -39,10 +39,11 @@ struct BusStopIndex: Sendable {
     let id = UUID()
     var sites: [BusStopSite] = []
 
-    static func build(routes: [String: Route], stops: [String: Stop]) -> BusStopIndex {
+    static func build(routes: [String: Route], stops: [String: Stop],
+                      operators: Set<Operator> = [.kmb, .ctb, .nlb]) -> BusStopIndex {
         var visits: [String: [BusStopVisit]] = [:]
         for (key, route) in routes {
-            for co in route.operators where [.kmb, .ctb, .nlb].contains(co) {
+            for co in route.operators where operators.contains(co) {
                 guard let ids = route.stops[co.rawValue] else { continue }
                 // The final stop has no onward arrival to board. A circular
                 // route's first visit to the same stop is retained separately.

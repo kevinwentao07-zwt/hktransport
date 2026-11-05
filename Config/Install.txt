@@ -1,0 +1,24 @@
+hktransport 安裝說明
+
+1. 把 hktransport.app 拖到 Applications 資料夾。
+2. 在 Applications 打開 hktransport。macOS 會提示無法驗證開發者，這是因為此 app
+   沒有經過 Apple 公證。按「完成」，然後到 系統設定 → 私隱與安全性，在頁面底部按
+   「仍要打開」。只需要做一次。
+3. 打開後，app 顯示在 MacBook 劉海，沒有 Dock 圖示。把滑鼠移到劉海，再點擊打開面板。
+
+需要 macOS 14 或以上，支援 Apple 晶片及 Intel Mac。AI 功能需要在設定加入你自己的
+DeepSeek API key；沒有 key 也可以使用其餘功能。
+
+--------------------------------------------------------------------
+
+Installing hktransport
+
+1. Drag hktransport.app into the Applications folder.
+2. Open hktransport from Applications. macOS will say it can't verify the developer,
+   because the app isn't notarized by Apple. Press Done, then go to System Settings →
+   Privacy & Security and press Open Anyway near the bottom. You only do this once.
+3. The app lives in the MacBook notch, with no Dock icon. Move the pointer to the notch
+   and click to open the panel.
+
+Requires macOS 14 or later, on Apple silicon or Intel. AI features need your own
+DeepSeek API key, added in Settings; everything else works without one.

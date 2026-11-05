@@ -54,6 +54,10 @@ struct Route: Sendable {
     let bound: [String: String]
     let gtfsId: String?
     let nlbId: String?
+    /// Whole-route journey time in minutes (`jt`), when the operator publishes one.
+    var journeyMinutes: Double? = nil
+    /// Timetabled service bands (`freq`), used by the route planner to estimate waits.
+    var frequency: RouteFrequency? = nil
 
     /// Supported operators that actually list stops for this route.
     var operators: [Operator] {
@@ -67,7 +71,7 @@ struct Route: Sendable {
 
 extension Route: Decodable {
     private enum CodingKeys: String, CodingKey {
-        case route, co, orig, dest, serviceType, stops, bound, gtfsId, nlbId
+        case route, co, orig, dest, serviceType, stops, bound, gtfsId, nlbId, jt, freq
     }
 
     init(from decoder: Decoder) throws {
@@ -81,6 +85,53 @@ extension Route: Decodable {
         bound = try c.decode([String: String].self, forKey: .bound)
         gtfsId = try c.decodeIfPresent(LooseString.self, forKey: .gtfsId)?.value
         nlbId = try c.decodeIfPresent(LooseString.self, forKey: .nlbId)?.value
+        // Planner-only fields: a malformed value must never break the whole database.
+        journeyMinutes = (try? c.decodeIfPresent(LooseString.self, forKey: .jt))?
+            .flatMap { Double($0.value) }
+            .flatMap { $0 > 0 ? $0 : nil }
+        frequency = (try? c.decodeIfPresent([String: [String: [String?]?]].self, forKey: .freq))?
+            .flatMap(RouteFrequency.init(raw:))
+    }
+}
+
+/// Service bands per service-day id, e.g. `{"287": {"0535": ["0705", "900"]}}`:
+/// from 05:35 to 07:05 a bus leaves the first stop every 900 seconds.
+/// A band without a headway is a single departure at its start time.
+struct RouteFrequency: Sendable, Equatable {
+    struct Band: Sendable, Equatable {
+        /// Minutes after midnight.
+        let start: Int
+        let end: Int?
+        let headwaySeconds: Int?
+    }
+
+    let days: [String: [Band]]
+
+    init(days: [String: [Band]]) {
+        self.days = days
+    }
+
+    init?(raw: [String: [String: [String?]?]]) {
+        var days: [String: [Band]] = [:]
+        for (day, bands) in raw {
+            days[day] = bands.compactMap { start, value -> Band? in
+                guard let startMinute = Self.minuteOfDay(start) else { return nil }
+                let endText: String? = value.flatMap { $0.first ?? nil }
+                let headwayText: String? = value.flatMap { $0.count > 1 ? $0[1] : nil }
+                let headway = headwayText.flatMap { Int($0) }.flatMap { $0 > 0 ? $0 : nil }
+                return Band(start: startMinute, end: endText.flatMap(Self.minuteOfDay), headwaySeconds: headway)
+            }.sorted { $0.start < $1.start }
+        }
+        guard !days.isEmpty else { return nil }
+        self.days = days
+    }
+
+    /// "0535" -> 335
+    static func minuteOfDay(_ text: String) -> Int? {
+        guard text.count == 4, let value = Int(text) else { return nil }
+        let hours = value / 100, minutes = value % 100
+        guard (0...47).contains(hours), (0...59).contains(minutes) else { return nil }
+        return hours * 60 + minutes
     }
 }
 
@@ -120,12 +171,18 @@ struct StopLocation: Decodable, Hashable, Sendable {
 struct TransportDB: Decodable, Sendable {
     let routeList: [String: Route]
     let stopList: [String: Stop]
+    /// Service-day id -> seven "0"/"1" flags, Sunday first.
+    var serviceDayMap: [String: [String]]? = nil
+    /// Public holidays as "yyyyMMdd"; they run the Sunday timetable.
+    var holidays: [String]? = nil
     /// Route keys for supported operators, in natural route-number order.
     private(set) var sortedRouteKeys: [String] = []
     private(set) var busStopIndex = BusStopIndex()
+    /// Every kind of stop, for the stop search page.
+    private(set) var allStopIndex = BusStopIndex()
 
     private enum CodingKeys: String, CodingKey {
-        case routeList, stopList
+        case routeList, stopList, serviceDayMap, holidays
     }
 
     static func decode(_ data: Data) throws -> TransportDB {
@@ -138,6 +195,7 @@ struct TransportDB: Decodable, Sendable {
             }
             .map(\.key)
         db.busStopIndex = BusStopIndex.build(routes: db.routeList, stops: db.stopList)
+        db.allStopIndex = BusStopIndex.build(routes: db.routeList, stops: db.stopList, operators: Set(Operator.allCases))
         return db
     }
 }

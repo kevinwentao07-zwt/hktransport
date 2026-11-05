@@ -15,6 +15,8 @@ final class AppModel: ObservableObject {
         static let savedStops = "hktransport.savedStops"
         static let language = "hktransport.language"
         static let refreshInterval = "hktransport.refreshInterval"
+        static let deepSeekModel = "hktransport.deepSeekModel"
+        static let deepSeekKeychainAccount = "deepseek-api-key"
     }
 
     private let defaults: UserDefaults
@@ -31,6 +33,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var now = Date()
     @Published var refreshInterval: ArrivalRefreshInterval {
         didSet { defaults.set(refreshInterval.rawValue, forKey: Key.refreshInterval) }
+    }
+    /// The key itself stays in the keychain; views only need to know it exists.
+    @Published private(set) var hasDeepSeekKey = false
+    @Published var deepSeekModel: String {
+        didSet { defaults.set(deepSeekModel, forKey: Key.deepSeekModel) }
     }
     @Published var language: Lang {
         didSet {
@@ -52,6 +59,8 @@ final class AppModel: ObservableObject {
         refreshInterval = ArrivalRefreshInterval(rawValue: defaults.integer(forKey: Key.refreshInterval)) ?? .thirtySeconds
         savedStops = defaults.data(forKey: Key.savedStops)
             .flatMap { try? JSONDecoder().decode([SavedStop].self, from: $0) } ?? []
+        deepSeekModel = defaults.string(forKey: Key.deepSeekModel) ?? DeepSeekClient.defaultModel
+        hasDeepSeekKey = KeychainStore.contains(Key.deepSeekKeychainAccount)
     }
 
     // MARK: - Lifecycle
@@ -192,6 +201,28 @@ final class AppModel: ObservableObject {
 
     func hideSettings() {
         isShowingSettings = false
+    }
+
+    // MARK: - AI (DeepSeek)
+
+    @discardableResult
+    func setDeepSeekKey(_ key: String) -> Bool {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        let saved = KeychainStore.set(trimmed.isEmpty ? nil : trimmed, for: Key.deepSeekKeychainAccount)
+        hasDeepSeekKey = KeychainStore.contains(Key.deepSeekKeychainAccount)
+        return saved
+    }
+
+    func removeDeepSeekKey() {
+        KeychainStore.set(nil, for: Key.deepSeekKeychainAccount)
+        hasDeepSeekKey = false
+    }
+
+    /// nil when no key is set; the planner then uses its offline parser.
+    func deepSeekClient() -> DeepSeekClient? {
+        guard let key = KeychainStore.string(for: Key.deepSeekKeychainAccount), !key.isEmpty else { return nil }
+        let model = deepSeekModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return DeepSeekClient(apiKey: key, model: model.isEmpty ? DeepSeekClient.defaultModel : model)
     }
 
     // MARK: - Lookups for views

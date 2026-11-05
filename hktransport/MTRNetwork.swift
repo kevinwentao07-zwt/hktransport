@@ -2,12 +2,14 @@ import Foundation
 import SwiftUI
 
 enum TransportCategory: String, CaseIterable, Identifiable {
-    case saved, bus, minibus, lightRail, mtr, ferry, notice
+    case saved, plan, stops, bus, minibus, lightRail, mtr, ferry, notice
 
     var id: String { rawValue }
     var name: Name {
         switch self {
         case .saved: return Name(en: "Saved", zh: "已儲存")
+        case .plan: return Name(en: "Plan trip", zh: "路線規劃")
+        case .stops: return Name(en: "Stop search", zh: "站點搜尋")
         case .bus: return Name(en: "Bus", zh: "巴士")
         case .minibus: return Name(en: "Minibus", zh: "小巴")
         case .lightRail: return Name(en: "Light Rail", zh: "輕鐵")
@@ -19,6 +21,8 @@ enum TransportCategory: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .saved: return "star.fill"
+        case .plan: return "arrow.triangle.turn.up.right.diamond.fill"
+        case .stops: return "mappin.and.ellipse"
         case .bus: return "bus.fill"
         case .minibus: return "bus"
         case .lightRail: return "tram.fill"
@@ -35,8 +39,19 @@ enum TransportCategory: String, CaseIterable, Identifiable {
         case .lightRail: return route.operators.contains(.lightRail)
         case .mtr: return route.operators.contains(.mtr)
         case .ferry: return route.ferryOperator != nil
-        case .notice: return false
+        case .plan, .stops, .notice: return false
         }
+    }
+}
+
+extension Operator {
+    /// What riders call a route: "東鐵綫" rather than the MTR's "EAL".
+    func lineName(_ route: String) -> Name {
+        self == .mtr ? MTRNetwork.lineName(route) : Name(en: route, zh: route)
+    }
+
+    func lineColor(_ route: String) -> Color {
+        self == .mtr ? MTRNetwork.lineColor(route) : color
     }
 }
 

@@ -9,7 +9,9 @@ struct TransportPanel: View {
     @State private var category: TransportCategory = .saved
     @State private var selectedStation: String?
     @State private var selectedLightRailStation: String?
-    @StateObject private var busLocation = BusLocationModel()
+    @ObservedObject private var busLocation = BusLocationModel.shared
+    @ObservedObject private var planner = RoutePlannerModel.shared
+    @ObservedObject private var stopSearch = StopSearchModel.shared
     @FocusState private var searchFocused: Bool
 
     var body: some View {
@@ -31,22 +33,35 @@ struct TransportPanel: View {
                         Spacer()
                         PanelCloseButton(model: model)
                     }
-                    searchField
-                    if category == .mtr {
-                        MTRPanel(model: model, query: $query, selectedStation: $selectedStation)
-                    } else if category == .lightRail {
-                        LightRailPanel(model: model, query: $query, selectedStation: $selectedLightRailStation)
-                    } else if category == .ferry {
-                        FerryPanel(model: model, query: query)
-                    } else if category == .notice {
-                        NoticePanel(model: model, query: query)
-                    } else if category == .bus && query.trimmingCharacters(in: .whitespaces).isEmpty && pickedRouteKey == nil {
-                        NearbyBusPanel(model: model, location: busLocation)
+                    if category == .plan {
+                        RoutePlanPanel(model: model, planner: planner, location: busLocation)
+                    } else if category == .stops {
+                        StopSearchPanel(model: model, search: stopSearch, location: busLocation, planRoute: planRoute)
                     } else {
-                        ScrollView {
-                            LazyVStack(spacing: 6) { content }
+                        searchField
+                        if query.isEmpty {
+                            SearchHistoryBar(model: model, box: SearchHistory.Box.routes(category)) { text in
+                                query = text
+                                // Changing the query clears the picked route, so submit after that has run.
+                                DispatchQueue.main.async(execute: submitSearch)
+                            }
                         }
-                        .scrollIndicators(.never)
+                        if category == .mtr {
+                            MTRPanel(model: model, query: $query, selectedStation: $selectedStation)
+                        } else if category == .lightRail {
+                            LightRailPanel(model: model, query: $query, selectedStation: $selectedLightRailStation)
+                        } else if category == .ferry {
+                            FerryPanel(model: model, query: query)
+                        } else if category == .notice {
+                            NoticePanel(model: model, query: query)
+                        } else if category == .bus && query.trimmingCharacters(in: .whitespaces).isEmpty && pickedRouteKey == nil {
+                            NearbyBusPanel(model: model, location: busLocation)
+                        } else {
+                            ScrollView {
+                                LazyVStack(spacing: 6) { content }
+                            }
+                            .scrollIndicators(.never)
+                        }
                     }
                 }
             }
@@ -55,7 +70,8 @@ struct TransportPanel: View {
         }
         .task(id: "\(model.isShowingSettings)-\(category.rawValue)") {
             searchFocused = false
-            guard !model.isShowingSettings else { return }
+            // These pages focus their own fields.
+            guard !model.isShowingSettings, category != .plan, category != .stops else { return }
             // The panel becomes key on the expanding click; focus once it is mounted.
             try? await Task.sleep(for: .milliseconds(60))
             guard !Task.isCancelled else { return }
@@ -65,12 +81,18 @@ struct TransportPanel: View {
             query = ""
             pickedRouteKey = nil
         }
-        .onChange(of: pickedRouteKey) { _, _ in
+        .onChange(of: pickedRouteKey) { _, key in
             expandedStop = nil
+            // Picking from the list counts as searching for what was typed.
+            if key != nil { SearchHistory.shared.add(query, to: SearchHistory.Box.routes(category)) }
         }
         .onExitCommand {
             if model.isShowingSettings {
                 model.hideSettings()
+            } else if category == .plan && planner.hasInput {
+                planner.reset()
+            } else if category == .stops && (stopSearch.place != nil || !stopSearch.query.isEmpty) {
+                stopSearch.clear()
             } else if expandedStop != nil {
                 expandedStop = nil
             } else if pickedRouteKey != nil {
@@ -126,6 +148,28 @@ struct TransportPanel: View {
         .padding(.vertical, 20)
     }
 
+    private func submitSearch() {
+        SearchHistory.shared.add(query, to: SearchHistory.Box.routes(category))
+        if category == .mtr, let first = MTRNetwork.search(query).first {
+            selectedStation = first.code
+            query = ""
+        } else if category == .lightRail, let first = LightRailNetwork.search(query).first {
+            selectedLightRailStation = first.code
+            query = ""
+        } else if let first = model.searchRoutes(query, category: category).first {
+            pickedRouteKey = first
+        }
+    }
+
+    private func planRoute(to site: BusStopSite) {
+        guard let db = model.db else { return }
+        category = .plan
+        let location = busLocation
+        planner.route(to: ResolvedPlace(name: site.name.text(model.language), location: site.location),
+                      db: db, language: model.language, currentLocation: { await location.currentFix() },
+                      ai: model.deepSeekClient())
+    }
+
     private var searchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
@@ -134,17 +178,7 @@ struct TransportPanel: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: 15, weight: .medium))
                 .focused($searchFocused)
-                .onSubmit {
-                    if category == .mtr, let first = MTRNetwork.search(query).first {
-                        selectedStation = first.code
-                        query = ""
-                    } else if category == .lightRail, let first = LightRailNetwork.search(query).first {
-                        selectedLightRailStation = first.code
-                        query = ""
-                    } else if let first = model.searchRoutes(query, category: category).first {
-                        pickedRouteKey = first
-                    }
-                }
+                .onSubmit(submitSearch)
                 .onChange(of: query) { _, _ in
                     pickedRouteKey = nil
                 }
@@ -370,17 +404,19 @@ private struct SavedStopRow: View {
 struct RouteBadge: View {
     let route: Route
     var compact = false
+    /// Shows MTR line names instead of codes when set.
+    var language: Lang?
 
     var body: some View {
         let op = route.operators.first
-        Text(route.route)
+        Text(language.flatMap { op?.lineName(route.route).text($0) } ?? route.route)
             .font(.system(size: compact ? 12 : 15, weight: .bold, design: .rounded))
             .lineLimit(1)
             .minimumScaleFactor(0.6)
             .frame(width: compact ? 40 : 52, height: compact ? 22 : 30)
             .foregroundStyle(op == .ctb ? Color.black : Color.white)
             .background(
-                (op?.color ?? .gray).opacity(0.9),
+                (language == nil ? op?.color : op?.lineColor(route.route) ?? .gray)?.opacity(0.9) ?? Color.gray,
                 in: RoundedRectangle(cornerRadius: compact ? 6 : 8, style: .continuous)
             )
     }

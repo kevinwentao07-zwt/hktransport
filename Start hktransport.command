@@ -48,26 +48,8 @@ if [[ "$needs_build" == true ]]; then
         "$project_root"/hktransport/*.swift \
         -o "$staging_dir/hktransport.app/Contents/MacOS/hktransport"
 
-    app_version="$(awk '/^MARKETING_VERSION =/ {print $3}' "$project_root/Config/Version.xcconfig")"
-    build_version="$(awk '/^CURRENT_PROJECT_VERSION =/ {print $3}' "$project_root/Config/Version.xcconfig")"
-    cat > "$staging_dir/hktransport.app/Contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleExecutable</key><string>hktransport</string>
-<key>CFBundleIdentifier</key><string>local.hktransport.debug</string>
-<key>CFBundleName</key><string>hktransport</string>
-<key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>$app_version</string>
-<key>CFBundleVersion</key><string>$build_version</string>
-<key>LSMinimumSystemVersion</key><string>14.0</string>
-<key>LSUIElement</key><true/>
-<key>NSHighResolutionCapable</key><true/>
-<key>NSPrincipalClass</key><string>NSApplication</string>
-<key>NSLocationUsageDescription</key><string>在 Apple 地圖顯示你的位置，並按距離排列附近巴士站。位置只在使用附近巴士功能時取得。</string>
-<key>NSLocationWhenInUseUsageDescription</key><string>在 Apple 地圖顯示你的位置，並按距離排列附近巴士站。</string>
-</dict></plist>
-PLIST
+    source "$project_root/Config/AppBundle.zsh"
+    hktransport_write_info_plist "$project_root" local.hktransport.debug "$staging_dir/hktransport.app/Contents/Info.plist"
 
     ditto --norsrc --noextattr "$project_root/hktransport/Resources" "$staging_dir/hktransport.app/Contents/Resources"
 

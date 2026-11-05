@@ -324,8 +324,10 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
-				INFOPLIST_KEY_NSLocationUsageDescription = "Show your location on Apple Maps and sort nearby bus stops by distance.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Show your location on Apple Maps and sort nearby bus stops by distance.";
+				INFOPLIST_KEY_NSLocationUsageDescription = "Show your location on Apple Maps, sort nearby bus stops and start trips from where you are.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Show your location on Apple Maps, sort nearby bus stops and start trips from where you are.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Tell the AI where you want to go by voice on the Plan trip page. Recordings are not kept.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Turn your voice into text so the AI can plan your trip.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -352,8 +354,10 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
-				INFOPLIST_KEY_NSLocationUsageDescription = "Show your location on Apple Maps and sort nearby bus stops by distance.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Show your location on Apple Maps and sort nearby bus stops by distance.";
+				INFOPLIST_KEY_NSLocationUsageDescription = "Show your location on Apple Maps, sort nearby bus stops and start trips from where you are.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Show your location on Apple Maps, sort nearby bus stops and start trips from where you are.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Tell the AI where you want to go by voice on the Plan trip page. Recordings are not kept.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Turn your voice into text so the AI can plan your trip.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
