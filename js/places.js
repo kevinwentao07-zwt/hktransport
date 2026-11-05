@@ -98,18 +98,22 @@ export function withinArea(places, area) {
 
 /** Looks up each shop the AI named, keeping the nearest branch that is really there. */
 export async function verifyPlaces(named, area, search = photonSearch, limit = 5) {
-  const seen = new Set(), verified = [];
-  for (const place of named) {
-    if (verified.length >= limit) break;
+  const locate = async (place) => {
     for (const term of [place.name, place.nameEn].filter(Boolean)) {
       const found = withinArea(await search(term, area.center, area.radius), area).find((item) => isSamePlace(item.name, place));
-      if (!found) continue;
-      const id = `${found.location.lat},${found.location.lng}`;
-      if (!seen.has(id)) {
+      if (found) return { place: found, reason: place.reason, isNamedByAI: true };
+    }
+    return null;
+  };
+  // A few at a time: one by one took 40 seconds, and all at once would strain a free service.
+  const seen = new Set(), verified = [];
+  for (let start = 0; start < named.length && verified.length < limit; start += 4) {
+    for (const item of await Promise.all(named.slice(start, start + 4).map(locate))) {
+      const id = item && `${item.place.location.lat},${item.place.location.lng}`;
+      if (item && !seen.has(id) && verified.length < limit) {
         seen.add(id);
-        verified.push({ place: found, reason: place.reason, isNamedByAI: true });
+        verified.push(item);
       }
-      break;
     }
   }
   return verified;
