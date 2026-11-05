@@ -23,7 +23,10 @@ Run the tests with `node --test web/test/core.test.mjs`. To try it locally:
 python3 -m http.server 8642 --directory web
 ```
 
-Publish by pushing `web/` to the `gh-pages` branch:
+To publish to your own server, put `DEPLOY_HOST`, `DEPLOY_KEY` and `DEPLOY_DOMAIN` in `.env.deploy`
+(ignored by git) and run `Deploy web.command`.
+
+To publish to GitHub Pages, push `web/` to the `gh-pages` branch:
 
 ```bash
 git push origin "$(git subtree split --prefix web)":refs/heads/gh-pages --force
