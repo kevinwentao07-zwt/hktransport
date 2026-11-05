@@ -50,7 +50,7 @@ const state = {
   discovery: null,
   stopQuery: '', stopPlace: null, stops: [], stopMode: 'all', stopRadius: 500, stopBusy: false, stopError: null, stopOpen: null,
   routeQuery: '', routeKey: null, saved: store.get('saved', []),
-  nav: null, fix: null, speechLang: store.get('speechLang', 'zh-HK'), listening: false,
+  routeView: false, nav: null, fix: null, speechLang: store.get('speechLang', 'zh-HK'), listening: false,
 };
 const t = (zh, en) => (state.lang === 'zh' ? zh : en);
 const name = (id) => stopName(id, state.db, state.lang);
@@ -96,6 +96,8 @@ const ICONS = {
   back: ['M15 6l-6 6 6 6'],
   spark: ['M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z', 'M19 16l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7.7-2Z'],
   navigate: ['M12 3l7 18-7-4-7 4 7-18Z'],
+  clock: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z', 'M12 7v5l3 2'],
+  arrow: ['M4.5 11.5L20 4l-7.5 15.5-2-6-6-2Z'],
 };
 
 function icon(key, size = 20, solid = false) {
@@ -200,15 +202,13 @@ const mapView = (() => {
       if (!points.length) return;
       // Frame the part of the map the search card and panel leave uncovered.
       const wide = window.matchMedia('(min-width: 820px)').matches;
-      const top = ($('top').offsetHeight || 0) + 24;
       map.fitBounds(L.latLngBounds(points.map(point)), {
         maxZoom, animate: false,
-        paddingTopLeft: [wide ? 440 : 24, wide ? 30 : top],
+        paddingTopLeft: [wide ? 440 : 24, wide ? 30 : 50],
         paddingBottomRight: [wide ? 30 : 24, wide ? 30 : sheet.coveredHeight() + 24],
       });
     },
-    home() { map?.setView([22.34, 114.15], 11); },
-    follow(location) { map.setView(point(location), Math.max(map.getZoom(), 16)); },
+    follow(location, zoom = 16) { map.setView(point(location), Math.max(map.getZoom(), zoom)); },
     ends(from, to) {
       if (from) L.marker(point(from.location), { icon: pin('', 'pin start'), title: from.name }).addTo(content);
       if (to) L.marker(point(to.location), { icon: pin('', 'pin end', '#ff3b30'), title: to.name, zIndexOffset: 500 }).addTo(content);
@@ -253,6 +253,7 @@ const mapView = (() => {
           .bindTooltip(nameText(stop.site.name, state.lang)).on('click', () => choose(stop)).addTo(content);
       }
     },
+    home() { this.fit([{ lat: 22.2, lng: 113.92 }, { lat: 22.5, lng: 114.3 }], 12); },
     me(location) { L.marker(point(location), { icon: pin('', 'me'), interactive: false, zIndexOffset: 1000 }).addTo(content); },
   };
 })();
@@ -329,6 +330,24 @@ function resetPlan() {
   Object.assign(state, { journeys: [], expanded: null, explanation: null, explaining: false, aiNotice: null, from: null, to: null, error: null });
 }
 
+function showRouteView() {
+  sheet.snap('half');
+  if (state.routeView) return;
+  state.routeView = true;
+  renderPlanTop();
+}
+
+/** Back to the home sheet. */
+function closeTrip() {
+  planRun++;
+  stopNavigation();
+  resetPlan();
+  Object.assign(state, { origin: '', destination: '', discovery: null, lastChat: null, routeView: false, phase: 'idle' });
+  renderTab();
+  sheet.snap('half');
+  mapView.home();
+}
+
 function setPhase(phase, error = null) {
   state.phase = phase;
   state.error = error;
@@ -377,8 +396,9 @@ async function runPlan(request) {
   if (request.kind === 'chat') {
     state.origin = intent.origin ?? '';
     state.destination = intent.destination;
-    syncPlaceInputs();
   }
+  showRouteView();
+  syncPlaceInputs();
   state.preference = intent.preference;
 
   setPhase('locating');
@@ -515,6 +535,7 @@ async function discover(wish, area, isTyped, run = ++planRun) {
   state.discovery = { stage: 'choosing', wish, areaName: searchArea.name, suggestions };
   setPhase('idle');
   renderBottomStatus();
+  sheet.snap('half');
   mapView.fit(suggestions.map((suggestion) => suggestion.place.location));
 }
 
@@ -649,8 +670,8 @@ function search() {
   if (!isCurrentLocation(state.destination)) history.add('destination', state.destination);
   state.discovery = null;
   renderBottomStatus();
-  renderPlaceHistory(null);
   document.activeElement?.blur();
+  showRouteView();
   runPlan({ kind: 'search' });
 }
 
@@ -727,7 +748,9 @@ function planTo(site) {
   state.origin = '';
   state.destination = nameText(site.name, state.lang);
   state.discovery = null;
+  state.routeView = true;
   renderTab();
+  sheet.snap('half');
   runPlan({ kind: 'place', place: { name: state.destination, location: site.location } });
 }
 
@@ -814,6 +837,16 @@ function renderChatHistory(show) {
 }
 
 function renderPlanTop() {
+  if (!state.routeView) {
+    clear($('top'), h('div', { class: 'row' },
+      h('label', { class: 'search-card single' }, h('span', { class: 'muted' }, icon('search', 18)), h('input', {
+        id: 'destination-input', value: state.destination, placeholder: t('搜尋地點或站名', 'Search places or stops'), enterkeyhint: 'search', autocomplete: 'off',
+        oninput: (event) => { state.destination = event.target.value; },
+        onfocus: () => sheet.snap('full'),
+        onkeydown: (event) => { if (event.key === 'Enter') search(); },
+      }))));
+    return;
+  }
   const place = (field, placeholder, trailing) => h('label', { class: 'place' },
     h('input', {
       id: `${field}-input`, value: state[field], placeholder, enterkeyhint: 'search', autocomplete: 'off',
@@ -823,6 +856,8 @@ function renderPlanTop() {
       onkeydown: (event) => { if (event.key === 'Enter') search(); },
     }), trailing);
   clear($('top'),
+    h('div', { class: 'row' }, h('span', { class: 'title grow' }, t('路線', 'Directions')),
+      h('button', { class: 'round', 'aria-label': t('關閉', 'Close'), onclick: closeTrip }, icon('close', 16))),
     h('div', { class: 'search-card' },
       h('div', { class: 'places' },
         h('div', { class: 'rail' }, h('i'), h('b'), h('i', { class: 'end' })),
@@ -908,6 +943,30 @@ function suggestionList({ wish, areaName, suggestions }) {
   ];
 }
 
+/** Shortcuts and recent searches, under the search field. */
+function homeSheet() {
+  const go = (text) => { state.destination = text; search(); };
+  const recent = history.entries('destination');
+  const list = h('div', { class: 'list' });
+  let open = false;
+  const draw = () => clear(list, (open ? recent : recent.slice(0, HISTORY_SHOWN)).map((text) => h('button', { class: 'item', onclick: () => go(text) },
+    h('span', { class: 'dot' }, icon('clock', 17)), h('span', { class: 'grow ellipsis' }, text), icon('next', 15))));
+  draw();
+  const examples = state.lang === 'zh' ? ['沙田到中環', '去機場不想轉車', '我想吃螺螄粉'] : ['Sha Tin to Central', 'Airport, no transfers'];
+  return [
+    h('div', { class: 'shortcuts' }, [['stops', 'pin', t('站點', 'Stops')], ['routes', 'bus', t('路線', 'Routes')], ['saved', 'star', t('收藏', 'Saved')], ['settings', 'settings', t('設定', 'Settings')]]
+      .map(([tab, key, label]) => h('button', { onclick: () => setTab(tab) }, h('i', {}, icon(key, 22)), label))),
+    recent.length ? [
+      h('div', { class: 'section' }, h('span', {}, t('最近', 'Recents')),
+        recent.length > HISTORY_SHOWN && h('button', { class: 'link', onclick: (event) => { open = !open; event.target.textContent = open ? t('收起', 'Less') : t('更多', 'More'); draw(); } }, t('更多', 'More'))),
+      list,
+    ] : [
+      h('div', { class: 'section' }, t('試試問 AI', 'Try asking AI')),
+      h('div', { class: 'examples' }, examples.map((text) => h('button', { onclick: () => { state.chat = text; sendChat(); } }, text))),
+    ],
+  ];
+}
+
 const PHASES = {
   understanding: () => (client() ? t('AI 正在分析你的要求…', 'AI is analysing your request…') : t('理解要求…', 'Reading your request…')),
   findingPlaces: () => t('AI 正在搜尋，並在地圖上核實地點…', 'AI is searching and checking places on the map…'),
@@ -926,9 +985,6 @@ function planSheet() {
   }
   if (PHASES[state.phase]) items.push(h('div', { class: 'status' }, h('span', { class: 'spinner' }), PHASES[state.phase]()));
   if (state.error) items.push(h('div', { class: 'notice' }, state.error));
-  if (state.from && state.to) {
-    items.push(h('div', { class: 'row title' }, h('span', { class: 'ellipsis' }, state.from.name), icon('next', 16), h('span', { class: 'ellipsis grow' }, state.to.name)));
-  }
   if (state.journeys.length) {
     items.push(segments([['fastest', t('最快', 'Fastest')], ['fewerTransfers', t('少轉車', 'Fewer changes')], ['lessWalking', t('少行路', 'Less walking')]], state.preference, (preference) => {
       state.preference = preference;
@@ -944,12 +1000,7 @@ function planSheet() {
     }
   }
   items.push(state.journeys.map(journeyCard));
-  if (!state.journeys.length && state.phase === 'idle' && !state.error && !state.discovery) {
-    const examples = state.lang === 'zh' ? ['沙田到中環', '去機場不想轉車', '我想吃螺螄粉'] : ['Sha Tin to Central', 'Airport, no transfers'];
-    items.push(h('div', { class: 'title' }, t('今日想去邊？', 'Where to today?')),
-      h('div', { class: 'small muted' }, t('輸入目的地，或者直接告訴 AI。起點留空時由你目前的位置出發。', 'Type a destination, or just tell the AI. With no start, your current location is used.')),
-      h('div', { class: 'examples' }, examples.map((text) => h('button', { onclick: () => { state.chat = text; sendChat(); } }, text))));
-  }
+  if (!state.routeView && !state.discovery && state.phase === 'idle') items.push(homeSheet());
   return items;
 }
 
@@ -1008,8 +1059,14 @@ function renderPlanBottom() {
 
 // MARK: Stops tab
 
+/** The title row of a view opened from the home sheet. */
+function viewHeader(title) {
+  return h('div', { class: 'row' }, h('span', { class: 'view-title grow' }, title),
+    h('button', { class: 'round', 'aria-label': t('關閉', 'Close'), onclick: () => setTab('plan') }, icon('close', 16)));
+}
+
 function renderStopsTop() {
-  clear($('top'),
+  clear($('top'), viewHeader(t('站點', 'Stops')),
     h('div', { class: 'search-card single' },
       h('span', { class: 'muted' }, icon('search', 19)),
       h('input', {
@@ -1075,7 +1132,7 @@ function stopsSheet() {
 // MARK: Routes tab
 
 function renderRoutesTop() {
-  clear($('top'),
+  clear($('top'), viewHeader(t('路線', 'Routes')),
     h('label', { class: 'search-card single' }, h('span', { class: 'muted' }, icon('search', 19)), h('input', {
       id: 'route-input', value: state.routeQuery, placeholder: t('搜尋路線，例如 1A、960、505', 'Search routes, e.g. 1A, 960, 505'), enterkeyhint: 'search', autocomplete: 'off',
       oninput: (event) => { state.routeQuery = event.target.value; state.routeKey = null; renderSheet(); },
@@ -1100,7 +1157,7 @@ function routesSheet() {
     ];
   }
   const routes = searchRoutes(state.db, state.routeQuery);
-  if (!state.routeQuery.trim()) return [h('div', { class: 'page-title' }, t('路線', 'Routes')), h('div', { class: 'small muted' }, t('輸入路線號碼，查看沿線站點及到站時間。按星號可收藏常用車站。', 'Type a route number to see its stops and arrivals. Press the star to save a stop.'))];
+  if (!state.routeQuery.trim()) return h('div', { class: 'small muted' }, t('輸入路線號碼，查看沿線站點及到站時間。按星號可收藏常用車站。', 'Type a route number to see its stops and arrivals. Press the star to save a stop.'));
   if (!routes.length) return h('div', { class: 'small muted' }, t('找不到這條路線。', 'No such route.'));
   return routes.map((route) => h('button', {
     class: 'card tap', onclick: () => { history.add('routes', state.routeQuery); state.routeKey = route.key; renderSheet(); $('sheet').scrollTop = 0; },
@@ -1128,9 +1185,8 @@ function stopRow(route, seq, id, op) {
 
 function savedSheet() {
   if (!state.db) return h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('正在載入…', 'Loading…'));
-  const heading = h('div', { class: 'page-title' }, t('收藏', 'Saved'));
-  if (!state.saved.length) return [heading, h('div', { class: 'small muted' }, t('還沒有收藏。在「路線」或「站點」按星號，常用車站就會出現在這裡。', 'Nothing saved yet. Press the star on the Routes or Stops page.'))];
-  return [heading, ...state.saved.flatMap((saved) => {
+  if (!state.saved.length) return h('div', { class: 'small muted' }, t('還沒有收藏。在「路線」或「站點」按星號，常用車站就會出現在這裡。', 'Nothing saved yet. Press the star on the Routes or Stops page.'));
+  return state.saved.flatMap((saved) => {
     const route = state.db.routes[saved.routeKey];
     if (!route) return [];
     const id = route.stops[saved.op]?.[saved.seq];
@@ -1139,7 +1195,7 @@ function savedSheet() {
         h('div', { class: 'grow' }, h('div', { class: 'small bold ellipsis' }, `→ ${nameText(route.dest, state.lang)}`), h('div', { class: 'tiny muted ellipsis' }, name(id))),
         h('button', { class: 'icon-button on', 'aria-label': t('移除', 'Remove'), onclick: () => { toggleSaved(saved.routeKey, saved.seq, saved.op); renderSheet(); } }, icon('star', 20, true))),
       etaWidget(route, saved.seq, saved.op))];
-  })];
+  });
 }
 
 // MARK: Settings tab
@@ -1147,7 +1203,6 @@ function savedSheet() {
 function settingsSheet() {
   const keyInput = h('input', { type: 'password', placeholder: store.get('apiKey', '') ? t('已設定，輸入新 key 以取代', 'Saved. Type a new key to replace it') : t('貼上 DeepSeek API key', 'Paste a DeepSeek API key'), autocomplete: 'off' });
   return [
-    h('div', { class: 'page-title' }, t('設定', 'Settings')),
     h('div', { class: 'card' },
       h('div', { class: 'row' }, h('span', { class: 'grow' }, t('語言', 'Language')),
         segments([['zh', '繁體中文'], ['en', 'English']], state.lang, (lang) => {
@@ -1183,27 +1238,22 @@ function settingsSheet() {
 const sheet = {
   current: 'half',
   heights() {
-    const app = $('app').clientHeight, tabs = $('tabs').offsetHeight;
-    const top = $('top').offsetHeight ? $('top').offsetTop + $('top').offsetHeight + 8 : 0;
-    const peek = $('grabber').offsetHeight + $('bottom').offsetHeight + 56;
-    const full = app - tabs - top;
-    return { peek: Math.min(peek, full), half: Math.max(peek, Math.min(full, Math.round((app - tabs) * 0.5))), full };
+    const app = $('app').clientHeight;
+    const peek = $('grabber').offsetHeight + $('top').offsetHeight + $('bottom').offsetHeight + 6;
+    const full = app - 54;
+    return { peek: Math.min(peek, full), half: Math.max(peek, Math.min(full, Math.round(app * 0.52))), full };
   },
   measure() {
-    const root = $('app').style;
-    root.setProperty('--tabs-h', `${$('tabs').offsetHeight}px`);
-    root.setProperty('--top-h', `${$('top').offsetHeight}px`);
-    this.apply(this.heights()[$('app').classList.contains('page') ? 'full' : this.current]);
+    this.apply(this.heights()[this.current]);
   },
   apply(height) {
     $('app').style.setProperty('--panel-h', `${height}px`);
   },
   coveredHeight() {
-    return $('panel').offsetHeight + $('tabs').offsetHeight;
+    return $('panel').offsetHeight;
   },
   snap(name) {
-    if (!$('app').classList.contains('page') && name !== 'full') this.current = name;
-    if (!$('app').classList.contains('page') && name === 'full') this.current = 'full';
+    this.current = name;
     this.apply(this.heights()[name]);
     $('grabber').setAttribute('aria-valuetext', name);
   },
@@ -1245,11 +1295,6 @@ const sheet = {
 
 // MARK: Rendering
 
-const TABS = [
-  ['plan', 'route', () => t('規劃', 'Plan')], ['stops', 'pin', () => t('站點', 'Stops')], ['routes', 'bus', () => t('路線', 'Routes')],
-  ['saved', 'star', () => t('收藏', 'Saved')], ['settings', 'settings', () => t('設定', 'Settings')],
-];
-
 function renderSheet() {
   const sheets = { plan: planSheet, stops: stopsSheet, routes: routesSheet, saved: savedSheet, settings: settingsSheet };
   clear($('sheet'), sheets[state.tab]());
@@ -1285,11 +1330,6 @@ function fitPlanMap() {
 }
 
 function renderTab() {
-  clear($('tabs'), TABS.map(([id, key, label]) => h('button', {
-    'aria-current': state.tab === id ? 'page' : null, onclick: () => setTab(id),
-  }, icon(key, 25, state.tab === id && key === 'star'), label())));
-  const showsMap = state.tab === 'plan' || state.tab === 'stops';
-  $('app').classList.toggle('page', !showsMap);
   clear($('top'));
   clear($('bottom'));
   if (state.tab === 'plan') {
@@ -1299,10 +1339,13 @@ function renderTab() {
     renderStopsTop();
   } else if (state.tab === 'routes') {
     renderRoutesTop();
+  } else if (state.tab === 'saved') {
+    clear($('top'), viewHeader(t('收藏', 'Saved')));
+  } else {
+    clear($('top'), viewHeader(t('設定', 'Settings')));
   }
   renderSheet();
   sheet.measure();
-  sheet.snap(showsMap ? sheet.current : 'full');
   mapView.resize();
   drawMap();
   renderNavBanner();
@@ -1311,9 +1354,13 @@ function renderTab() {
 function setTab(tab) {
   state.tab = tab;
   renderTab();
+  sheet.snap(tab === 'plan' || tab === 'stops' ? 'half' : 'full');
   $('sheet').scrollTop = 0;
   if (tab === 'stops' && state.stopPlace) mapView.fit([offset(state.stopPlace.location, state.stopRadius, -1), offset(state.stopPlace.location, state.stopRadius, 1)], 18);
-  if (tab === 'plan') fitPlanMap();
+  if (tab === 'plan') {
+    if (state.from || state.to) fitPlanMap();
+    else mapView.home();
+  }
 }
 
 new ResizeObserver(() => mapView.resize()).observe($('map'));
@@ -1323,7 +1370,15 @@ sheet.attach();
 
 mapView.init();
 renderTab();
-mapView.fit([{ lat: 22.2, lng: 113.92 }, { lat: 22.5, lng: 114.3 }], 12);
+mapView.home();
+clear($('locate'), icon('arrow', 20));
+$('locate').addEventListener('click', async () => {
+  const fix = await getFix(true);
+  if (!fix) return;
+  drawMap();
+  mapView.me(fix);
+  mapView.follow(fix, 15);
+});
 loadDB();
 setInterval(() => { if (state.tab === 'saved') renderSheet(); }, 30_000);
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
