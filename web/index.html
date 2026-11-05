@@ -5,27 +5,34 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>hktransport</title>
   <meta name="description" content="香港公共交通：路線規劃、實時到站、AI 找地點及導航。">
-  <meta name="theme-color" content="#000000">
+  <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="hktransport">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://mapapi.geodata.gov.hk; connect-src 'self' https://data.hkbus.app https://hkbus.github.io https://data.etabus.gov.hk https://rt.data.gov.hk https://data.etagmb.gov.hk https://www.map.gov.hk https://photon.komoot.io https://api.deepseek.com; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://tiles.openfreemap.org https://data.hkbus.app https://hkbus.github.io https://data.etabus.gov.hk https://rt.data.gov.hk https://data.etagmb.gov.hk https://www.map.gov.hk https://photon.komoot.io https://api.deepseek.com; worker-src 'self' blob:; manifest-src 'self'; base-uri 'none'; form-action 'none'">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon-192.png">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="stylesheet" href="vendor/leaflet.css">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="vendor/maplibre-gl.css">
+  <link rel="stylesheet" href="styles.css?v=dev">
 </head>
 <body>
   <div id="app">
-    <section id="top"></section>
     <div id="map"></div>
-    <section id="sheet"></section>
-    <section id="bottom"></section>
+    <section id="top"></section>
+    <section id="panel">
+      <div id="grabber" role="slider" aria-label="Resize panel" aria-valuetext="half" tabindex="0"></div>
+      <div id="sheet"></div>
+      <div id="bottom"></div>
+    </section>
     <nav id="tabs" aria-label="Main"></nav>
   </div>
   <noscript>hktransport 需要 JavaScript。</noscript>
   <script src="vendor/leaflet.js"></script>
-  <script type="module" src="js/app.js"></script>
+  <script src="vendor/maplibre-gl.js"></script>
+  <script src="vendor/leaflet-maplibre-gl.js"></script>
+  <script type="module" src="js/app.js?v=dev"></script>
 </body>
 </html>
