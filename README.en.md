@@ -6,6 +6,10 @@ A macOS app for Hong Kong public transport, with an optional Dynamic Island styl
 
 It combines the notch shell from [Notch Triage](https://github.com/0Hyacinth0/Notch-Triage) (the panel, hover and expand animations, notch geometry) with the ETA logic of [hk-independent-bus-eta](https://github.com/hkbus/hk-independent-bus-eta) (the `hk-bus-eta` fetchers and the hkbus.app route database), rewritten in native Swift. There is no web UI.
 
+## On your phone
+
+Open <https://kevinwentao07-zwt.github.io/hktransport/> in your phone's browser; there is nothing to install. On iPhone, tap Share → Add to Home Screen in Safari; on Android, tap Install app in the Chrome menu. The source is in [`web/`](web/).
+
 ## Download
 
 Get the latest `.dmg` from [Releases](https://github.com/kevinwentao07-zwt/hktransport/releases/latest), open it and drag hktransport into Applications. Requires macOS 14 or later, on Apple silicon or Intel.

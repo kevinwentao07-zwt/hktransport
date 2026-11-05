@@ -17,6 +17,10 @@
 - **靈動島（可選）**：在設定開啟後，於劉海顯示下一班車，懸停預覽，點擊打開主視窗，預設關閉。開啟時關閉主視窗，app 會留在劉海；關閉時，關閉主視窗即結束 app。
 - **個人設定**：中文／英文介面、到站預報更新間隔（1、15、30 或 60 秒），以及登入時啟動。
 
+## 手機版
+
+用手機瀏覽器打開 <https://kevinwentao07-zwt.github.io/hktransport/>，無需安裝。iPhone 可在 Safari 按分享 →「加入主畫面」，Android 可在 Chrome 選單按「安裝應用程式」。原始碼在 [`web/`](web/)。
+
 ## 下載安裝
 
 到 [Releases](https://github.com/kevinwentao07-zwt/hktransport/releases/latest) 下載最新的 `.dmg`，打開後把 hktransport 拖到 Applications。需要 macOS 14 或以上，支援 Apple 晶片及 Intel Mac。
