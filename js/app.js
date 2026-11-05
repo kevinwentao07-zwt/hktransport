@@ -75,6 +75,7 @@ function h(tag, props = {}, ...children) {
   return element;
 }
 const $ = (id) => document.getElementById(id);
+const calm = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 const ICONS = {
   route: ['M6 19a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z', 'M18 10a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z', 'M8.5 16.5H15a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h6.5'],
@@ -125,10 +126,19 @@ function badge(op, route) {
   return element;
 }
 
+const thumbs = new Map();
+
+/** A re-render starts the thumb where it was, so it slides to the new choice. */
 function segments(options, selected, choose) {
-  return h('div', { class: 'segments' }, options.map(([value, label]) => h('button', {
+  const key = options.map(([value]) => value).join(), index = options.findIndex(([value]) => value === selected);
+  const element = h('div', { class: 'segments' }, options.map(([value, label]) => h('button', {
     'aria-pressed': String(value === selected), onclick: () => choose(value),
   }, label)));
+  element.style.setProperty('--n', options.length);
+  element.style.setProperty('--i', thumbs.get(key) ?? index);
+  thumbs.set(key, index);
+  requestAnimationFrame(() => requestAnimationFrame(() => element.style.setProperty('--i', index)));
+  return element;
 }
 
 /** Past searches: the latest few, with the rest folded away. */
@@ -160,7 +170,7 @@ function historyBar(box, pick) {
 // MARK: Map
 
 const mapView = (() => {
-  let map, content, base;
+  let map, content, base, flying = false;
   const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
   const style = () => `https://tiles.openfreemap.org/styles/${darkMode.matches ? 'dark' : 'liberty'}`;
   /** The maps label everything in both languages; show just the one being read. */
@@ -202,13 +212,16 @@ const mapView = (() => {
       if (!points.length) return;
       // Frame the part of the map the search card and panel leave uncovered.
       const wide = window.matchMedia('(min-width: 820px)').matches;
-      map.fitBounds(L.latLngBounds(points.map(point)), {
-        maxZoom, animate: false,
-        paddingTopLeft: [wide ? 440 : 24, wide ? 30 : 50],
-        paddingBottomRight: [wide ? 30 : 24, wide ? 30 : sheet.coveredHeight() + 24],
-      });
+      const options = {
+        maxZoom, paddingTopLeft: [wide ? 440 : 24, wide ? 30 : 50],
+        paddingBottomRight: [wide ? 30 : 24, wide ? 30 : sheet.targetHeight() + 32],
+      };
+      const bounds = L.latLngBounds(points.map(point));
+      if (calm.matches || !flying) map.fitBounds(bounds, { ...options, animate: false });
+      else map.flyToBounds(bounds, { ...options, duration: 0.9, easeLinearity: 0.2 });
+      flying = true;
     },
-    follow(location, zoom = 16) { map.setView(point(location), Math.max(map.getZoom(), zoom)); },
+    follow(location, zoom = 16) { map.flyTo(point(location), Math.max(map.getZoom(), zoom), { duration: calm.matches ? 0 : 0.8 }); },
     ends(from, to) {
       if (from) L.marker(point(from.location), { icon: pin('', 'pin start'), title: from.name }).addTo(content);
       if (to) L.marker(point(to.location), { icon: pin('', 'pin end', '#ff3b30'), title: to.name, zIndexOffset: 500 }).addTo(content);
@@ -220,12 +233,16 @@ const mapView = (() => {
         const line = segment.points.map(point);
         L.polyline(line, { color: '#fff', weight: 8, opacity: 0.95 }).addTo(content);
         const isWalk = segment.mode === 'walk';
-        L.polyline(line, {
+        const stroke = L.polyline(line, {
           color: isWalk ? '#2f7bf6' : lineColor(segment.op, segment.route), weight: isWalk ? 4 : 5, dashArray: isWalk ? '1 9' : null,
+          className: isWalk ? '' : 'route-line',
         }).addTo(content);
+        // One unit long, so the line can be drawn on by animating its dash.
+        if (!isWalk) stroke.getElement()?.setAttribute('pathLength', 1);
         segment.stopIDs.forEach((id, index) => {
-          L.circleMarker(point(segment.points[index]), { radius: 4, color: lineColor(segment.op, segment.route), fillColor: '#fff', fillOpacity: 1, weight: 2 })
+          const dot = L.circleMarker(point(segment.points[index]), { radius: 4, color: lineColor(segment.op, segment.route), fillColor: '#fff', fillOpacity: 1, weight: 2, className: 'stop-dot' })
             .bindTooltip(name(id), { permanent: true, direction: 'right', offset: [6, 0], className: 'stop-label' }).addTo(content);
+          dot.getElement()?.style.setProperty('--i', Math.min(index, 14));
         });
         if (segment.mode === 'ride') {
           const chip = document.createElement('span');
@@ -335,7 +352,22 @@ function showRouteView() {
   if (state.routeView) return;
   state.routeView = true;
   renderPlanTop();
+  slideView('forward');
 }
+
+/** Slides the sheet's content in from the side it logically came from. */
+function slideView(direction) {
+  for (const id of ['top', 'sheet']) {
+    const element = $(id);
+    element.classList.remove('view-forward', 'view-back');
+    void element.offsetWidth; // Restart the animation if one is running.
+    element.classList.add(`view-${direction}`);
+    setTimeout(() => element.classList.remove(`view-${direction}`), 500);
+  }
+}
+
+let staggerNext = false;
+const stagger = () => { staggerNext = true; };
 
 /** Back to the home sheet. */
 function closeTrip() {
@@ -343,7 +375,9 @@ function closeTrip() {
   stopNavigation();
   resetPlan();
   Object.assign(state, { origin: '', destination: '', discovery: null, lastChat: null, routeView: false, phase: 'idle' });
+  stagger();
   renderTab();
+  slideView('back');
   sheet.snap('half');
   mapView.home();
 }
@@ -421,6 +455,7 @@ async function runPlan(request) {
   if (stale()) return;
   if (!journeys.length) return setPhase('failed', t('找不到公共交通路線，可能已經收車，或距離太近／太遠。', 'No public transport route found. Services may have ended, or the trip is too short or too far.'));
   state.journeys = journeys;
+  stagger();
   setPhase('checkingLive');
 
   const arrivals = liveArrivalCache(state.db, state.lang);
@@ -533,6 +568,7 @@ async function discover(wish, area, isTyped, run = ++planRun) {
     }
   }
   state.discovery = { stage: 'choosing', wish, areaName: searchArea.name, suggestions };
+  stagger();
   setPhase('idle');
   renderBottomStatus();
   sheet.snap('half');
@@ -649,6 +685,7 @@ function renderChatControls() {
   const mic = $('mic');
   if (mic) {
     clear(mic, icon(state.listening ? 'stop' : 'mic', 20, state.listening));
+    mic.classList.toggle('listening', state.listening);
     mic.style.color = state.listening ? 'var(--danger)' : '';
   }
   const input = $('chat-input');
@@ -736,6 +773,7 @@ async function searchStops(aroundMe = false) {
   state.stops = place ? stopsNear(index, place.location, state.stopRadius) : [];
   state.stopBusy = false;
   renderStopsTop();
+  stagger();
   renderSheet();
   drawMap();
   if (place) mapView.fit([offset(place.location, state.stopRadius, -1), offset(place.location, state.stopRadius, 1)], 18);
@@ -878,13 +916,14 @@ function journeyCard(journey) {
   const shown = journey.legs.filter((leg) => leg.type === 'ride' || leg.minutes >= 0.5);
   const changes = transfers(journey);
   const arrive = clock(journey.departure + totalMinutes(journey) * 60_000);
-  return h('div', { class: `card${isOpen ? ' open' : ''}` },
+  return h('div', { class: `card${isOpen ? ' open' : ''}${state.justOpened === id ? ' reveal' : ''}`, 'data-journey': id },
     h('button', {
       class: 'tap', 'aria-expanded': String(isOpen), onclick: () => {
         state.expanded = isOpen ? null : id;
+        state.justOpened = isOpen ? null : id;
         renderSheet();
-        drawMap();
         fitPlanMap();
+        if (!isOpen) document.querySelector('.card.open')?.scrollIntoView({ block: 'nearest', behavior: calm.matches ? 'auto' : 'smooth' });
       },
     },
       h('div', { class: 'row', style: 'align-items:baseline' },
@@ -984,6 +1023,7 @@ function planSheet() {
     return items;
   }
   if (PHASES[state.phase]) items.push(h('div', { class: 'status' }, h('span', { class: 'spinner' }), PHASES[state.phase]()));
+  if (PHASES[state.phase] && !state.journeys.length) items.push(h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }));
   if (state.error) items.push(h('div', { class: 'notice' }, state.error));
   if (state.journeys.length) {
     items.push(segments([['fastest', t('最快', 'Fastest')], ['fewerTransfers', t('少轉車', 'Fewer changes')], ['lessWalking', t('少行路', 'Less walking')]], state.preference, (preference) => {
@@ -1249,29 +1289,39 @@ const sheet = {
   apply(height) {
     $('app').style.setProperty('--panel-h', `${height}px`);
   },
-  coveredHeight() {
-    return $('panel').offsetHeight;
+  /** Where the sheet is heading, which the map must clear even mid-animation. */
+  targetHeight() {
+    return this.heights()[this.current];
   },
   snap(name) {
     this.current = name;
     this.apply(this.heights()[name]);
+    $('app').classList.toggle('sheet-full', name === 'full');
     $('grabber').setAttribute('aria-valuetext', name);
   },
   attach() {
     const grabber = $('grabber'), panel = $('panel');
-    let startY = 0, startHeight = 0, moved = false;
+    let startY = 0, startHeight = 0, moved = false, lastY = 0, lastTime = 0, speed = 0;
     grabber.addEventListener('pointerdown', (event) => {
       grabber.setPointerCapture(event.pointerId);
-      startY = event.clientY;
+      startY = lastY = event.clientY;
+      lastTime = event.timeStamp;
       startHeight = panel.offsetHeight;
       moved = false;
+      speed = 0;
       panel.classList.add('dragging');
     });
     grabber.addEventListener('pointermove', (event) => {
       if (!panel.classList.contains('dragging')) return;
       moved ||= Math.abs(event.clientY - startY) > 4;
-      const { peek, full } = this.heights();
-      this.apply(Math.min(full, Math.max(peek, startHeight + startY - event.clientY)));
+      const elapsed = event.timeStamp - lastTime;
+      if (elapsed > 0) speed = (lastY - event.clientY) / elapsed; // Pixels per ms; up is positive.
+      lastY = event.clientY;
+      lastTime = event.timeStamp;
+      const { peek, full } = this.heights(), wanted = startHeight + startY - event.clientY;
+      // Past either end the sheet resists like a rubber band.
+      const height = wanted > full ? full + (wanted - full) * 0.18 : wanted < peek ? peek - (peek - wanted) * 0.18 : wanted;
+      this.apply(height);
     });
     const finish = () => {
       if (!panel.classList.contains('dragging')) return;
@@ -1279,8 +1329,10 @@ const sheet = {
       const heights = this.heights(), height = panel.offsetHeight;
       const order = ['peek', 'half', 'full'];
       // A tap steps through the sizes; a drag lands on the nearest one.
-      const next = moved ? order.reduce((best, key) => (Math.abs(heights[key] - height) < Math.abs(heights[best] - height) ? key : best))
-        : order[(order.indexOf(this.current) + 1) % order.length];
+      const nearest = order.reduce((best, key) => (Math.abs(heights[key] - height) < Math.abs(heights[best] - height) ? key : best));
+      // A quick flick moves on a step, wherever the finger let go.
+      const flicked = Math.abs(speed) > 0.5 ? order[Math.max(0, Math.min(2, order.indexOf(this.current) + Math.sign(speed)))] : nearest;
+      const next = moved ? flicked : order[(order.indexOf(this.current) + 1) % order.length];
       this.snap(next);
     };
     grabber.addEventListener('pointerup', finish);
@@ -1298,10 +1350,31 @@ const sheet = {
 function renderSheet() {
   const sheets = { plan: planSheet, stops: stopsSheet, routes: routesSheet, saved: savedSheet, settings: settingsSheet };
   clear($('sheet'), sheets[state.tab]());
+  state.justOpened = null;
+  document.querySelectorAll('.reveal .leg, .reveal > .primary').forEach((element, index) => element.style.setProperty('--i', index));
+  if (staggerNext) {
+    staggerNext = false;
+    const element = $('sheet');
+    [...element.children].forEach((child, index) => child.style.setProperty('--i', Math.min(index, 8)));
+    element.classList.add('stagger');
+    setTimeout(() => element.classList.remove('stagger'), 1100);
+  }
   if (state.tab === 'plan') drawMap();
 }
 
+let drawnScene = '', entering = null;
+
+/** Lines and pins animate in only when the scene really changes, not on every redraw. */
+function markScene(scene) {
+  if (scene === drawnScene) return;
+  drawnScene = scene;
+  $('map').classList.add('entering');
+  clearTimeout(entering);
+  entering = setTimeout(() => $('map').classList.remove('entering'), 1800);
+}
+
 function drawMap() {
+  markScene(`${state.tab}|${state.expanded ?? ''}|${state.nav?.id ?? ''}|${state.to?.name ?? ''}|${state.discovery?.stage ?? ''}|${state.stopPlace?.name ?? ''}`);
   mapView.clear();
   if (state.tab === 'stops') {
     if (state.stopPlace) {
@@ -1352,8 +1425,11 @@ function renderTab() {
 }
 
 function setTab(tab) {
+  const direction = tab === 'plan' ? 'back' : 'forward';
   state.tab = tab;
+  stagger();
   renderTab();
+  slideView(direction);
   sheet.snap(tab === 'plan' || tab === 'stops' ? 'half' : 'full');
   $('sheet').scrollTop = 0;
   if (tab === 'stops' && state.stopPlace) mapView.fit([offset(state.stopPlace.location, state.stopRadius, -1), offset(state.stopPlace.location, state.stopRadius, 1)], 18);
