@@ -16,6 +16,7 @@ final class AppModel: ObservableObject {
         static let language = "hktransport.language"
         static let refreshInterval = "hktransport.refreshInterval"
         static let deepSeekModel = "hktransport.deepSeekModel"
+        static let showsNotch = "hktransport.showsNotch"
         static let deepSeekKeychainAccount = "deepseek-api-key"
     }
 
@@ -39,6 +40,12 @@ final class AppModel: ObservableObject {
     @Published var deepSeekModel: String {
         didSet { defaults.set(deepSeekModel, forKey: Key.deepSeekModel) }
     }
+    /// The Dynamic Island style surface in the notch, on top of the ordinary window.
+    @Published var showsNotch: Bool {
+        didSet { defaults.set(showsNotch, forKey: Key.showsNotch) }
+    }
+    /// Set by the app delegate, which owns the window.
+    var openMainWindow: () -> Void = {}
     @Published var language: Lang {
         didSet {
             defaults.set(language.rawValue, forKey: Key.language)
@@ -60,6 +67,7 @@ final class AppModel: ObservableObject {
         savedStops = defaults.data(forKey: Key.savedStops)
             .flatMap { try? JSONDecoder().decode([SavedStop].self, from: $0) } ?? []
         deepSeekModel = defaults.string(forKey: Key.deepSeekModel) ?? DeepSeekClient.defaultModel
+        showsNotch = defaults.bool(forKey: Key.showsNotch)
         hasDeepSeekKey = KeychainStore.contains(Key.deepSeekKeychainAccount)
     }
 
@@ -193,10 +201,17 @@ final class AppModel: ObservableObject {
         SMAppService.openSystemSettingsLoginItems()
     }
 
-    func showSettings() {
+    func showSettings(openingPanel: Bool = true) {
         refreshLoginItemStatus()
         isShowingSettings = true
-        sendPanelEvent(.workspaceOpened)
+        if openingPanel { sendPanelEvent(.workspaceOpened) }
+    }
+
+    /// Back to the collapsed state, for when the notch surface is removed.
+    func resetPanel() {
+        hoverCollapseTask?.cancel()
+        panelCloseTask?.cancel()
+        panelState = PanelState()
     }
 
     func hideSettings() {

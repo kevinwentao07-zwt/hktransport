@@ -3,6 +3,7 @@ import SwiftUI
 /// Expanded panel: saved stops with live ETAs, or route search -> stop picker.
 struct TransportPanel: View {
     @ObservedObject var model: AppModel
+    @Environment(\.isInMainWindow) private var isInMainWindow
     @State private var query = ""
     @State private var pickedRouteKey: String?
     @State private var expandedStop: SavedStop?
@@ -131,7 +132,7 @@ struct TransportPanel: View {
             }
             Spacer()
             Button {
-                model.showSettings()
+                model.showSettings(openingPanel: !isInMainWindow)
             } label: {
                 Label(model.t("設定", "Settings"), systemImage: "gearshape")
                     .font(.system(size: 13, weight: .medium))
@@ -312,20 +313,24 @@ struct TransportPanel: View {
 
 struct PanelCloseButton: View {
     @ObservedObject var model: AppModel
+    @Environment(\.isInMainWindow) private var isInMainWindow
 
     var body: some View {
-        Button {
-            model.collapseExpanded()
-        } label: {
-            Image(systemName: "xmark")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 28, height: 28)
-                .contentShape(Rectangle())
+        // The ordinary window has its own close button.
+        if !isInMainWindow {
+            Button {
+                model.collapseExpanded()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(model.t("關閉面板（⌘W）", "Close panel (⌘W)"))
+            .accessibilityLabel(model.t("關閉面板", "Close panel"))
         }
-        .buttonStyle(.plain)
-        .help(model.t("關閉面板（⌘W）", "Close panel (⌘W)"))
-        .accessibilityLabel(model.t("關閉面板", "Close panel"))
     }
 }
 

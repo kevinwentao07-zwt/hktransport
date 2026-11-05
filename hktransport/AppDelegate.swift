@@ -13,6 +13,13 @@ struct HKTransportApp: App {
                 .frame(width: 460, height: 400)
                 .preferredColorScheme(.dark)
         }
+        .commands {
+            CommandGroup(before: .windowArrangement) {
+                Button("hktransport") { appDelegate.showMainWindow() }
+                    .keyboardShortcut("0")
+                Divider()
+            }
+        }
     }
 }
 
@@ -20,6 +27,8 @@ struct HKTransportApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = AppModel()
     private var panelController: NotchPanelController?
+    private var mainWindow: NSWindow?
+    private var notchSubscription: AnyCancellable?
 
     nonisolated static func shouldStartAppServices(environment: [String: String]) -> Bool {
         environment["XCTestConfigurationFilePath"] == nil
@@ -29,26 +38,97 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Hosted unit tests launch the app executable; keep the shell dormant there.
         guard Self.shouldStartAppServices(environment: ProcessInfo.processInfo.environment) else { return }
 
-        // Accessory apps can be auto-terminated when no window is visible.
-        // The notch panel stays resident even while collapsed.
+        // The notch panel can stay resident with no ordinary window open.
         ProcessInfo.processInfo.automaticTerminationSupportEnabled = true
         ProcessInfo.processInfo.disableAutomaticTermination(
             "hktransport remains available while its panel is collapsed"
         )
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(.regular)
 
-        let controller = NotchPanelController(model: model)
-        panelController = controller
-        controller.show()
+        model.openMainWindow = { [weak self] in self?.showMainWindow() }
+        showMainWindow()
+        notchSubscription = model.$showsNotch.removeDuplicates().sink { [weak self] isOn in
+            self?.setNotch(isOn)
+        }
         model.start()
+    }
+
+    func showMainWindow() {
+        let window = mainWindow ?? makeMainWindow()
+        mainWindow = window
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func makeMainWindow() -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: NotchLayout.expandedPanelWidth, height: NotchLayout.expandedPanelHeight + 40),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "hktransport"
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = .black
+        window.minSize = NSSize(width: 960, height: 620)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: MainWindowView(model: model))
+        window.center()
+        window.setFrameAutosaveName("hktransport.main")
+        return window
+    }
+
+    private func setNotch(_ isOn: Bool) {
+        if isOn, panelController == nil {
+            let controller = NotchPanelController(model: model)
+            panelController = controller
+            controller.show()
+        } else if !isOn, let controller = panelController {
+            controller.hide()
+            panelController = nil
+            model.resetPanel()
+            // Turning it off from inside the notch panel would otherwise leave nothing on screen.
+            showMainWindow()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         model.stop()
     }
 
+    /// With the notch on, the app lives on there after its window closes.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
+        !model.showsNotch
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { showMainWindow() }
+        return true
+    }
+}
+
+/// The full app in an ordinary window.
+private struct MainWindowView: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        TransportPanel(model: model)
+            .environment(\.isInMainWindow, true)
+            .environment(\.colorScheme, .dark)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.black)
+    }
+}
+
+private struct IsInMainWindowKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// True in the ordinary window, false in the notch panel.
+    var isInMainWindow: Bool {
+        get { self[IsInMainWindowKey.self] }
+        set { self[IsInMainWindowKey.self] = newValue }
     }
 }
 
@@ -157,6 +237,13 @@ final class NotchPanelController {
     func show() {
         resize(state: model.panelState, animated: false)
         panel.orderFrontRegardless()
+    }
+
+    func hide() {
+        scheduledResizeTask?.cancel()
+        frameAnimationTimer?.invalidate()
+        cancellables.removeAll()
+        panel.orderOut(nil)
     }
 
     private func scheduleResize(animated: Bool) {

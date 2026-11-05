@@ -14,7 +14,7 @@ hktransport_write_info_plist() {
 <key>CFBundleShortVersionString</key><string>$app_version</string>
 <key>CFBundleVersion</key><string>$build_version</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
-<key>LSUIElement</key><true/>
+<key>CFBundleIconFile</key><string>AppIcon</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSLocationUsageDescription</key><string>在 Apple 地圖顯示你的位置、排列附近巴士站，並作為路線規劃的起點。</string>

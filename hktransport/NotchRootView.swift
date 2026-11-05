@@ -35,14 +35,19 @@ struct NotchRootView: View {
 
     private var collapsedBar: some View {
         Button {
-            model.toggleExpanded()
+            // The notch is a glance; the app itself is always the ordinary window.
+            model.openMainWindow()
         } label: {
             LivingNotch(model: model)
         }
         .buttonStyle(StableNotchButtonStyle())
         .contextMenu {
+            Button(model.t("打開主視窗", "Open main window"), systemImage: "macwindow") {
+                model.openMainWindow()
+            }
             Button(model.t("設定…", "Settings…"), systemImage: "gearshape") {
-                model.showSettings()
+                model.showSettings(openingPanel: false)
+                model.openMainWindow()
             }
             Divider()
             Button(model.t("English", "中文")) {
@@ -62,7 +67,7 @@ struct NotchRootView: View {
             }
             .frame(height: compactHeight)
         }
-        .accessibilityLabel(model.t(model.isExpanded ? "收起" : "展開", model.isExpanded ? "Collapse" : "Expand"))
+        .accessibilityLabel(model.t("打開 hktransport", "Open hktransport"))
         .frame(maxWidth: .infinity, alignment: .top)
     }
 }

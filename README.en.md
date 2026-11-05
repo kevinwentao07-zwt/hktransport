@@ -2,7 +2,7 @@
 
 [繁體中文](README.md) | English
 
-A macOS notch app for Hong Kong public transport arrivals: KMB / LWB, Citybus, NLB, green minibus, Light Rail and MTR.
+A macOS app for Hong Kong public transport, with an optional Dynamic Island style display in the MacBook notch (turn it on in Settings). It covers arrivals for KMB / LWB, Citybus, NLB, green minibus, Light Rail and MTR.
 
 It combines the notch shell from [Notch Triage](https://github.com/0Hyacinth0/Notch-Triage) (the panel, hover and expand animations, notch geometry) with the ETA logic of [hk-independent-bus-eta](https://github.com/hkbus/hk-independent-bus-eta) (the `hk-bus-eta` fetchers and the hkbus.app route database), rewritten in native Swift. There is no web UI.
 
@@ -15,6 +15,8 @@ The app isn't notarized by Apple, so the first launch says macOS can't verify th
 To build a DMG yourself, run `Package hktransport.command`; it writes to `dist/`.
 
 ## Using it
+
+hktransport opens as an ordinary window with a Dock icon. Turn on **Dynamic Island (notch)** in Settings to show your next arrival at the notch, with a hover preview; clicking it opens the main window. It is off by default. While it is on, closing the window keeps the app in the notch, and clicking the Dock icon brings the window back. While it is off, closing the window quits the app.
 
 **Stop search** takes a stop or place and lists all bus, minibus, MTR and Light Rail stops around it, filtered by type and radius. Open a stop for routes and arrivals, or to plan a trip there.
 

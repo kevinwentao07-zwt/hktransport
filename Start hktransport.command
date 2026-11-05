@@ -64,4 +64,4 @@ fi
 
 open "$app_bundle"
 clear_bundle_metadata
-print 'hktransport is ready. Click the notch to open it.'
+print 'hktransport is ready.'

@@ -24,6 +24,35 @@ final class SettingsTests: XCTestCase {
     }
 
     @MainActor
+    func testDynamicIslandIsOffUntilChosenAndIsRemembered() throws {
+        let suite = "hktransport.settings-tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let model = AppModel(defaults: defaults)
+        XCTAssertFalse(model.showsNotch)
+        model.showsNotch = true
+        XCTAssertTrue(AppModel(defaults: defaults).showsNotch)
+    }
+
+    @MainActor
+    func testSettingsInTheMainWindowLeaveTheNotchPanelClosed() throws {
+        let suite = "hktransport.settings-tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let model = AppModel(defaults: defaults)
+        model.showSettings(openingPanel: false)
+        XCTAssertTrue(model.isShowingSettings)
+        XCTAssertFalse(model.isExpanded)
+
+        model.showSettings()
+        XCTAssertTrue(model.isExpanded)
+        model.resetPanel()
+        XCTAssertFalse(model.isExpanded)
+    }
+
+    @MainActor
     func testUnknownPreferencesFallBackToDefaults() throws {
         let suite = "hktransport.settings-tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

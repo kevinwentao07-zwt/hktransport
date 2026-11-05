@@ -64,6 +64,24 @@ struct SettingsPanel: View {
 
                         Divider().padding(.horizontal, 14)
 
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Label(model.t("靈動島（劉海顯示）", "Dynamic Island (notch)"), systemImage: "capsule.fill")
+                                Spacer()
+                                Toggle(model.t("靈動島", "Dynamic Island"), isOn: $model.showsNotch)
+                                    .labelsHidden()
+                                    .toggleStyle(.switch)
+                            }
+                            Text(model.t("在螢幕頂部劉海顯示下一班車，懸停預覽，點擊打開主視窗。開啟後，關閉主視窗時 app 會留在劉海。",
+                                         "Shows your next arrival at the notch, with a hover preview. Click it to open the main window. While on, closing the main window keeps the app in the notch."))
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(14)
+
+                        Divider().padding(.horizontal, 14)
+
                         HStack {
                             Label(model.t("登入時啟動", "Launch at login"), systemImage: "power")
                             Spacer()
