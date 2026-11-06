@@ -31,20 +31,50 @@ final class RouteTrackTests: XCTestCase {
         XCTAssertNil(route(["a", "b", "c", "d"]).circularTurn(.kmb, stopList: stops))
     }
 
-    func testABusFarFromTheTimeShownIsADifferentBus() {
+    private func times(_ rows: [[Double]], from now: Date) -> [RouteArrival] {
+        rows.enumerated().map { RouteArrival(position: $0.offset, times: $0.element.map { now.addingTimeInterval($0 * 60) }) }
+    }
+
+    func testBusesComeFromTheTimesAtEveryStop() {
         let stops = ["a": stop(22.30), "b": stop(22.31), "c": stop(22.32), "d": stop(22.33), "e": stop(22.34)]
-        let route = route(["a", "b", "c", "d", "e"])
-        let coming = RouteVehicle(position: 1, location: StopLocation(lat: 22.31, lng: 114.1), heading: 0, minutes: 1, isNext: true)
-        XCTAssertEqual(RouteVehicles.due(coming, in: 120, route: route, op: .kmb, boardPosition: 2, stopList: stops), coming)
-        XCTAssertEqual(RouteVehicles.due(coming, in: 120, route: route, op: .kmb, boardPosition: 4, stopList: stops)?.position, 3)
-        XCTAssertNil(RouteVehicles.due(coming, in: 19 * 60, route: route, op: .kmb, boardPosition: 2, stopList: stops))
+        let route = route(["a", "b", "c", "d", "e"]), now = Date()
+        // Stops are 2 minutes apart. One bus reaches d in 1 minute; the one behind it reaches c in 1.
+        let two = times([[], [], [1], [1, 3], [3, 5]], from: now)
+        let found = RouteVehicles.find(two, route: route, op: .kmb, boardPosition: 3, stopList: stops, now: now)
+        XCTAssertEqual(found.map(\.position), [2.5, 1.5])
+        XCTAssertEqual(found.map(\.minutes), [1, 3])
+        XCTAssertEqual(found.map(\.isNext), [true, false])
+        // Choosing another stop only changes the times read off: the buses stay where they are.
+        let later = RouteVehicles.find(two, route: route, op: .kmb, boardPosition: 4, stopList: stops, now: now)
+        XCTAssertEqual(later.map(\.position), [2.5, 1.5])
+        XCTAssertEqual(later.map(\.minutes), [3, 5])
+        XCTAssertEqual(RouteVehicles.find(two, route: route, op: .kmb, boardPosition: nil, stopList: stops, now: now).count, 2)
     }
 
     func testABusAtTheRidersStopHasGone() {
         let stops = ["a": stop(22.30), "b": stop(22.31), "c": stop(22.32), "d": stop(22.33), "e": stop(22.34)]
-        let now = Date(), arrivals = [RouteArrival(position: 0, times: [now.addingTimeInterval(19 * 60)]),
-                                      RouteArrival(position: 3, times: [now.addingTimeInterval(60)])]
-        let found = RouteVehicles.find(arrivals, route: route(["a", "b", "c", "d", "e"]), op: .kmb, boardPosition: 0, stopList: stops, now: now)
+        let now = Date(), two = times([[], [], [1], [1, 3], [3, 5]], from: now)
+        let found = RouteVehicles.find(two, route: route(["a", "b", "c", "d", "e"]), op: .kmb, boardPosition: 1, stopList: stops, now: now)
+        XCTAssertEqual(found.map(\.minutes), [nil, nil])
         XCTAssertFalse(found.contains(where: \.isNext))
+    }
+
+    func testABusNotFollowedOrNotSetOffIsNotShown() {
+        let stops = ["a": stop(22.30), "b": stop(22.31), "c": stop(22.32), "d": stop(22.33), "e": stop(22.34)]
+        let route = route(["a", "b", "c", "d", "e"]), now = Date()
+        let waiting = times([[5], [7], [9], [11], [13]], from: now)
+        XCTAssertTrue(RouteVehicles.find(waiting, route: route, op: .kmb, boardPosition: 3, stopList: stops, now: now).isEmpty)
+        let planned = (0..<5).map { RouteArrival(position: $0, times: [], planned: [now.addingTimeInterval(Double($0 * 2 - 3) * 60)]) }
+        XCTAssertTrue(RouteVehicles.find(planned, route: route, op: .kmb, boardPosition: 3, stopList: stops, now: now).isEmpty)
+    }
+
+    func testABusTimedUnevenlyStaysOneBus() {
+        let stops = ["a": stop(22.30), "b": stop(22.31), "c": stop(22.32), "d": stop(22.33), "e": stop(22.34)]
+        let uneven = times([[], [1], [1, 6], [3, 4], [5, 6]], from: Date())
+        XCTAssertEqual(RouteVehicles.find(uneven, route: route(["a", "b", "c", "d", "e"]), op: .kmb, boardPosition: 3, stopList: stops, now: Date()).count, 2)
+    }
+
+    func testKMBPositionsFollowTheStops() {
+        XCTAssertEqual(ETAService.kmbPositions(["a", "b", "x", "c", "a"], in: ["a", "b", "c", "a"]), [1: 0, 2: 1, 4: 2, 5: 3])
     }
 }

@@ -152,7 +152,8 @@ final class LiveVehicles: ObservableObject {
     struct Ride: Equatable {
         let routeKey: String
         let op: Operator
-        var boardPosition: Int
+        /// Nil with no stop chosen: every bus is shown, with no time to wait for.
+        var boardPosition: Int?
         /// The live time for the rider's own stop, when the plan already has one.
         var liveDeparture: Date?
         /// A stop picked on the map asks for its own arrivals.
@@ -160,6 +161,7 @@ final class LiveVehicles: ObservableObject {
     }
 
     private static let refreshSeconds = 30.0
+    private static let sameArrivalSeconds = 90.0
     private static let framesPerSecond = 15.0
 
     @Published private(set) var shown: [RouteVehicle] = []
@@ -233,10 +235,10 @@ final class LiveVehicles: ObservableObject {
                 lastSum = .distantPast
             }
         }
-        if ride.asksStop, now.timeIntervalSince(fetchedStop) >= Self.refreshSeconds {
+        if ride.asksStop, let seq = ride.boardPosition, now.timeIntervalSince(fetchedStop) >= Self.refreshSeconds {
             fetchedStop = now
             Task {
-                let etas = (try? await ETAService.fetch(route: route, seq: ride.boardPosition, stopList: stopList, language: language)) ?? []
+                let etas = (try? await ETAService.fetch(route: route, seq: seq, stopList: stopList, language: language)) ?? []
                 if self.ride?.routeKey == ride.routeKey, self.ride?.boardPosition == ride.boardPosition { stopArrivals = etas }
                 lastSum = .distantPast
             }
@@ -253,16 +255,13 @@ final class LiveVehicles: ObservableObject {
         let track = RouteShapes.shared.track(ride.routeKey, ride.op)
         let found = RouteVehicles.find(arrivals, route: route, op: ride.op, boardPosition: ride.boardPosition,
                                        stopList: db.stopList, now: now)
+        let shownTime = ride.asksStop ? nextArrival : ride.liveDeparture
         var taken = Set<Int>()
-        targets = found.compactMap { candidate in
-            // The coming bus shows the stop's own arrival time, not a guess from where it is.
-            let arrival = candidate.isNext ? (ride.asksStop ? nextArrival : ride.liveDeparture) : nil
+        targets = found.map { candidate in
             var vehicle = candidate
-            if let arrival {
-                guard let due = RouteVehicles.due(candidate, in: arrival.timeIntervalSince(now), route: route, op: ride.op,
-                                                  boardPosition: ride.boardPosition, stopList: db.stopList) else { return nil }
-                vehicle = due
-                vehicle.minutes = max(0, Int(arrival.timeIntervalSince(now) / 60))
+            // The two answers can be up to a refresh apart; the stop, the card and the bus say the same.
+            if vehicle.isNext, let shownTime, let arrival = vehicle.arrival, abs(shownTime.timeIntervalSince(arrival)) < Self.sameArrivalSeconds {
+                vehicle.minutes = max(0, Int(shownTime.timeIntervalSince(now) / 60))
                 vehicle.isLive = true
             }
             if let place = track?.place(at: vehicle.position) {
@@ -405,20 +404,23 @@ struct RouteLayers: MapContent {
             Annotation("", coordinate: vehicle.location.coordinate2D, anchor: .center) {
                 VStack(spacing: 0) {
                     Bus3DView(heading: vehicle.heading - mapHeading, color: busColor, isMinibus: isMinibus, isFaded: !vehicle.isNext)
-                    Text(note(vehicle))
-                        .font(.system(size: 10, weight: .semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(.regularMaterial, in: Capsule())
+                    if let note = note(vehicle) {
+                        Text(note)
+                            .font(.system(size: 10, weight: .semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.regularMaterial, in: Capsule())
+                    }
                 }
             }
             .annotationTitles(.hidden)
         }
     }
 
-    private func note(_ vehicle: RouteVehicle) -> String {
-        guard vehicle.isNext else { return language("剛開出", "Just left") }
-        guard let minutes = vehicle.minutes, minutes > 0 else { return language("即將到站", "Arriving") }
+    /// Buses past the stop, or with no stop chosen, are simply shown where they are.
+    private func note(_ vehicle: RouteVehicle) -> String? {
+        guard let minutes = vehicle.minutes else { return nil }
+        guard minutes > 0 else { return language("即將到站", "Arriving") }
         return language("\(vehicle.isLive ? "" : "約 ")\(minutes) 分鐘到站", "\(minutes) min away")
     }
 }
@@ -471,7 +473,7 @@ struct LiveRouteMap: View {
     }
 
     private var ride: LiveVehicles.Ride {
-        LiveVehicles.Ride(routeKey: routeKey, op: op, boardPosition: chosen ?? max(0, ids.count - 1), liveDeparture: nil, asksStop: chosen != nil)
+        LiveVehicles.Ride(routeKey: routeKey, op: op, boardPosition: chosen, liveDeparture: nil, asksStop: chosen != nil)
     }
 
     var body: some View {

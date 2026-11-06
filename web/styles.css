@@ -229,6 +229,7 @@ svg.icon.solid { fill: currentColor; }
 .bus-marker.other { opacity: .85; }
 .bus-marker.other .bus3d { --l: 32px; --w: 13px; --h: 19px; }
 .bus-marker.other .bus3d.minibus { --l: 24px; --w: 12px; --h: 12px; }
+.bus-note:empty { display: none; }
 .bus-note { position: absolute; left: 0; top: 22px; transform: translateX(-50%); padding: 2px 7px; border-radius: 8px; background: var(--surface); color: var(--ink); box-shadow: 0 1px 4px rgba(0, 0, 0, .3); font-size: 11px; font-weight: 600; white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .bus3d { transition: none; } .bus-marker { animation: none; } }
 .card > div:empty { display: none; }

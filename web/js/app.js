@@ -1,7 +1,7 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
 import { meters,
   OP_COLORS, OP_LABELS, MODES, buildStopIndex, exactSite, instruction, journeyID, journeyPath, RETURN_COLOR, circularTurn, lineColor, lineName, matchingSites,
-  nameText, normalizeDB, partialSite, placeOnTrack, primaryMode, progressAt, retime, rides, routeTrack, score, searchRoutes, vehicleDueIn, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
+  nameText, normalizeDB, partialSite, placeOnTrack, primaryMode, progressAt, retime, rides, routeTrack, score, searchRoutes, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache, routeArrivals } from './eta.js?v=dev';
@@ -237,7 +237,8 @@ function dressBus(element, vehicle) {
   bus.style.setProperty('--body', vehicle.color);
   bus.style.setProperty('--heading', `${vehicle.heading}deg`);
   const prefix = vehicle.isLive ? '' : t('推算 ', 'About ');
-  note.textContent = !vehicle.isNext ? t('剛開出', 'Just left') : vehicle.minutes ? t(`${prefix}${vehicle.minutes} 分鐘到站`, `${prefix}${vehicle.minutes} min away`) : t('即將到站', 'Arriving');
+  // Buses past the stop, or with no stop chosen, are simply shown where they are.
+  note.textContent = vehicle.minutes == null ? '' : vehicle.minutes ? t(`${prefix}${vehicle.minutes} 分鐘到站`, `${prefix}${vehicle.minutes} min away`) : t('即將到站', 'Arriving');
 }
 
 const leafletMap = (() => {
@@ -1122,7 +1123,7 @@ function selectedPath() {
   return journey && state.from && state.to ? journeyPath(journey, state.from.location, state.to.location, state.db) : null;
 }
 
-const VEHICLE_REFRESH = 30_000;
+const VEHICLE_REFRESH = 30_000, SAME_ARRIVAL_MS = 90_000;
 let shownVehicles = [], gliding = false, lastGlide = 0, lastBusID = 0;
 let vehicleRide = null, vehicleList = [], vehicleKey = '', vehicleArrivals = [], vehicleFetched = 0, vehicleFetching = false;
 
@@ -1130,7 +1131,7 @@ let vehicleRide = null, vehicleList = [], vehicleKey = '', vehicleArrivals = [],
 function rideOnScreen() {
   if (state.focus) {
     const focus = state.focus, route = state.db?.routes[focus.routeKey];
-    if (!route || focus.position == null || ['mtr', 'lightRail'].includes(focus.op)) return null;
+    if (!route || ['mtr', 'lightRail'].includes(focus.op)) return null;
     return { routeKey: focus.routeKey, route: route.route, op: focus.op, boardPosition: focus.position };
   }
   if (state.tab !== 'plan') return null;
@@ -1169,23 +1170,22 @@ function moveVehicles() {
   }
   const track = trackOf(route, ride.op);
   const previous = vehicleList;
-  vehicleList = vehiclesOnRoute(vehicleArrivals, vehicleRide, state.db, Date.now()).flatMap((found) => {
-    // The coming bus shows the stop's own arrival time, not a guess from where it is.
-    const arrival = found.isNext ? (state.focus ? chosenStopArrival() : ride.liveDeparture) : null;
-    const vehicle = arrival ? vehicleDueIn(found, (arrival - Date.now()) / 1000, ride, state.db, SAME_BUS_STOPS) : found;
-    if (!vehicle) return [];
+  const shownTime = state.focus ? chosenStopArrival() : ride.liveDeparture;
+  vehicleList = vehiclesOnRoute(vehicleArrivals, vehicleRide, state.db, Date.now()).map((vehicle) => {
     // On the real road when that has arrived, by how far along the route it is.
     const placed = track ? { ...vehicle, ...placeOnTrack(track, vehicle.position) } : vehicle;
-    return [arrival ? { ...placed, minutes: minutesUntil(arrival), isLive: true } : placed];
+    // The two answers can be up to a refresh apart; the stop, the sheet and the bus say the same.
+    const isShownBus = vehicle.isNext && shownTime && Math.abs(shownTime - vehicle.arrival) < SAME_ARRIVAL_MS;
+    return isShownBus ? { ...placed, minutes: minutesUntil(shownTime), isLive: true } : placed;
   });
   if (previous !== vehicleList) glideVehicles();
   const coming = vehicleList.find((vehicle) => vehicle.isNext);
+  if (state.focus || state.tab !== 'plan') return mapView.approach(null);
   const ids = route.stops[ride.op], stop = stopOnRoad(route, ride.op, ride.boardPosition);
   const ahead = coming ? ids.slice(Math.ceil(coming.position), ride.boardPosition).flatMap((id, index) => {
     const location = stopOnRoad(route, ride.op, Math.ceil(coming.position) + index);
     return location ? [{ id, location, name: name(id) }] : [];
   }) : [];
-  if (state.focus || state.tab !== 'plan') return mapView.approach(null);
   const road = coming && stop && (track ? trackBetween(track, coming.position, ride.boardPosition) : [coming.location, stop]);
   mapView.approach(road || null, coming?.color, ahead);
 }

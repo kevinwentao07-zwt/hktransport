@@ -359,34 +359,59 @@ enum ETAService {
 }
 
 extension ETAService {
-    private static let mostSampledStops = 8
+    private static let askedAtOnce = 8
 
-    /// Arrival times along a whole route, for working out where its buses are. KMB publishes
-    /// them all at once; the others are sampled at stops spread along the line.
+    /// Splits times the operator is tracking from those only on its timetable.
+    private static func stopArrival(_ position: Int, _ etas: [ETA]) -> RouteArrival {
+        let isTimetabled = { (eta: ETA) in
+            ["原定", "預定", "scheduled"].contains { "\(eta.remark.zh) \(eta.remark.en)".lowercased().contains($0) }
+        }
+        let timed = etas.filter { $0.date != nil }
+        return RouteArrival(position: position, times: timed.filter { !isTimetabled($0) }.compactMap(\.date),
+                            planned: timed.filter(isTimetabled).compactMap(\.date))
+    }
+
+    /// KMB's sequence numbers as positions in `stops`, which can leave out a stop KMB lists.
+    static func kmbPositions(_ kmbStops: [String], in stops: [String]) -> [Int: Int] {
+        var positions: [Int: Int] = [:], from = 0
+        for (index, id) in kmbStops.enumerated() {
+            guard from < stops.count, let position = stops[from...].firstIndex(of: id) else { continue }
+            positions[index + 1] = position
+            from = position + 1
+        }
+        return positions
+    }
+
+    /// Arrival times at every stop of a route, for working out where its buses are. KMB answers
+    /// for all stops at once.
     static func routeArrivals(route: Route, op: Operator, stopList: [String: Stop], language: Lang) async throws -> [RouteArrival] {
         let stops = route.stops[op.rawValue] ?? []
         if op == .kmb {
             let data = try await get("https://data.etabus.gov.hk/v1/transport/kmb/route-eta/\(path(route.route))/\(path(route.serviceType))")
             let bound = route.bound["kmb"]
-            var byStop: [Int: [Date]] = [:]
+            let direction = bound == "I" ? "inbound" : "outbound"
+            let listed = try? await get("https://data.etabus.gov.hk/v1/transport/kmb/route-stop/\(path(route.route))/\(direction)/\(path(route.serviceType))")
+            let positions = try listed.map { kmbPositions(rows(try json($0)["data"]).map { string($0["stop"]) }, in: stops) }
+            var byStop: [Int: [ETA]] = [:]
             for row in rows(try json(data)["data"]) {
-                guard string(row["dir"]) == bound, let seq = int(row["seq"]), let date = parseDate(string(row["eta"])) else { continue }
-                byStop[seq - 1, default: []].append(date)
+                guard string(row["dir"]) == bound, let seq = int(row["seq"]), let position = positions.map({ $0[seq] }) ?? seq - 1 else { continue }
+                let remark = Name(en: string(row["rmk_en"]), zh: string(row["rmk_tc"]))
+                byStop[position, default: []].append(ETA(date: parseDate(string(row["eta"])), remark: remark, dest: .empty, co: .kmb))
             }
-            return byStop.map { RouteArrival(position: $0.key, times: $0.value) }
+            return byStop.map { stopArrival($0.key, $0.value) }
         }
-        let count = min(mostSampledStops, stops.count - 1)
-        guard count > 0 else { return [] }
-        let positions = Set((0..<count).map { Int((Double($0 * (stops.count - 2)) / Double(max(1, count - 1))).rounded()) })
         return await withTaskGroup(of: RouteArrival?.self) { group in
-            for position in positions {
+            var arrivals: [RouteArrival] = []
+            for position in stops.indices {
+                if position >= askedAtOnce, let answer = await group.next(), let arrival = answer { arrivals.append(arrival) }
                 group.addTask {
                     guard let etas = try? await fetch(op, route: route, seq: position, stopList: stopList, language: language) else { return nil }
-                    return RouteArrival(position: position, times: etas.compactMap(\.date))
+                    return stopArrival(position, etas)
                 }
             }
-            var arrivals: [RouteArrival] = []
-            for await arrival in group { if let arrival { arrivals.append(arrival) } }
+            for await answer in group {
+                if let answer { arrivals.append(answer) }
+            }
             return arrivals
         }
     }

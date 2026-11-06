@@ -245,35 +245,47 @@ test('buses are found along the whole route from its arrivals', () => {
   };
   const ride = { op: 'kmb', route: '1', routeKey: 'r', boardPosition: 3 };
   const min = 60_000;
-  // One bus reaches c in 1 minute, so it is between b and c. Another reaches e in 1 minute.
-  // The rider boards at d, so these are the bus coming and the bus just gone.
-  const arrivals = [
-    { position: 0, times: [9 * min] }, { position: 1, times: [11 * min] }, { position: 2, times: [1 * min] },
-    { position: 3, times: [3 * min] }, { position: 4, times: [1 * min] },
-  ];
-  const vehicles = T.vehiclesOnRoute(arrivals, ride, db, 0);
+  const at = (...rows) => rows.map((times, position) => ({ position, times: times.map((time) => time * min) }));
+  // Stops are 2 minutes apart. One bus reaches d in 1 minute; the one behind it reaches c in 1.
+  const two = at([], [], [1], [1, 3], [3, 5]);
+  const vehicles = T.vehiclesOnRoute(two, ride, db, 0);
   assert.equal(vehicles.length, 2);
-  close(vehicles[0].location.lat, 22.315, 0.00001);
-  assert.equal(vehicles[0].minutes, 3);
+  close(vehicles[0].position, 2.5, 0.00001);
   assert.equal(vehicles[0].isNext, true);
-  close(vehicles[0].heading, 0, 0.01);
-  close(vehicles[1].position, 3.5, 0.00001);
-  assert.equal(vehicles[1].minutes, null); // Already past the rider's stop.
+  assert.equal(vehicles[0].minutes, 1);
+  assert.equal(vehicles[0].isLive, true);
+  close(vehicles[1].position, 1.5, 0.00001);
   assert.equal(vehicles[1].isNext, false);
-  const three = [...arrivals.slice(0, 1), { position: 1, times: [1 * min] }, { position: 2, times: [3 * min] }, { position: 3, times: [1 * min] }, { position: 4, times: [3 * min] }];
-  const earlier = T.vehiclesOnRoute(three, { ...ride, boardPosition: 4 }, db, 0);
-  assert.equal(earlier.length, 1); // Two buses coming: only the nearer one shows.
-  close(earlier[0].position, 2.5, 0.00001);
+  assert.equal(vehicles[1].minutes, 3); // The one after: its own time at the rider's stop.
+  // A time already gone still places the bus: between the stops its times fall between.
+  const past = T.vehiclesOnRoute(at([], [-4], [-1], [3], [5]), ride, db, 0);
+  close(past[0].position, 2.25, 0.00001);
+  // Choosing another stop only changes the times read off: the buses stay where they are.
+  const later = T.vehiclesOnRoute(two, { ...ride, boardPosition: 4 }, db, 0);
+  assert.deepEqual(later.map((vehicle) => vehicle.position), vehicles.map((vehicle) => vehicle.position));
+  assert.deepEqual(later.map((vehicle) => vehicle.minutes), [3, 5]);
+  // Past the rider's stop: no time to wait for, and it is not the next bus.
+  const gone = T.vehiclesOnRoute(two, { ...ride, boardPosition: 1 }, db, 0);
+  assert.deepEqual(gone.map((vehicle) => vehicle.minutes), [null, null]);
+  assert.equal(gone.some((vehicle) => vehicle.isNext), false);
+  // With no stop chosen every bus is still shown.
+  assert.equal(T.vehiclesOnRoute(two, { ...ride, boardPosition: null }, db, 0).length, 2);
+  // Stops take as long as the times say, not an even share of the journey: 6 minutes from c to d.
+  const slow = T.vehiclesOnRoute(at([], [], [10, 20], [3, 16, 26], [5, 18, 28]), ride, db, 0);
+  close(slow[0].position, 2.5, 0.00001);
+  // Waiting at the start: not on the road yet. Timetable only: the operator is not following it.
+  assert.deepEqual(T.vehiclesOnRoute(at([5], [7], [9], [11], [13]), ride, db, 0), []);
+  const timetabled = [0, 1, 2, 3, 4].map((position) => ({ position, times: [], planned: [(position * 2 - 3) * min] }));
+  assert.deepEqual(T.vehiclesOnRoute(timetabled, ride, db, 0), []);
+  // A bus timed unevenly (later at c than at d) stays one bus, not two.
+  const uneven = T.vehiclesOnRoute(at([], [1], [1, 6], [3, 4], [5, 6]), ride, db, 0);
+  assert.equal(uneven.length, 2);
   assert.deepEqual(T.vehiclesOnRoute([{ position: 1, times: [] }], ride, db, 0), []);
-  // Reached the rider's stop already: it has gone, even with the next one not due for a while.
-  const left = T.vehiclesOnRoute([{ position: 0, times: [19 * min] }, { position: 3, times: [1 * min] }], { ...ride, boardPosition: 0 }, db, 0);
-  assert.equal(left.some((vehicle) => vehicle.isNext), false);
-  // Near the time shown it stays put; far from it, the due bus is elsewhere or not out yet.
-  const coming = { position: 1, location: {} };
-  assert.equal(T.vehicleDueIn(coming, 120, { ...ride, boardPosition: 2 }, db, 1.5), coming);
-  close(T.vehicleDueIn(coming, 120, { ...ride, boardPosition: 4 }, db, 1.5).position, 3, 0.00001);
-  assert.equal(T.vehicleDueIn(coming, 19 * 60, { ...ride, boardPosition: 2 }, db, 1.5), null);
-  assert.deepEqual(T.vehiclesOnRoute(arrivals, { ...ride, routeKey: 'none' }, db, 0), []);
+  assert.deepEqual(T.vehiclesOnRoute(two, { ...ride, routeKey: 'none' }, db, 0), []);
+});
+test('KMB positions follow the stops, not the sequence, when a stop is missing from the route data', () => {
+  const order = E.kmbPositions(['a', 'b', 'x', 'c', 'a'], ['a', 'b', 'c', 'a']);
+  assert.deepEqual([...order], [[1, 0], [2, 1], [4, 2], [5, 3]]);
 });
 test('a route is followed by progress along it, even over the same road twice', () => {
   const at = (lat, lng) => ({ lat, lng });

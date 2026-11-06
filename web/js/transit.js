@@ -627,11 +627,6 @@ function placeOnStops(stops, position, db) {
   };
 }
 
-/**
- * Every bus on a route, from the arrivals along it. There is no public bus tracking, but if a stop's
- * next bus comes sooner than the stop before it, a bus is between the two.
- * `arrivals` is [{position, times}], and `boardPosition` is where the rider gets on.
- */
 const LOOP_CLOSES_WITHIN = 300;
 
 /**
@@ -657,42 +652,118 @@ function secondsPerStop(route, stops) {
   return route.journeyMinutes ? (route.journeyMinutes * 60) / (stops.length - 1) : SECONDS_PER_STOP;
 }
 
+const SAME_GAP_MS = 20_000, LONGEST_GAP_MS = 20 * 60_000, MOST_STOPS_MISSED = 2;
+
 /**
- * The coming bus, kept true to the time shown for the rider's stop. A bus too far from
- * that time is a different one, so it moves to where the due bus must be; null when
- * that is before the start of the route, as the due bus has not set off yet.
+ * How long each stop to the next takes. The operator's times for different buses agree on it
+ * to the second, so the gap most pairs of times share is the true one.
  */
-export function vehicleDueIn(vehicle, seconds, ride, db, sameBusStops) {
-  const route = db.routes[ride.routeKey], stops = route?.stops[ride.op];
-  if (!stops) return vehicle;
-  const position = ride.boardPosition - seconds / secondsPerStop(route, stops);
-  if (Math.abs(position - vehicle.position) < sameBusStops) return vehicle;
-  const place = position >= 0 ? placeOnStops(stops, position, db) : null;
-  return place ? { ...vehicle, ...place, position } : null;
+function stopGaps(byStop, fallback) {
+  return byStop.slice(0, -1).map((here, position) => {
+    const gaps = here.flatMap(({ time }) => byStop[position + 1].map((next) => next.time - time))
+      .filter((gap) => gap > 0 && gap < LONGEST_GAP_MS);
+    const sharing = gaps.map((gap) => gaps.filter((other) => Math.abs(other - gap) <= SAME_GAP_MS));
+    const most = Math.max(0, ...sharing.map((group) => group.length));
+    const best = sharing.filter((group) => group.length === most)
+      .sort((a, b) => Math.abs(a[0] - fallback) - Math.abs(b[0] - fallback))[0];
+    return best ? best.reduce((sum, gap) => sum + gap, 0) / best.length : fallback;
+  });
 }
 
+/**
+ * Links the times at every stop into one timetable per bus: each continues as the next stop's time
+ * it predicts. A time too far off to be a bus that has just passed the stop before is a bus still
+ * behind it, so one the operator has timed unevenly: it joins the nearest bus not yet linked.
+ */
+function busTimetables(byStop, gaps, now) {
+  const buses = [];
+  let open = [];
+  byStop.forEach((entries, position) => {
+    const tolerance = Math.max(45_000, (gaps[position - 1] ?? 0) * 0.3);
+    const fits = open.flatMap((bus) => entries.map((entry) => ({ bus, entry, miss: Math.abs(entry.time - bus.expected) })))
+      .filter(({ miss }) => miss <= tolerance).sort((a, b) => a.miss - b.miss);
+    const linked = new Map(), used = new Set();
+    for (const { bus, entry } of fits) {
+      if (linked.has(bus) || used.has(entry)) continue;
+      linked.set(bus, entry);
+      used.add(entry);
+    }
+    for (const entry of entries) {
+      if (used.has(entry) || !position || entry.time - now <= gaps[position - 1]) continue;
+      const bus = open.filter((candidate) => !linked.has(candidate))
+        .sort((a, b) => Math.abs(entry.time - a.expected) - Math.abs(entry.time - b.expected))[0];
+      if (!bus) continue;
+      linked.set(bus, entry);
+      used.add(entry);
+    }
+    const started = entries.filter((entry) => !used.has(entry)).map((entry) => {
+      const bus = { stops: [], expected: 0, missed: 0 };
+      linked.set(bus, entry);
+      buses.push(bus);
+      return bus;
+    });
+    open = [...open, ...started].filter((bus) => {
+      const entry = linked.get(bus), gap = gaps[position] ?? 0;
+      if (entry) {
+        bus.stops.push({ position, ...entry });
+        bus.expected = entry.time + gap;
+        bus.missed = 0;
+        return true;
+      }
+      bus.expected += gap;
+      return ++bus.missed <= MOST_STOPS_MISSED;
+    });
+  });
+  return buses;
+}
+
+/** Where a bus is at `now`: between the stops its times fall between. Null when off the route. */
+function positionOf(stops, gaps, now) {
+  const next = stops.findIndex(({ time }) => time > now);
+  if (next < 0) return null;
+  const after = stops[next], before = stops[next - 1];
+  if (before) return before.position + ((after.position - before.position) * (now - before.time)) / (after.time - before.time);
+  // No stop before this one lists it, so go back along the route by the time it still needs.
+  let position = after.position, left = after.time - now;
+  while (position > 0 && left >= gaps[position - 1]) left -= gaps[--position];
+  if (position === 0) return null; // Not yet set off.
+  return position - left / gaps[position - 1];
+}
+
+/** When a bus reaches a stop: its own time there, or else counted on from its nearest stop. */
+function arrivalAt(stops, position, gaps) {
+  const anchor = stops.findLast((stop) => stop.position <= position) ?? stops[0];
+  const between = gaps.slice(Math.min(anchor.position, position), Math.max(anchor.position, position)).reduce((sum, gap) => sum + gap, 0);
+  return { arrival: anchor.time + (anchor.position <= position ? between : -between), isLive: anchor.position === position };
+}
+
+/**
+ * Every bus on a route. There is no public bus tracking, but the arrivals at all the stops together
+ * give each bus's timetable, and that says where it is now. Times for buses that are only
+ * timetabled are not followed. `arrivals` is [{position, times, planned}]; `boardPosition`, if any,
+ * is where the rider gets on, and the bus that reaches it first is the next one.
+ */
 export function vehiclesOnRoute(arrivals, ride, db, now) {
   const route = db.routes[ride.routeKey], stops = route?.stops[ride.op];
   if (!stops || stops.length < 2) return [];
-  const perStop = secondsPerStop(route, stops);
-  const nexts = arrivals.flatMap(({ position, times }) => {
-    const next = Math.min(...times.filter((time) => time > now));
-    return Number.isFinite(next) ? [{ position, next }] : [];
-  }).sort((a, b) => a.position - b.position);
-  const vehicles = nexts.flatMap((stop, index) => {
-    const before = nexts[index - 1];
-    if (!before || stop.next >= before.next) return [];
-    const position = Math.max(before.position, stop.position - (stop.next - now) / 1000 / perStop);
-    const place = placeOnStops(stops, position, db);
+  const byStop = stops.map(() => []);
+  for (const { position, times = [], planned = [] } of arrivals) {
+    if (!byStop[position]) continue;
+    byStop[position] = [...times.map((time) => ({ time, isPlanned: false })), ...planned.map((time) => ({ time, isPlanned: true }))].sort((a, b) => a.time - b.time);
+  }
+  const gaps = stopGaps(byStop, secondsPerStop(route, stops) * 1000);
+  const board = ride.boardPosition ?? null;
+  const vehicles = busTimetables(byStop, gaps, now).flatMap((bus) => {
+    if (bus.stops.every((stop) => stop.isPlanned)) return [];
+    const position = positionOf(bus.stops, gaps, now);
+    const place = position == null ? null : placeOnStops(stops, position, db);
     if (!place) return [];
-    // Held at the rider's own stop means it has already reached it, so it is not the one to wait for.
-    const minutes = position < ride.boardPosition ? Math.ceil(((ride.boardPosition - position) * perStop) / 60) : null;
-    return [{ ...place, position, minutes, color: lineColor(ride.op, ride.route), isMinibus: ride.op === 'gmb', isNext: false }];
+    const due = board != null && position < board ? arrivalAt(bus.stops, board, gaps) : { arrival: null, isLive: false };
+    return [{ ...place, position, ...due, minutes: due.arrival == null ? null : Math.max(0, Math.floor((due.arrival - now) / 60_000)), color: lineColor(ride.op, ride.route), isMinibus: ride.op === 'gmb', isNext: false }];
   });
-  // Only two matter to the rider: the one coming, and the one that has just gone.
-  const coming = vehicles.filter((vehicle) => vehicle.minutes != null).sort((a, b) => b.position - a.position)[0];
-  const gone = vehicles.filter((vehicle) => vehicle.minutes == null).sort((a, b) => a.position - b.position)[0];
-  return [coming && { ...coming, isNext: true }, gone].filter(Boolean);
+  const coming = vehicles.filter((vehicle) => vehicle.arrival != null).sort((a, b) => a.arrival - b.arrival)[0];
+  if (coming) coming.isNext = true;
+  return vehicles.sort((a, b) => b.position - a.position);
 }
 
 export function rideStopIDs(ride, db) {

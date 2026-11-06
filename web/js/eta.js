@@ -122,30 +122,76 @@ export async function fetchETA(route, seq, db, lang, onlyOperator = null) {
   return mergeETAs(lists);
 }
 
-const MOST_SAMPLED_STOPS = 8;
+const ASKED_AT_ONCE = 8;
+const isTimetabled = (remark) => /原定|預定|scheduled/i.test(`${remark?.zh} ${remark?.en}`);
 
-/**
- * Arrivals along a whole route, as [{position, times}]. KMB answers for every stop at once; the
- * others are asked at a handful of stops spread along the route.
- */
+/** Splits times the operator is tracking from those only on its timetable. */
+function stopArrivals(position, etas) {
+  const timed = etas.filter((eta) => eta.date != null);
+  const pick = (planned) => timed.filter((eta) => isTimetabled(eta.remark) === planned).map((eta) => eta.date);
+  return { position, times: pick(false), planned: pick(true) };
+}
+
+/** KMB's sequence numbers as positions in `stops`, which can leave out a stop KMB lists. */
+export function kmbPositions(kmbStops, stops) {
+  const positions = new Map();
+  let from = 0;
+  kmbStops.forEach((id, index) => {
+    const position = stops.indexOf(id, from);
+    if (position < 0) return;
+    positions.set(index + 1, position);
+    from = position + 1;
+  });
+  return positions;
+}
+
+const kmbStopLists = new Map();
+
+/** The stops KMB itself lists for a route, asked once. */
+function kmbStops(route) {
+  const direction = route.bound?.kmb === 'I' ? 'inbound' : 'outbound';
+  const url = `https://data.etabus.gov.hk/v1/transport/kmb/route-stop/${encodeURIComponent(route.route)}/${direction}/${route.serviceType}`;
+  if (!kmbStopLists.has(url)) {
+    kmbStopLists.set(url, get(url).then((json) => rows(json.data).map((row) => text(row.stop))).catch((error) => {
+      kmbStopLists.delete(url);
+      throw error;
+    }));
+  }
+  return kmbStopLists.get(url);
+}
+
+/** Arrivals at every stop of a route, as [{position, times, planned}]. KMB answers for all stops at once. */
 export async function routeArrivals(route, op, db, lang) {
   const stops = route.stops[op];
   if (op === 'kmb') {
-    const response = await fetch(`https://data.etabus.gov.hk/v1/transport/kmb/route-eta/${encodeURIComponent(route.route)}/${route.serviceType}`);
+    const [json, listed] = await Promise.all([
+      get(`https://data.etabus.gov.hk/v1/transport/kmb/route-eta/${encodeURIComponent(route.route)}/${route.serviceType}`),
+      kmbStops(route).catch(() => null),
+    ]);
+    const positions = listed && kmbPositions(listed, stops);
     const bound = route.bound?.kmb;
     const byStop = new Map();
-    for (const row of rows((await response.json()).data)) {
-      const time = parseDate(text(row.eta)), position = int(row.seq) - 1;
-      if (time == null || text(row.dir) !== bound) continue;
-      byStop.set(position, [...(byStop.get(position) ?? []), time]);
+    for (const row of rows(json.data)) {
+      const position = positions ? positions.get(int(row.seq)) : int(row.seq) - 1;
+      if (text(row.dir) !== bound || position == null) continue;
+      byStop.set(position, [...(byStop.get(position) ?? []), busETA(row, 'kmb')]);
     }
-    return [...byStop].map(([position, times]) => ({ position, times }));
+    return [...byStop].map(([position, etas]) => stopArrivals(position, etas));
   }
-  const count = Math.min(MOST_SAMPLED_STOPS, stops.length - 1);
-  const positions = [...new Set(Array.from({ length: count }, (_, index) => Math.round((index * (stops.length - 2)) / Math.max(1, count - 1))))];
-  const answers = await Promise.allSettled(positions.map((position) => fetchETA(route, position, db, lang, op)));
-  return answers.flatMap((answer, index) => (answer.status === 'fulfilled'
-    ? [{ position: positions[index], times: answer.value.map((eta) => eta.date).filter((date) => date != null) }] : []));
+  const answers = [];
+  let next = 0;
+  const askNext = async () => {
+    while (next < stops.length) {
+      const position = next++;
+      try {
+        answers.push(stopArrivals(position, await fetchETA(route, position, db, lang, op)));
+      } catch {
+        // The bus is still found from the stops around this one.
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: ASKED_AT_ONCE }, askNext));
+  return answers;
 }
 
 /** Live departures for a planned ride; shared per plan so a stop is only asked once. */

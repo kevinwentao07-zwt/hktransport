@@ -122,6 +122,8 @@ struct RouteTrack: Sendable {
 struct RouteArrival: Sendable {
     let position: Int
     let times: [Date]
+    /// Times only on the timetable, for a bus the operator is not following.
+    var planned: [Date] = []
 }
 
 /// A bus worked out from arrival times. There is no public bus tracking.
@@ -130,8 +132,9 @@ struct RouteVehicle: Identifiable, Equatable, Sendable {
     var position: Double
     var location: StopLocation
     var heading: Double
-    /// Nil once it has passed the rider's stop.
+    /// Nil once it has passed the rider's stop, or with no stop chosen.
     var minutes: Int?
+    var arrival: Date?
     var isNext: Bool
     var isLive = false
 }
@@ -153,47 +156,131 @@ enum RouteVehicles {
                 RouteTrack.heading(from, to))
     }
 
-    /// If a stop's next bus comes sooner than the stop before it, a bus is between the two.
-    /// Only two matter to the rider: the one coming, and the one that has just gone.
-    static func find(_ arrivals: [RouteArrival], route: Route, op: Operator, boardPosition: Int,
-                     stopList: [String: Stop], now: Date) -> [RouteVehicle] {
-        guard let stops = route.stops[op.rawValue], stops.count >= 2 else { return [] }
-        let perStop = secondsPerStop(route, stopCount: stops.count)
-        let nexts = arrivals.compactMap { arrival -> (position: Int, next: Date)? in
-            arrival.times.filter { $0 > now }.min().map { (arrival.position, $0) }
-        }.sorted { $0.position < $1.position }
-        var vehicles: [RouteVehicle] = []
-        for (index, stop) in nexts.enumerated() where index > 0 && stop.next < nexts[index - 1].next {
-            let before = nexts[index - 1]
-            let position = max(Double(before.position), Double(stop.position) - stop.next.timeIntervalSince(now) / perStop)
-            guard let place = place(stops, position, stopList: stopList) else { continue }
-            // Held at the rider's own stop means it has already reached it, so it is not the one to wait for.
-            let minutes = position < Double(boardPosition) ? Int(((Double(boardPosition) - position) * perStop / 60).rounded(.up)) : nil
-            vehicles.append(RouteVehicle(position: position, location: place.location, heading: place.heading, minutes: minutes, isNext: false))
-        }
-        var found: [RouteVehicle] = []
-        if var coming = vehicles.filter({ $0.minutes != nil }).max(by: { $0.position < $1.position }) {
-            coming.isNext = true
-            found.append(coming)
-        }
-        if let gone = vehicles.filter({ $0.minutes == nil }).min(by: { $0.position < $1.position }) { found.append(gone) }
-        return found
+    private struct StopTime {
+        let position: Int
+        let time: Double
+        let isPlanned: Bool
     }
 
-    /// Keeps the coming bus true to the time shown for the rider's stop. A bus too far from that
-    /// time is a different one, so it moves to where the due bus must be; nil when that is before
-    /// the start of the route, as the due bus has not set off yet.
-    static func due(_ vehicle: RouteVehicle, in seconds: Double, route: Route, op: Operator, boardPosition: Int,
-                    stopList: [String: Stop]) -> RouteVehicle? {
-        guard let stops = route.stops[op.rawValue] else { return vehicle }
-        let position = Double(boardPosition) - seconds / secondsPerStop(route, stopCount: stops.count)
-        if abs(position - vehicle.position) < sameBusStops { return vehicle }
-        guard position >= 0, let place = place(stops, position, stopList: stopList) else { return nil }
-        var moved = vehicle
-        moved.position = position
-        moved.location = place.location
-        moved.heading = place.heading
-        return moved
+    private final class Timetable {
+        var stops: [StopTime] = []
+        var expected = 0.0
+        var missed = 0
+        var link: StopTime?
+    }
+
+    private static let sameGap = 20.0, longestGap = 20 * 60.0, mostStopsMissed = 2
+
+    /// How long each stop to the next takes. The operator's times for different buses agree on it
+    /// to the second, so the gap most pairs of times share is the true one.
+    private static func stopGaps(_ byStop: [[StopTime]], fallback: Double) -> [Double] {
+        (0..<max(0, byStop.count - 1)).map { position in
+            let gaps = byStop[position].flatMap { here in byStop[position + 1].map { $0.time - here.time } }
+                .filter { $0 > 0 && $0 < longestGap }
+            let sharing = gaps.map { gap in gaps.filter { abs($0 - gap) <= sameGap } }
+            let most = sharing.map(\.count).max() ?? 0
+            let best = sharing.filter { $0.count == most }.min { abs($0[0] - fallback) < abs($1[0] - fallback) }
+            return best.map { $0.reduce(0, +) / Double($0.count) } ?? fallback
+        }
+    }
+
+    /// Links the times at every stop into one timetable per bus: each continues as the next stop's
+    /// time it predicts. A time too far off to be a bus that has just passed the stop before is a bus
+    /// still behind it, so one the operator has timed unevenly: it joins the nearest bus not yet linked.
+    private static func timetables(_ byStop: [[StopTime]], gaps: [Double], now: Double) -> [Timetable] {
+        var buses: [Timetable] = [], open: [Timetable] = []
+        for (position, entries) in byStop.enumerated() {
+            let tolerance = max(45, (position > 0 ? gaps[position - 1] : 0) * 0.3)
+            var used = Set<Int>()
+            let fits = open.flatMap { bus in entries.indices.map { (bus: bus, entry: $0, miss: abs(entries[$0].time - bus.expected)) } }
+                .filter { $0.miss <= tolerance }.sorted { $0.miss < $1.miss }
+            for fit in fits where fit.bus.link == nil && !used.contains(fit.entry) {
+                fit.bus.link = entries[fit.entry]
+                used.insert(fit.entry)
+            }
+            for index in entries.indices where !used.contains(index) && position > 0 && entries[index].time - now > gaps[position - 1] {
+                let time = entries[index].time
+                guard let bus = open.filter({ $0.link == nil }).min(by: { abs(time - $0.expected) < abs(time - $1.expected) }) else { continue }
+                bus.link = entries[index]
+                used.insert(index)
+            }
+            for index in entries.indices where !used.contains(index) {
+                let bus = Timetable()
+                bus.link = entries[index]
+                buses.append(bus)
+                open.append(bus)
+            }
+            let gap = position < gaps.count ? gaps[position] : 0
+            open = open.filter { bus in
+                defer { bus.link = nil }
+                if let link = bus.link {
+                    bus.stops.append(link)
+                    bus.expected = link.time + gap
+                    bus.missed = 0
+                    return true
+                }
+                bus.expected += gap
+                bus.missed += 1
+                return bus.missed <= mostStopsMissed
+            }
+        }
+        return buses
+    }
+
+    /// Where a bus is at `now`: between the stops its times fall between. Nil when off the route.
+    private static func position(of stops: [StopTime], gaps: [Double], now: Double) -> Double? {
+        guard let next = stops.firstIndex(where: { $0.time > now }) else { return nil }
+        let after = stops[next]
+        if next > 0 {
+            let before = stops[next - 1]
+            return Double(before.position) + Double(after.position - before.position) * (now - before.time) / (after.time - before.time)
+        }
+        // No stop before this one lists it, so go back along the route by the time it still needs.
+        var position = after.position, left = after.time - now
+        while position > 0, left >= gaps[position - 1] {
+            position -= 1
+            left -= gaps[position]
+        }
+        return position == 0 ? nil : Double(position) - left / gaps[position - 1] // At 0 it has not set off.
+    }
+
+    /// When a bus reaches a stop: its own time there, or else counted on from its nearest stop.
+    private static func arrival(of stops: [StopTime], at position: Int, gaps: [Double]) -> (time: Double, isLive: Bool) {
+        let anchor = stops.last { $0.position <= position } ?? stops[0]
+        let between = gaps[min(anchor.position, position)..<max(anchor.position, position)].reduce(0, +)
+        return (anchor.time + (anchor.position <= position ? between : -between), anchor.position == position)
+    }
+
+    /// Every bus on a route. There is no public bus tracking, but the arrivals at all the stops
+    /// together give each bus's timetable, and that says where it is now. Times for buses that are
+    /// only timetabled are not followed. The bus that reaches the rider's stop first is the next one.
+    static func find(_ arrivals: [RouteArrival], route: Route, op: Operator, boardPosition: Int?,
+                     stopList: [String: Stop], now: Date) -> [RouteVehicle] {
+        guard let stops = route.stops[op.rawValue], stops.count >= 2 else { return [] }
+        var byStop = [[StopTime]](repeating: [], count: stops.count)
+        for arrival in arrivals where byStop.indices.contains(arrival.position) {
+            byStop[arrival.position] = (arrival.times.map { StopTime(position: arrival.position, time: $0.timeIntervalSince1970, isPlanned: false) }
+                + arrival.planned.map { StopTime(position: arrival.position, time: $0.timeIntervalSince1970, isPlanned: true) })
+                .sorted { $0.time < $1.time }
+        }
+        let gaps = stopGaps(byStop, fallback: secondsPerStop(route, stopCount: stops.count))
+        let moment = now.timeIntervalSince1970
+        var vehicles: [RouteVehicle] = timetables(byStop, gaps: gaps, now: moment).compactMap { bus in
+            guard bus.stops.contains(where: { !$0.isPlanned }), let position = position(of: bus.stops, gaps: gaps, now: moment),
+                  let place = place(stops, position, stopList: stopList) else { return nil }
+            var vehicle = RouteVehicle(position: position, location: place.location, heading: place.heading, minutes: nil, isNext: false)
+            if let boardPosition, position < Double(boardPosition) {
+                let due = arrival(of: bus.stops, at: boardPosition, gaps: gaps)
+                vehicle.arrival = Date(timeIntervalSince1970: due.time)
+                vehicle.minutes = max(0, Int((due.time - moment) / 60))
+                vehicle.isLive = due.isLive
+            }
+            return vehicle
+        }
+        vehicles.sort { $0.position > $1.position }
+        let coming = vehicles.indices.filter { vehicles[$0].arrival != nil }.min { vehicles[$0].arrival! < vehicles[$1].arrival! }
+        if let coming { vehicles[coming].isNext = true }
+        return vehicles
     }
 }
 
