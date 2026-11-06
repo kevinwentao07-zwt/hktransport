@@ -6,7 +6,7 @@ import {
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache } from './eta.js?v=dev';
 import { chatMessage, deepSeek, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseWish, searchMessage } from './ai.js?v=dev';
-import { cleanArea, districtAt, inHongKong, isNearby, lookupPlace, photonSearch, verifyPlaces, withinArea } from './places.js?v=dev';
+import { HONG_KONG, cleanArea, districtAt, googleSearch, inHongKong, isNearby, lookupPlace, photonSearch, verifyPlaces, withinArea } from './places.js?v=dev';
 
 // MARK: Storage
 
@@ -170,19 +170,10 @@ function historyBar(box, pick) {
 
 // MARK: Map
 
-const mapView = (() => {
-  let map, content, base, mapKey = null, flying = false;
+const leafletMap = (() => {
+  let map, content, base, lastFit = '', flying = false;
   const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
-  const style = () => {
-    const dark = darkMode.matches;
-    return mapKey
-      ? `https://api.maptiler.com/maps/${dark ? 'streets-v2-dark' : 'streets-v2'}/style.json?key=${encodeURIComponent(mapKey)}`
-      : `https://tiles.openfreemap.org/styles/${dark ? 'dark' : 'liberty'}`;
-  };
-  const OSM = '<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>';
-  const credit = () => (mapKey
-    ? `<a href="https://www.maptiler.com/copyright/" target="_blank" rel="noopener">MapTiler</a> © ${OSM}`
-    : `<a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a> © ${OSM}`);
+  const style = () => `https://tiles.openfreemap.org/styles/${darkMode.matches ? 'dark' : 'liberty'}`;
   /** The maps label everything in both languages; show just the one being read. */
   const localize = () => {
     const gl = base?.getMaplibreMap();
@@ -211,22 +202,21 @@ const mapView = (() => {
       map.on('zoomend', markZoom);
       markZoom();
     },
-    /** Draws the base map: MapTiler with a key, and OpenFreeMap without one or once it stops working. */
-    useBase(key) {
-      mapKey = key;
+    useBase() {
+      if (base) return;
       base = L.maplibreGL({
-        style: style(), localIdeographFontFamily: '-apple-system, "PingFang HK", "Noto Sans TC", sans-serif', attribution: credit(),
+        style: style(), localIdeographFontFamily: '-apple-system, "PingFang HK", "Noto Sans TC", sans-serif',
+        attribution: '<a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>',
       }).addTo(map);
       const gl = base.getMaplibreMap();
       gl.on('style.load', localize);
-      gl.on('error', ({ error }) => {
-        if (!mapKey || ![401, 403, 429].includes(error?.status)) return;
-        map.attributionControl.removeAttribution(credit());
-        mapKey = null;
-        map.attributionControl.addAttribution(credit());
-        gl.setStyle(style(), { diff: false });
-      });
       darkMode.addEventListener('change', () => gl.setStyle(style(), { diff: false }));
+    },
+    destroy() {
+      map.remove();
+      map = base = null;
+      const element = $('map');
+      element.classList.remove('far', ...[...element.classList].filter((name) => name.startsWith('leaflet-')));
     },
     setLanguage() { localize(); },
     resize() { map?.invalidateSize(); },
@@ -240,7 +230,10 @@ const mapView = (() => {
         paddingBottomRight: [wide ? 30 : 24, wide ? 30 : sheet.targetHeight() + 32],
       };
       const bounds = L.latLngBounds(points.map(point));
-      if (calm.matches || !flying) map.fitBounds(bounds, { ...options, animate: false });
+      // Leaflet can't fly to where it already is: its path works out to NaN.
+      const fit = `${bounds.toBBoxString()}|${options.paddingBottomRight}`, still = fit === lastFit;
+      lastFit = fit;
+      if (calm.matches || !flying || still) map.fitBounds(bounds, { ...options, animate: false });
       else map.flyToBounds(bounds, { ...options, duration: 0.9, easeLinearity: 0.2 });
       flying = true;
     },
@@ -248,7 +241,7 @@ const mapView = (() => {
       // Centred in the part of the map the sheet leaves showing.
       const level = Math.max(map.getZoom(), zoom);
       const target = map.unproject(map.project(point(location), level).add([0, sheet.targetHeight() / 2]), level);
-      map.flyTo(target, level, { duration: calm.matches ? 0 : 0.8 });
+      if (map.getCenter().distanceTo(target) > 1 || map.getZoom() !== level) map.flyTo(target, level, { duration: calm.matches ? 0 : 0.8 });
     },
     ends(from, to) {
       if (from) L.marker(point(from.location), { icon: pin('', 'pin start'), title: from.name }).addTo(content);
@@ -303,6 +296,194 @@ const mapView = (() => {
   };
 })();
 
+/** The same map on Google's tiles, used while the server has allowance left. */
+const googleMap = (() => {
+  let map, Marker, items = [];
+  const padding = () => {
+    const wide = window.matchMedia('(min-width: 820px)').matches;
+    return { top: wide ? 30 : 50, left: wide ? 440 : 24, right: wide ? 30 : 24, bottom: wide ? 30 : sheet.targetHeight() + 32 };
+  };
+  const keep = (item) => { items.push(item); return item; };
+  const div = (className, text, color) => {
+    const element = document.createElement('div');
+    element.className = className;
+    if (text) element.textContent = text;
+    if (color) element.style.background = color;
+    return element;
+  };
+  /** A zero-sized anchor, so markers sit on the point as they do on the other map. */
+  const mark = (location, element, { zIndex, title, click } = {}) => {
+    const anchor = div('g-anchor');
+    anchor.append(element);
+    if (title) element.title = title;
+    const marker = keep(new Marker({ map, position: location, content: anchor, zIndex, gmpClickable: !!click }));
+    if (click) {
+      // A tap can arrive by either route, and should only count once.
+      let tapped = 0;
+      const tap = () => {
+        if (performance.now() - tapped > 500) click();
+        tapped = performance.now();
+      };
+      marker.addListener('gmp-click', tap);
+      element.addEventListener('click', tap);
+    }
+    return marker;
+  };
+  const line = (path, options) => keep(new google.maps.Polyline({ map, path, clickable: false, ...options }));
+  /** Draws a line along its length, as the other map does with a dash. */
+  const drawOn = (polyline, path) => {
+    if (calm.matches || !$('map').classList.contains('entering') || path.length < 2) return;
+    const started = performance.now();
+    const step = (now) => {
+      if (!items.includes(polyline)) return;
+      const progress = Math.min(1, (now - started) / 900), eased = 1 - (1 - progress) ** 3;
+      polyline.setPath(path.slice(0, Math.max(2, Math.ceil(path.length * eased))));
+      if (progress < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  };
+  return {
+    init() {
+      Marker = google.maps.marker.AdvancedMarkerElement;
+      map = new google.maps.Map($('map'), {
+        center: { lat: 22.34, lng: 114.15 }, zoom: 11, minZoom: 10, maxZoom: 19, mapId: 'DEMO_MAP_ID',
+        disableDefaultUI: true, clickableIcons: false, gestureHandling: 'greedy', colorScheme: 'FOLLOW_SYSTEM',
+      });
+      const markZoom = () => $('map').classList.toggle('far', map.getZoom() < 15);
+      map.addListener('zoom_changed', markZoom);
+      markZoom();
+    },
+    destroy() {
+      this.clear();
+      $('map').replaceChildren();
+    },
+    setLanguage() { /* Google sets labels as it loads, so a new language shows on the next visit. */ },
+    resize() {},
+    clear() {
+      for (const item of items) {
+        if (item.setMap) item.setMap(null);
+        else item.map = null;
+      }
+      items = [];
+    },
+    fit(points, maxZoom = 16) {
+      if (!points.length) return;
+      if (points.length === 1) return this.follow(points[0], maxZoom);
+      const bounds = new google.maps.LatLngBounds();
+      points.forEach((location) => bounds.extend(location));
+      map.fitBounds(bounds, padding());
+      google.maps.event.addListenerOnce(map, 'idle', () => { if (map.getZoom() > maxZoom) map.setZoom(maxZoom); });
+    },
+    follow(location, zoom = 16) {
+      map.setZoom(Math.max(map.getZoom(), zoom));
+      map.setCenter(location);
+      map.panBy(0, sheet.targetHeight() / 2);
+    },
+    ends(from, to) {
+      if (from) mark(from.location, div('pin start'), { title: from.name, zIndex: 400 });
+      if (to) mark(to.location, div('pin end', '', '#ff3b30'), { title: to.name, zIndex: 500 });
+    },
+    path(path) {
+      $('map').classList.toggle('many-stops', path.segments.reduce((sum, s) => sum + s.stopIDs.length, 0) > 12);
+      for (const segment of path.segments) {
+        const color = lineColor(segment.op, segment.route), isWalk = segment.mode === 'walk';
+        if (isWalk) {
+          line(segment.points, {
+            strokeOpacity: 0, zIndex: 2,
+            icons: [{ icon: { path: google.maps.SymbolPath.CIRCLE, scale: 2, fillColor: '#2f7bf6', fillOpacity: 1, strokeOpacity: 0 }, repeat: '11px' }],
+          });
+        } else {
+          drawOn(line(segment.points, { strokeColor: '#fff', strokeWeight: 8, strokeOpacity: 0.95, zIndex: 1 }), segment.points);
+          drawOn(line(segment.points, { strokeColor: color, strokeWeight: 5, strokeOpacity: 1, zIndex: 2 }), segment.points);
+        }
+        segment.stopIDs.forEach((id, index) => {
+          const stop = div('g-stop');
+          stop.style.setProperty('--i', Math.min(index, 14));
+          const dot = div('g-dot');
+          dot.style.borderColor = color;
+          stop.append(dot, div('stop-label', name(id)));
+          mark(segment.points[index], stop, { zIndex: 100 });
+        });
+        if (segment.mode === 'ride') {
+          const chip = div(`route-chip${isDarkText(segment.op) ? ' dark' : ''}`, lineName(segment.op, segment.route, state.lang), color);
+          mark(segment.points[0], chip, { zIndex: 200 });
+        }
+      }
+    },
+    numbered(suggestions, choose) {
+      suggestions.forEach((suggestion, index) => {
+        mark(suggestion.place.location, div('pin', String(index + 1), '#007aff'), { title: suggestion.place.name, zIndex: 300, click: () => choose(suggestion) });
+      });
+    },
+    stops(list, center, radius, choose) {
+      keep(new google.maps.Circle({ map, center, radius, strokeColor: '#2f7bf6', strokeWeight: 1, fillColor: '#2f7bf6', fillOpacity: 0.06, clickable: false }));
+      const nearest = list.slice(0, 120), isRail = (s) => ['mtr', 'lightRail'].includes(primaryMode(s.site));
+      for (const stop of [...nearest.filter((s) => !isRail(s)), ...nearest.filter(isRail)]) {
+        const mode = primaryMode(stop.site);
+        const color = { mtr: OP_COLORS.mtr, lightRail: OP_COLORS.lightRail, minibus: OP_COLORS.gmb, bus: OP_COLORS.kmb }[mode];
+        const dot = div(`g-pick${isRail(stop) ? ' rail' : ''}`, '', color);
+        mark(stop.site.location, dot, { title: nameText(stop.site.name, state.lang), zIndex: isRail(stop) ? 60 : 50, click: () => choose(stop) });
+      }
+    },
+    home() { this.fit([{ lat: 22.2, lng: 113.92 }, { lat: 22.5, lng: 114.3 }], 12); },
+    me(location) { mark(location, div('me'), { zIndex: 1000 }); },
+  };
+})();
+
+let mapView = leafletMap;
+
+function loadGoogle(key) {
+  return new Promise((resolve, reject) => {
+    window.hktGoogleReady = resolve;
+    const script = document.createElement('script');
+    const language = state.lang === 'zh' ? 'zh-HK' : 'en';
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&v=weekly&loading=async&libraries=marker&language=${language}&region=HK&callback=hktGoogleReady`;
+    script.onerror = reject;
+    document.head.append(script);
+  });
+}
+
+/** Puts the map where the rider expects it after the map underneath changes. */
+function frameMap() {
+  drawMap();
+  if (state.tab === 'plan' && (state.from || state.to)) fitPlanMap();
+  else if (state.fix && inHongKong(state.fix)) mapView.follow(state.fix, 15);
+  else mapView.home();
+}
+
+function useFreeMap() {
+  state.google = false;
+  const wasGoogle = mapView === googleMap;
+  if (wasGoogle) {
+    googleMap.destroy();
+    mapView = leafletMap;
+    leafletMap.init();
+  }
+  leafletMap.useBase();
+  if (wasGoogle) frameMap();
+}
+
+// Google calls this when it refuses the key, such as at its own quota.
+let googleRefused = false;
+window.gm_authFailure = () => {
+  googleRefused = true;
+  useFreeMap();
+};
+
+async function useGoogleMap(shared) {
+  try {
+    await loadGoogle(shared.mapKey);
+    if (googleRefused) return;
+    leafletMap.destroy();
+    mapView = googleMap;
+    googleMap.init();
+    state.google = shared.places === true;
+    frameMap();
+  } catch {
+    useFreeMap();
+  }
+}
+
 // MARK: Location
 
 /** One position per visit; only the location buttons and navigation ask again. */
@@ -333,9 +514,10 @@ async function checkServer() {
     const response = await fetch('api/ai', { signal: AbortSignal.timeout(3000) });
     if (response.ok) shared = await response.json();
   } catch { /* The page works without it. */ }
-  mapView.useBase(shared?.mapKey || null);
   state.sharedAI = shared?.available === true;
   if (state.sharedAI) renderTab();
+  if (shared?.mapKey) useGoogleMap(shared);
+  else useFreeMap();
 }
 
 // MARK: Data
@@ -384,7 +566,10 @@ async function resolvePlace(text) {
   const place = await lookupPlace(text);
   if (place) return state.lang === 'zh' ? { name: text, location: place.location } : place;
   const partial = partialSite(text, siteIndex());
-  return partial ? { name: nameText(partial.name, state.lang), location: partial.location } : null;
+  if (partial) return { name: nameText(partial.name, state.lang), location: partial.location };
+  // Google is the last resort, as free sources answer most searches.
+  const found = state.google ? (await googleSearch(text, HONG_KONG, 50_000, state.lang))?.[0] : null;
+  return found ? { name: found.name, location: found.location } : null;
 }
 
 async function here() {
@@ -592,7 +777,12 @@ async function discover(wish, area, isTyped, run = ++planRun) {
 
   // The AI names shops, and the map confirms each one is really there.
   let suggestions = [];
-  if (ai) {
+  if (state.google) {
+    const found = await googleSearch([wish.want, searchArea.name, extra].filter(Boolean).join(' '), searchArea.center, searchArea.radius, state.lang);
+    if (stale()) return;
+    suggestions = withinArea(found ?? [], searchArea).slice(0, 5).map((place) => ({ place, reason: null, isGoogle: true }));
+  }
+  if (ai && !suggestions.length) {
     try {
       const named = await ai.suggest(wish.want, searchArea.name, extra, state.lang);
       if (stale()) return;
@@ -1019,7 +1209,9 @@ function suggestionList({ wish, areaName, suggestions }) {
   return [
     h('div', { class: 'row' }, h('span', { class: 'title grow' }, t(`${areaName}的${wish.want}`, `${wish.want} around ${areaName}`)),
       h('button', { class: 'link', onclick: () => { state.discovery = { stage: 'asking', wish: { ...wish, area: null } }; renderSheet(); drawMap(); renderBottomStatus(); } }, t('換範圍', 'Change area'))),
-    h('div', { class: 'tiny muted' }, suggestions[0]?.isNamedByAI
+    h('div', { class: 'tiny muted' }, suggestions[0]?.isGoogle
+      ? t('資料來自 Google 地圖，出發前請確認仍在營業。', 'From Google Maps. Check it is open before you go.')
+      : suggestions[0]?.isNamedByAI
       ? t('由 AI 推薦，並已在地圖核實。AI 的資料可能過時，出發前請確認仍在營業。', 'Recommended by AI and found on the map. AI knowledge can be out of date, so check before you go.')
       : t('地點來自地圖搜尋，沒有菜單資料，未必有售，出發前請先確認。', 'Places come from a map search, which has no menus. Check before you go.')),
     suggestions.map((suggestion, index) => h('button', { class: 'card tap', onclick: () => choosePlace(suggestion) },
@@ -1312,12 +1504,12 @@ function settingsSheet() {
     h('div', { class: 'card' },
       h('div', { class: 'bold' }, t('私隱', 'Privacy')),
       h('div', { class: 'small muted' }, t(
-        '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會傳送給 OpenStreetMap 的 Photon 服務以確定所在地區。AI 請求經本站伺服器轉送給 DeepSeek，內容只有你輸入的文字、地區、站名及路線號碼，不包括座標，伺服器亦不會保存。',
-        'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go to OpenStreetMap\'s Photon service to work out your district. AI requests pass through this site\'s server to DeepSeek and carry only your text, the district, stop names and route numbers, never coordinates, and the server keeps none of it.'))),
+        '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會傳送給 OpenStreetMap 的 Photon 服務以確定所在地區。AI 請求及店舖搜尋經本站伺服器轉送給 DeepSeek 及 Google，伺服器不會保存內容。傳送給 DeepSeek 的只有你輸入的文字、地區、站名及路線號碼，不包括座標；Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
+        'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go to OpenStreetMap\'s Photon service to work out your district. AI requests and shop searches pass through this site\'s server to DeepSeek and Google, and the server keeps none of it. DeepSeek only receives your text, the district, stop names and route numbers, never coordinates. Google Maps loads straight into your browser under Google\'s privacy policy.'))),
     h('div', { class: 'card' },
       h('div', { class: 'bold' }, t('安裝到手機', 'Install on your phone')),
       h('div', { class: 'small muted' }, t('iPhone：在 Safari 按分享，再選「加入主畫面」。Android：在 Chrome 選單按「安裝應用程式」。', 'iPhone: in Safari, tap Share, then Add to Home Screen. Android: in the Chrome menu, tap Install app.'))),
-    h('div', { class: 'tiny muted' }, t('路線資料來自 hkbus.app；地圖來自 MapTiler、OpenFreeMap 及 OpenStreetMap；地點搜尋來自政府地理資訊及 OpenStreetMap。', 'Route data from hkbus.app; maps from MapTiler, OpenFreeMap and OpenStreetMap; place search from Government GIS and OpenStreetMap.')),
+    h('div', { class: 'tiny muted' }, t('路線資料來自 hkbus.app；地圖來自 Google、OpenFreeMap 及 OpenStreetMap；地點搜尋來自政府地理資訊及 OpenStreetMap。', 'Route data from hkbus.app; maps from Google, OpenFreeMap and OpenStreetMap; place search from Government GIS and OpenStreetMap.')),
     h('a', { class: 'tiny link', href: 'https://github.com/kevinwentao07-zwt/hktransport', target: '_blank', rel: 'noopener' }, t('GitHub 原始碼（GPL-3.0）', 'Source on GitHub (GPL-3.0)')),
   ];
 }

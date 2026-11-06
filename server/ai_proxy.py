@@ -4,16 +4,25 @@
 Visitors can only pick one of the app's own tasks and send their text. The prompts live
 here, so this can't be used as a free general-purpose chatbot, and limits cap the cost.
 Nothing a visitor sends is logged or kept.
+
+It also holds Google use under the free allowance. Each map and place search is counted on
+disk, and at the limit the site quietly goes back to its free map and search.
 """
 import json
 import os
+import socket
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+# Google limits the places key to the server's IPv4 address, so IPv6 routes would be refused.
+_lookup = socket.getaddrinfo
+socket.getaddrinfo = lambda host, port, family=0, *rest, **options: _lookup(host, port, socket.AF_INET, *rest, **options)
 
 PORT = int(os.environ.get('AI_PORT', '8787'))
 MODEL = os.environ.get('AI_MODEL', 'deepseek-flash')
@@ -48,6 +57,48 @@ class Limiter:
             return True
 
 
+class Budget:
+    """Daily and monthly allowances that survive restarts. Unsure means no."""
+
+    def __init__(self, path, limits, clock=time.time):
+        self.path, self.limits, self.clock = Path(path), limits, clock
+        self.lock = threading.Lock()
+        self.visitors, self.visitors_day, self.broken = {}, None, False
+        try:
+            self.usage = json.loads(self.path.read_text())
+        except FileNotFoundError:
+            self.usage = {}
+        except (OSError, ValueError):
+            self.usage, self.broken = {}, True
+
+    def spend(self, name, visitor):
+        per_day, per_month, per_visitor = self.limits[name]
+        with self.lock:
+            if self.broken:
+                return False
+            # Google's billing runs on Pacific time.
+            moment = time.gmtime(self.clock() - 8 * 3600)
+            day, month = time.strftime('%Y-%m-%d', moment), time.strftime('%Y-%m', moment)
+            if day != self.visitors_day:
+                self.visitors, self.visitors_day = {}, day
+            used = self.usage.setdefault(name, {})
+            today = used.get('today', 0) if used.get('day') == day else 0
+            this_month = used.get('this_month', 0) if used.get('month') == month else 0
+            mine = self.visitors.get((name, visitor), 0)
+            if today >= per_day or this_month >= per_month or mine >= per_visitor:
+                return False
+            used.update(day=day, month=month, today=today + 1, this_month=this_month + 1)
+            try:
+                scratch = self.path.with_suffix('.tmp')
+                scratch.write_text(json.dumps(self.usage))
+                os.replace(scratch, self.path)
+            except OSError:
+                self.broken = True
+                return False
+            self.visitors[(name, visitor)] = mine + 1
+            return True
+
+
 limiter = Limiter(
     per_minute=int(os.environ.get('AI_PER_MINUTE', '12')),
     per_day=int(os.environ.get('AI_PER_DAY', '100')),
@@ -56,8 +107,23 @@ limiter = Limiter(
 in_flight = threading.BoundedSemaphore(int(os.environ.get('AI_CONCURRENT', '16')))
 
 
+# Free each month: 10,000 map loads and 5,000 searches. These stop well short of both.
+budget = Budget(
+    Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'usage.json',
+    {'map': (300, 9000, 15), 'places': (150, 4500, 15)},
+)
+
+
 def api_key():
     return os.environ.get('DEEPSEEK_API_KEY', '').strip()
+
+
+def map_key():
+    return os.environ.get('GOOGLE_MAP_KEY', '').strip()
+
+
+def places_key():
+    return os.environ.get('GOOGLE_PLACES_KEY', '').strip()
 
 
 def ask_deepseek(system, message):
@@ -73,6 +139,27 @@ def ask_deepseek(system, message):
     )
     with urllib.request.urlopen(request, timeout=55) as response:
         return json.load(response)['choices'][0]['message']['content'].strip()
+
+
+def search_places(query, lat, lng, radius, language):
+    """Asks only for the fields in the cheapest tier that has names, and for one page."""
+    request = urllib.request.Request(
+        'https://places.googleapis.com/v1/places:searchText',
+        data=json.dumps({
+            'textQuery': query, 'languageCode': language, 'regionCode': 'HK', 'pageSize': 5,
+            'locationBias': {'circle': {'center': {'latitude': lat, 'longitude': lng}, 'radius': radius}},
+        }).encode(),
+        headers={
+            'Content-Type': 'application/json', 'X-Goog-Api-Key': places_key(),
+            'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location',
+        },
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        found = json.load(response).get('places', [])
+    return [{
+        'id': place['id'], 'name': place['displayName']['text'], 'address': place.get('formattedAddress'),
+        'location': {'lat': place['location']['latitude'], 'lng': place['location']['longitude']},
+    } for place in found]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -92,36 +179,80 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def visitor(self):
+        # Caddy replaces this header, so the last address is the one that connected.
+        return self.headers.get('X-Forwarded-For', '').split(',')[-1].strip() or self.client_address[0]
+
     def do_GET(self):
         if self.path != '/api/ai':
             return self.send(404, {'error': 'Not found'})
-        # Maps need their key in the browser. It is locked to this site in the MapTiler account.
-        self.send(200, {'available': bool(api_key()), 'mapKey': os.environ.get('MAPTILER_KEY', '').strip() or None})
+        body = {'available': bool(api_key()), 'mapKey': None, 'places': False}
+        # Handing out the key is what starts a billed map load, so this is where it is counted.
+        # Only the page itself asks this way, and Google locks the key to this site.
+        if map_key() and self.headers.get('Sec-Fetch-Site') == 'same-origin' and budget.spend('map', self.visitor()):
+            body.update(mapKey=map_key(), places=bool(places_key()))
+        self.send(200, body)
 
-    def do_POST(self):
-        if self.path != '/api/ai':
-            return self.send(404, {'error': 'Not found'})
+    def read_json(self):
+        """The request body, or None once an error has been sent."""
         # Keeps other websites from spending the quota through their visitors' browsers.
         if self.headers.get('Origin') != f"https://{self.headers.get('Host')}":
-            return self.send(403, {'error': 'Forbidden'})
+            self.send(403, {'error': 'Forbidden'})
+            return None
         try:
             length = int(self.headers.get('Content-Length', ''))
         except ValueError:
-            return self.send(411, {'error': 'Length required'})
+            self.send(411, {'error': 'Length required'})
+            return None
         if not 0 < length <= MAX_BODY:
-            return self.send(413, {'error': 'Too large'})
+            self.send(413, {'error': 'Too large'})
+            return None
         try:
             body = json.loads(self.rfile.read(length))
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            self.send(400, {'error': 'Bad request'})
+            return None
+        return body
+
+    def do_POST(self):
+        if self.path not in ('/api/ai', '/api/places'):
+            return self.send(404, {'error': 'Not found'})
+        body = self.read_json()
+        if body is None:
+            return None
+        return self.places(body) if self.path == '/api/places' else self.ask(body)
+
+    def places(self, body):
+        query, lat, lng, radius = body.get('query'), body.get('lat'), body.get('lng'), body.get('radius')
+        numbers = all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (lat, lng, radius))
+        if not isinstance(query, str) or not 0 < len(query.strip()) <= 100 or not numbers:
+            return self.send(400, {'error': 'Bad request'})
+        if not (22.1 <= lat <= 22.6 and 113.8 <= lng <= 114.5 and 0 < radius <= 50000):
+            return self.send(400, {'error': 'Bad request'})
+        if not places_key() or not budget.spend('places', self.visitor()):
+            return self.send(429, {'error': 'Limit reached'})
+        language = 'en' if body.get('lang') == 'en' else 'zh-HK'
+        try:
+            self.send(200, {'places': search_places(query.strip(), lat, lng, radius, language)})
+        except urllib.error.HTTPError as error:
+            print(f'Places returned {error.code}', file=sys.stderr, flush=True)
+            self.send(502, {'error': 'Unavailable'})
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f'Places failed: {type(error).__name__}', file=sys.stderr, flush=True)
+            self.send(502, {'error': 'Unavailable'})
+
+    def ask(self, body):
+        try:
             system, message = PROMPTS[body['task']], body['message']
-        except (ValueError, KeyError, TypeError):
+        except (KeyError, TypeError):
             return self.send(400, {'error': 'Bad request'})
         if not isinstance(message, str) or not message.strip() or len(message) > MAX_MESSAGE:
             return self.send(400, {'error': 'Bad request'})
         if not api_key():
             return self.send(503, {'error': 'AI 未設定'})
-        # Caddy replaces this header, so the last address is the one that connected.
-        visitor = self.headers.get('X-Forwarded-For', '').split(',')[-1].strip() or self.client_address[0]
-        if not limiter.allow(visitor):
+        if not limiter.allow(self.visitor()):
             return self.send(429, {'error': 'AI 使用次數已達上限，請稍後再試'})
         if not in_flight.acquire(blocking=False):
             return self.send(503, {'error': 'AI 正忙，請稍後再試'})

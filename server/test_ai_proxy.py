@@ -15,8 +15,39 @@ folder = tempfile.mkdtemp()
 copy(Path(__file__).parent / 'ai_proxy.py', folder)
 Path(folder, 'prompts.json').write_text(json.dumps({'chat': 'SYSTEM PROMPT'}))
 sys.path.insert(0, folder)
-os.environ['DEEPSEEK_API_KEY'] = SECRET
+os.environ.update(DEEPSEEK_API_KEY=SECRET, GOOGLE_MAP_KEY='map-key', GOOGLE_PLACES_KEY='places-key', STATE_DIRECTORY=folder)
 import ai_proxy  # noqa: E402
+
+
+def budget(**limits):
+    return ai_proxy.Budget(Path(tempfile.mkdtemp(), 'usage.json'), {'map': (9, 9, 9), 'places': (9, 9, 9), **limits})
+
+
+class BudgetTests(unittest.TestCase):
+    def test_limits_survive_a_restart_and_reset_on_time(self):
+        path = Path(tempfile.mkdtemp(), 'usage.json')
+        now = [86400.0 * 40]
+        limits = {'map': (2, 3, 9)}
+        first = ai_proxy.Budget(path, limits, clock=lambda: now[0])
+        self.assertEqual([first.spend('map', 'a'), first.spend('map', 'b'), first.spend('map', 'c')], [True, True, False])
+        restarted = ai_proxy.Budget(path, limits, clock=lambda: now[0])
+        self.assertFalse(restarted.spend('map', 'd'))
+        now[0] += 86400
+        self.assertEqual([restarted.spend('map', 'd'), restarted.spend('map', 'e')], [True, False])  # Month limit.
+        now[0] += 86400 * 31
+        self.assertTrue(restarted.spend('map', 'd'))
+
+    def test_limits_each_visitor(self):
+        limits = {'map': (9, 9, 1)}
+        spending = ai_proxy.Budget(Path(tempfile.mkdtemp(), 'usage.json'), limits)
+        self.assertEqual([spending.spend('map', 'a'), spending.spend('map', 'a'), spending.spend('map', 'b')], [True, False, True])
+
+    def test_stops_when_the_count_cannot_be_trusted(self):
+        path = Path(tempfile.mkdtemp(), 'usage.json')
+        path.write_text('not json')
+        self.assertFalse(ai_proxy.Budget(path, {'map': (9, 9, 9)}).spend('map', 'a'))
+        unwritable = ai_proxy.Budget(Path(tempfile.mkdtemp(), 'missing', 'usage.json'), {'map': (9, 9, 9)})
+        self.assertFalse(unwritable.spend('map', 'a'))
 
 
 class LimiterTests(unittest.TestCase):
@@ -46,12 +77,12 @@ class ProxyTests(unittest.TestCase):
         self.calls = []
         ai_proxy.ask_deepseek = lambda system, message: self.calls.append((system, message)) or 'answer'
 
-    def post(self, body, origin=True, visitor='1.1.1.1'):
+    def post(self, body, origin=True, visitor='1.1.1.1', path='/api/ai'):
         connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port)
         headers = {'Host': 'hk.test', 'X-Forwarded-For': visitor}
         if origin:
             headers['Origin'] = 'https://hk.test'
-        connection.request('POST', '/api/ai', json.dumps(body), headers)
+        connection.request('POST', path, json.dumps(body), headers)
         response = connection.getresponse()
         return response.status, response.read().decode()
 
@@ -75,13 +106,41 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.post({'task': 'chat', 'message': 'x'})[0], 429)
         self.assertEqual(self.post({'task': 'chat', 'message': 'x'}, visitor='2.2.2.2')[0], 200)
 
-    def test_status_shares_the_map_key_but_not_the_ai_key(self):
-        os.environ['MAPTILER_KEY'] = 'map-key'
+    def get_status(self, fetch_site='same-origin', visitor='1.1.1.1'):
         connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port)
-        connection.request('GET', '/api/ai')
-        text = connection.getresponse().read().decode()
-        self.assertEqual(json.loads(text), {'available': True, 'mapKey': 'map-key'})
+        connection.request('GET', '/api/ai', headers={'Sec-Fetch-Site': fetch_site, 'X-Forwarded-For': visitor})
+        return connection.getresponse().read().decode()
+
+    def test_map_key_stops_at_the_limit_and_never_shares_secrets(self):
+        ai_proxy.budget = budget(map=(1, 10, 10))
+        text = self.get_status()
+        self.assertEqual(json.loads(text), {'available': True, 'mapKey': 'map-key', 'places': True})
         self.assertNotIn(SECRET, text)
+        self.assertNotIn('places-key', text)
+        self.assertEqual(json.loads(self.get_status())['mapKey'], None)
+
+    def test_only_the_page_spends_map_loads(self):
+        ai_proxy.budget = budget(map=(1, 10, 10))
+        self.assertEqual(json.loads(self.get_status('none'))['mapKey'], None)
+        self.assertEqual(json.loads(self.get_status())['mapKey'], 'map-key')
+
+    def test_place_search_stops_at_the_limit(self):
+        ai_proxy.budget = budget(places=(1, 10, 10))
+        calls = []
+        ai_proxy.search_places = lambda *args: calls.append(args) or [{'name': 'Shop'}]
+        good = {'query': '螺螄粉 旺角', 'lat': 22.32, 'lng': 114.17, 'radius': 2500, 'lang': 'zh'}
+        self.assertEqual(self.post(good, path='/api/places')[0], 200)
+        self.assertEqual(self.post(good, path='/api/places')[0], 429)
+        self.assertEqual(calls, [('螺螄粉 旺角', 22.32, 114.17, 2500, 'zh-HK')])
+
+    def test_place_search_rejects_bad_requests_without_spending(self):
+        ai_proxy.budget = budget(places=(1, 10, 10))
+        ai_proxy.search_places = lambda *args: self.fail('Google was called')
+        good = {'query': 'x', 'lat': 22.32, 'lng': 114.17, 'radius': 2500}
+        self.assertEqual(self.post(good, origin=False, path='/api/places')[0], 403)
+        self.assertEqual(self.post({**good, 'lat': 35.0}, path='/api/places')[0], 400)
+        self.assertEqual(self.post({**good, 'radius': 60000}, path='/api/places')[0], 400)
+        self.assertEqual(self.post({**good, 'query': 'x' * 101}, path='/api/places')[0], 400)
 
     def test_upstream_errors_reveal_nothing(self):
         def fail(system, message):

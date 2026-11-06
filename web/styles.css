@@ -180,6 +180,15 @@ svg.icon.solid { fill: currentColor; }
 .pin { width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50%; border: 2.5px solid #fff; display: grid; place-items: center; color: #fff; font-size: 13px; font-weight: 700; box-shadow: 0 2px 6px rgba(0, 0, 0, .35); }
 .pin.start { width: 18px; height: 18px; margin: -9px 0 0 -9px; background: #fff; border: 5px solid #007aff; }
 .pin.end { width: 22px; height: 22px; margin: -11px 0 0 -11px; border-radius: 7px; }
+.g-anchor { width: 0; height: 0; }
+.g-stop { display: flex; align-items: center; gap: 4px; width: max-content; transform: translate(-6px, -50%); }
+.g-dot { width: 12px; height: 12px; flex: none; box-sizing: border-box; border-radius: 50%; background: #fff; border: 2.5px solid; }
+.g-pick { width: 14px; height: 14px; margin: -7px 0 0 -7px; box-sizing: border-box; border-radius: 50%; border: 2px solid #fff; cursor: pointer; }
+.g-pick.rail { width: 20px; height: 20px; margin: -10px 0 0 -10px; }
+#map.entering .g-dot { animation: pop-in .5s var(--pop) both; animation-delay: calc(var(--i, 0) * 45ms + 250ms); }
+/* Google's logo and terms must stay visible, so they ride above the sheet. */
+.gm-style a[href*="maps.google"] { display: inline-block !important; }
+.gm-style a[href*="maps.google"], .gm-style .gm-style-cc { transform: translateY(calc(-1 * var(--panel-h) - 8px - env(safe-area-inset-bottom))); transition: transform .5s var(--ease-out); }
 .me { width: 20px; height: 20px; margin: -10px 0 0 -10px; border-radius: 50%; background: #2f7bf6; border: 3px solid #fff; box-shadow: 0 0 0 7px rgba(47, 123, 246, .2), 0 1px 4px rgba(0, 0, 0, .4); }
 .leaflet-container { font: inherit; }
 .leaflet-bottom { bottom: calc(var(--panel-h) + 8px); transition: bottom .5s var(--ease-out); }
@@ -191,6 +200,7 @@ svg.icon.solid { fill: currentColor; }
   #app.sheet-full #map { transform: none; filter: none; border-radius: 0; }
   #app.sheet-full #locate { opacity: 1; transform: none; pointer-events: auto; }
   #grabber { display: none; }
+  .gm-style a[href*="maps.google"], .gm-style .gm-style-cc { transform: none; }
   #top, #bottom, #app:not(.sheet-full) #sheet { touch-action: auto; }
   #top { padding-top: 14px; }
   .leaflet-bottom { bottom: 0; }
