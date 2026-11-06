@@ -1,4 +1,5 @@
-# Publishes the web app to the server whenever main changes, as "Deploy web.command" does by hand.
+# Publishes the web app to the server whenever main or a Claude branch changes, as "Deploy web.command"
+# does by hand. Claude's branches go live as soon as they are pushed, so the site shows the latest of either.
 # Needs these repository secrets (Settings → Secrets and variables → Actions):
 #   DEPLOY_HOST         user@host, as in .env.deploy
 #   DEPLOY_SSH_KEY      the private key that DEPLOY_KEY points to, pasted in full
@@ -8,7 +9,7 @@ name: Deploy web
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'claude/**']
     paths: ['web/**', 'server/**', '.github/workflows/deploy-web.yml']
   workflow_dispatch:
 
