@@ -156,10 +156,11 @@ SHOP_FIELDS = 'places.rating,places.userRatingCount,places.priceLevel,places.cur
 
 
 def search_places(query, lat, lng, radius, language, details=False):
+    """Google charges per request, not per place, so one page takes as many as it can."""
     request = urllib.request.Request(
         'https://places.googleapis.com/v1/places:searchText',
         data=json.dumps({
-            'textQuery': query, 'languageCode': language, 'regionCode': 'HK', 'pageSize': 5,
+            'textQuery': query, 'languageCode': language, 'regionCode': 'HK', 'pageSize': 20,
             'locationBias': {'circle': {'center': {'latitude': lat, 'longitude': lng}, 'radius': radius}},
         }).encode(),
         headers={

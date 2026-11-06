@@ -192,7 +192,7 @@ test('HK grid converts to WGS84', () => {
 test('web results become shops, and only the shop asked about counts', () => {
   assert.deepEqual(A.decodePicks('{"places":[{"name":"一生懸麵","reason":"多人推介"},{"reason":"x"}]}'), [{ name: '一生懸麵', reason: '多人推介' }]);
   assert.deepEqual(A.decodePicks('not json'), []);
-  assert.equal(A.decodePicks(JSON.stringify({ places: Array(6).fill({ name: 'a' }) })).length, 4);
+  assert.equal(A.decodePicks(JSON.stringify({ places: Array(12).fill({ name: 'a' }) })).length, 8);
   const message = A.pickMessage('拉麵', '旺角', [{ title: '十大拉麵', content: 'x'.repeat(9000) }]);
   assert.ok(message.length <= 3900 && message.includes('十大拉麵') && message.includes('Area: 旺角'));
   assert.ok(A.PROMPTS.pick_zh && A.PROMPTS.pick_en);
