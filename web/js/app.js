@@ -536,7 +536,7 @@ const googleMap = (() => {
         dressBus(buses[index].element, vehicle);
       });
     },
-    fit(points, maxZoom = 16) {
+    fit(points, maxZoom = 16, isSnug = false) {
       if (!points.length) return;
       if (points.length === 1) return this.follow(points[0], maxZoom);
       // Worked out here, as Google's fitBounds lands the route under a sheet this tall.
@@ -546,7 +546,8 @@ const googleMap = (() => {
       const xs = points.map((p) => toX(p.lng)), ys = points.map((p) => toY(p.lat));
       const [west, east, north, south] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
       const fits = (pixels, span) => (span ? Math.log2(Math.max(1, pixels) / (256 * span)) : maxZoom);
-      const zoom = Math.max(10, Math.min(maxZoom, Math.floor(Math.min(fits(box.clientWidth - left - right, east - west), fits(box.clientHeight - top - bottom, south - north)))));
+      const exact = Math.min(fits(box.clientWidth - left - right, east - west), fits(box.clientHeight - top - bottom, south - north));
+      const zoom = Math.max(10, Math.min(maxZoom, isSnug ? exact : Math.floor(exact)));
       const world = 256 * 2 ** zoom;
       const x = (west + east) / 2 + (right - left) / 2 / world, y = (north + south) / 2 + (bottom - top) / 2 / world;
       const center = { lat: (Math.atan(Math.exp((0.5 - y) * 2 * Math.PI)) * 360) / Math.PI - 90, lng: x * 360 - 180 };
@@ -1067,7 +1068,7 @@ function moveVehicles() {
       vehicleFetching = false;
       vehicleFetched = Date.now();
       moveVehicles();
-      if (isFirst && vehicleList.length) fitPlanMap();
+      if (isFirst && vehicleList.length) (state.tab === 'plan' ? fitPlanMap : fitFocus)();
     });
   }
   const shape = knownShape(route, ride.op);
@@ -1121,8 +1122,18 @@ function focusRoute(routeKey, op, position = null) {
   state.focus = { routeKey, op, position };
   sheet.snap('half');
   drawMap();
-  const stops = state.db.routes[routeKey].stops[op].map((id) => state.db.stops[id]?.location).filter(Boolean);
-  mapView.fit(stops);
+  fitFocus();
+}
+
+const STOPS_AROUND_FOCUS = 5;
+
+/** A whole route fills the map; with a stop chosen, the map comes in on it and its buses. */
+function fitFocus() {
+  if (!state.focus) return;
+  const { routeKey, op, position } = state.focus;
+  const stops = state.db.routes[routeKey].stops[op].map((id) => state.db.stops[id]?.location);
+  const near = position == null ? stops : stops.slice(Math.max(0, position - STOPS_AROUND_FOCUS), position + STOPS_AROUND_FOCUS + 1);
+  mapView.fit([...near.filter(Boolean), ...vehicleList.map((vehicle) => vehicle.location)], 16, true);
 }
 
 function clearFocus() {
