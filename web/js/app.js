@@ -51,7 +51,7 @@ const state = {
   discovery: null,
   stopQuery: '', stopPlace: null, stops: [], stopMode: 'all', stopRadius: 500, stopBusy: false, stopError: null, stopOpen: null,
   routeQuery: '', routeKey: null, saved: store.get('saved', []),
-  talk: [], routeView: false, nav: null, fix: null, speechLang: store.get('speechLang', 'zh-HK'), listening: false,
+  talk: [], focus: null, routeView: false, nav: null, fix: null, speechLang: store.get('speechLang', 'zh-HK'), listening: false,
 };
 const t = (zh, en) => (state.lang === 'zh' ? zh : en);
 const name = (id) => stopName(id, state.db, state.lang);
@@ -222,6 +222,13 @@ function upcomingStop(text) {
   return element;
 }
 
+/** How long until the next bus, shown on the chosen stop. */
+function arrivalTag() {
+  const element = document.createElement('div');
+  element.className = 'arrival-tag';
+  return element;
+}
+
 function dressBus(element, vehicle) {
   const bus = element.querySelector('.bus3d'), note = element.querySelector('.bus-note');
   element.classList.toggle('other', !vehicle.isNext);
@@ -232,7 +239,7 @@ function dressBus(element, vehicle) {
 }
 
 const leafletMap = (() => {
-  let map, content, base, buses = [], approach = null, approachStops = [], approachKey = '', lastFit = '', flying = false;
+  let map, content, base, buses = [], tag = null, approach = null, approachStops = [], approachKey = '', lastFit = '', flying = false;
   const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
   const style = () => `https://tiles.openfreemap.org/styles/${darkMode.matches ? 'dark' : 'liberty'}`;
   /** The maps label everything in both languages; show just the one being read. */
@@ -284,9 +291,23 @@ const leafletMap = (() => {
     clear() {
       content?.clearLayers();
       buses = [];
+      tag = null;
       approach = null;
       approachStops = [];
       approachKey = '';
+    },
+    tag(location, text) {
+      if (!location) {
+        tag?.marker.remove();
+        tag = null;
+        return;
+      }
+      if (!tag) {
+        const element = arrivalTag();
+        tag = { element, marker: L.marker(point(location), { icon: L.divIcon({ html: element, className: '', iconSize: [0, 0] }), interactive: false, zIndexOffset: 950 }).addTo(content) };
+      }
+      tag.marker.setLatLng(point(location));
+      tag.element.textContent = text;
     },
     /** The road and stops still ahead of the coming bus, which go as it arrives. */
     approach(line, color, stops = []) {
@@ -393,7 +414,7 @@ const leafletMap = (() => {
 
 /** The same map on Google's tiles, used while the server has allowance left. */
 const googleMap = (() => {
-  let map, Marker, buses = [], approach = null, approachStops = [], approachKey = '', items = [];
+  let map, Marker, buses = [], tag = null, approach = null, approachStops = [], approachKey = '', items = [];
   const padding = () => {
     const wide = window.matchMedia('(min-width: 820px)').matches;
     return { top: wide ? 30 : 50, left: wide ? 440 : 24, right: wide ? 30 : 24, bottom: wide ? 30 : sheet.targetHeight() + 32 };
@@ -461,9 +482,26 @@ const googleMap = (() => {
       }
       items = [];
       buses = [];
+      tag = null;
       approach = null;
       approachStops = [];
       approachKey = '';
+    },
+    tag(location, text) {
+      if (!location) {
+        if (tag) {
+          tag.marker.map = null;
+          items = items.filter((item) => item !== tag.marker);
+        }
+        tag = null;
+        return;
+      }
+      if (!tag) {
+        const element = arrivalTag();
+        tag = { element, marker: mark(location, element, { zIndex: 950 }) };
+      }
+      tag.marker.position = location;
+      tag.element.textContent = text;
     },
     /** The road and stops still ahead of the coming bus, which go as it arrives. */
     approach(path, color, stops = []) {
@@ -992,13 +1030,18 @@ let vehicleRide = null, vehicleList = [], vehicleKey = '', vehicleArrivals = [],
 
 /** The first bus or minibus ride of the route on screen. */
 function rideOnScreen() {
+  if (state.tab !== 'plan') {
+    const focus = state.focus, route = focus && state.db?.routes[focus.routeKey];
+    if (!route || focus.position == null || ['mtr', 'lightRail'].includes(focus.op)) return null;
+    return { routeKey: focus.routeKey, route: route.route, op: focus.op, boardPosition: focus.position };
+  }
   const journey = state.journeys.find((j) => journeyID(j) === (state.nav?.id ?? state.expanded));
   return journey && rides(journey).find((ride) => !['mtr', 'lightRail'].includes(ride.op));
 }
 
 /** Asks for arrivals along the whole route, now and then, and places every bus between times. */
 function moveVehicles() {
-  if (state.tab !== 'plan') return;
+  showArrivalTag();
   const ride = rideOnScreen(), route = ride && state.db.routes[ride.routeKey];
   if (!route) {
     vehicleKey = '';
@@ -1041,7 +1084,56 @@ function moveVehicles() {
     const location = state.db.stops[id]?.location;
     return location ? [{ id, location, name: name(id) }] : [];
   }) : [];
+  if (state.tab !== 'plan') return mapView.approach(null);
   mapView.approach(coming && stop ? clipLine(shape, coming.location, stop) ?? [coming.location, stop] : null, coming?.color, ahead);
+}
+
+let tagKey = '', tagETA = null, tagFetched = 0;
+
+/** On the chosen stop: how long until the next bus, from its own arrivals. */
+function showArrivalTag() {
+  const focus = state.tab === 'plan' ? null : state.focus, route = focus && state.db?.routes[focus.routeKey];
+  if (!route || focus.position == null) {
+    tagKey = '';
+    return mapView.tag(null);
+  }
+  const key = `${focus.routeKey}|${focus.op}|${focus.position}`;
+  if (key !== tagKey) {
+    tagKey = key;
+    tagETA = undefined;
+    tagFetched = 0;
+  }
+  if (Date.now() - tagFetched > VEHICLE_REFRESH) {
+    tagFetched = Date.now();
+    fetchETA(route, focus.position, state.db, state.lang, focus.op).then((etas) => {
+      if (key !== tagKey) return;
+      tagETA = etas.map((eta) => eta.date).filter((date) => date != null && date > Date.now()).sort((a, b) => a - b)[0] ?? null;
+    }).catch(() => { if (key === tagKey) tagETA = null; });
+  }
+  const minutes = tagETA ? Math.ceil((tagETA - Date.now()) / 60_000) : null;
+  const text = tagETA === undefined ? t('查詢中…', 'Checking…') : tagETA === null ? t('暫無到站資料', 'No arrivals')
+    : minutes <= 1 ? t('即將到站', 'Arriving') : t(`還有 ${minutes} 分鐘`, `${minutes} min`);
+  mapView.tag(state.db.stops[route.stops[focus.op][focus.position]]?.location, text);
+}
+
+/** Shows a whole route on the map, and with a stop chosen, the buses either side of it. */
+function focusRoute(routeKey, op, position = null) {
+  state.focus = { routeKey, op, position };
+  sheet.snap('half');
+  drawMap();
+  const stops = state.db.routes[routeKey].stops[op].map((id) => state.db.stops[id]?.location).filter(Boolean);
+  mapView.fit(stops);
+}
+
+function clearFocus() {
+  state.focus = null;
+  drawMap();
+}
+
+function focusPath() {
+  const { routeKey, op } = state.focus, route = state.db.routes[routeKey];
+  const stopIDs = route.stops[op].filter((id) => state.db.stops[id]?.location);
+  return { segments: [{ mode: 'ride', route: route.route, routeKey, op, stopIDs, points: stopIDs.map((id) => state.db.stops[id].location) }] };
 }
 
 setInterval(moveVehicles, 1000);
@@ -1065,7 +1157,7 @@ function glideVehicles() {
 }
 
 function glideFrame(now) {
-  if (!vehicleList.length || state.tab !== 'plan') {
+  if (!vehicleList.length) {
     gliding = false;
     return;
   }
@@ -1364,6 +1456,7 @@ async function searchStops(aroundMe = false, chosen = null) {
   if (!state.db) return;
   const run = ++stopRun, text = state.stopQuery.trim(), index = siteIndex();
   state.stopSuggesting = false;
+  state.focus = null;
   state.stopError = null;
   state.stopOpen = null;
   let place = null;
@@ -1468,6 +1561,8 @@ function visitRow(visit) {
         class: 'tap grow', onclick: () => {
           open = !open;
           clear(detail, open && etaWidget(route, visit.seq, visit.op));
+          if (open) focusRoute(visit.routeKey, visit.op, visit.seq);
+          else clearFocus();
         },
       }, h('div', { class: 'row' }, badge(visit.op, route.route), h('span', { class: 'small ellipsis grow' }, `→ ${nameText(route.dest, state.lang)}`), h('span', { class: 'tiny muted' }, OP_LABELS[visit.op]))),
       starButton(visit.routeKey, visit.seq, visit.op)),
@@ -1803,7 +1898,7 @@ function stopCard(stop, isNearest) {
   const isOpen = state.stopOpen === stop.site.id;
   const numbers = [...new Set(stop.site.visits.map((v) => lineName(v.op, state.db.routes[v.routeKey].route, state.lang)))];
   return h('div', { class: `card${isOpen ? ' open' : ''}`, id: `stop-${stop.site.id}` },
-    h('button', { class: 'tap', 'aria-expanded': String(isOpen), onclick: () => { state.stopOpen = isOpen ? null : stop.site.id; renderSheet(); } },
+    h('button', { class: 'tap', 'aria-expanded': String(isOpen), onclick: () => { state.stopOpen = isOpen ? null : stop.site.id; renderSheet(); if (state.focus) clearFocus(); } },
       h('div', { class: 'row' }, h('span', { class: 'bold grow' }, nameText(stop.site.name, state.lang)),
         h('span', { class: `small ${isNearest ? 'live bold' : 'muted'}` }, distanceText(stop.distance)), h('span', { class: 'muted' }, icon(isOpen ? 'up' : 'down', 16))),
       h('div', { class: 'tiny muted ellipsis' }, numbers.slice(0, 8).join(' · ') + (numbers.length > 8 ? ` +${numbers.length - 8}` : ''))),
@@ -1835,7 +1930,12 @@ function renderRoutesTop() {
   clear($('top'), viewHeader(t('路線', 'Routes')),
     h('label', { class: 'search-card single' }, h('span', { class: 'muted' }, icon('search', 19)), h('input', {
       id: 'route-input', value: state.routeQuery, placeholder: t('搜尋路線，例如 1A、960、505', 'Search routes, e.g. 1A, 960, 505'), enterkeyhint: 'search', autocomplete: 'off',
-      oninput: (event) => { state.routeQuery = event.target.value; state.routeKey = null; renderSheet(); },
+      oninput: (event) => {
+        state.routeQuery = event.target.value;
+        state.routeKey = null;
+        renderSheet();
+        if (state.focus) clearFocus();
+      },
       onkeydown: (event) => { if (event.key === 'Enter') { history.add('routes', state.routeQuery); event.target.blur(); } },
     })),
     historyBar('routes', (text) => {
@@ -1851,7 +1951,7 @@ function routesSheet() {
   if (state.routeKey) {
     const route = state.db.routes[state.routeKey], op = route.operators[0];
     return [
-      h('button', { class: 'back', onclick: () => { state.routeKey = null; renderSheet(); } }, icon('back', 17), t('返回', 'Back')),
+      h('button', { class: 'back', onclick: () => { state.routeKey = null; renderSheet(); clearFocus(); } }, icon('back', 17), t('返回', 'Back')),
       h('div', { class: 'row' }, badge(op, route.route), h('span', { class: 'bold' }, `${nameText(route.orig, state.lang)} → ${nameText(route.dest, state.lang)}`)),
       route.stops[op].map((id, seq) => stopRow(route, seq, id, op)),
     ];
@@ -1860,7 +1960,13 @@ function routesSheet() {
   if (!state.routeQuery.trim()) return h('div', { class: 'small muted' }, t('輸入路線號碼，查看沿線站點及到站時間。按星號可收藏常用車站。', 'Type a route number to see its stops and arrivals. Press the star to save a stop.'));
   if (!routes.length) return h('div', { class: 'small muted' }, t('找不到這條路線。', 'No such route.'));
   return routes.map((route) => h('button', {
-    class: 'card tap', onclick: () => { history.add('routes', state.routeQuery); state.routeKey = route.key; renderSheet(); $('sheet').scrollTop = 0; },
+    class: 'card tap', onclick: () => {
+      history.add('routes', state.routeQuery);
+      state.routeKey = route.key;
+      renderSheet();
+      $('sheet').scrollTop = 0;
+      focusRoute(route.key, route.operators[0]);
+    },
   }, h('div', { class: 'row' }, badge(route.operators[0], route.route),
     h('div', { class: 'grow' }, h('div', { class: 'small bold ellipsis' }, `→ ${nameText(route.dest, state.lang)}`),
       h('div', { class: 'tiny muted' }, `${route.operators.map((op) => OP_LABELS[op]).join(' · ')}${route.serviceType === '1' ? '' : t(' · 特別班', ' · Special')}`)))));
@@ -1875,6 +1981,8 @@ function stopRow(route, seq, id, op) {
         class: 'tap grow small', onclick: () => {
           open = !open;
           clear(detail, open && etaWidget(route, seq, op));
+          if (open) focusRoute(route.key, op, seq);
+          else focusRoute(route.key, op);
         },
       }, `${seq + 1}. ${name(id)}`),
       starButton(route.key, seq, op)),
@@ -2102,6 +2210,15 @@ function drawMap() {
   mapView.clear();
   const here = state.nav?.here ?? state.fix;
   if (here) mapView.me(here);
+  if (state.tab !== 'plan' && state.focus) {
+    const path = focusPath(), { position, op, routeKey } = state.focus;
+    mapView.path(withRoads(path));
+    loadRoads(path).then((arrived) => { if (arrived && state.focus) drawMap(); });
+    const id = position == null ? null : state.db.routes[routeKey].stops[op][position];
+    if (id) mapView.ends(null, { name: name(id), location: state.db.stops[id].location });
+    moveVehicles();
+    return;
+  }
   if (state.tab === 'stops') {
     if (state.stopPlace) {
       mapView.ends(null, state.stopPlace);
@@ -2113,7 +2230,7 @@ function drawMap() {
     }
     return;
   }
-  if (state.tab !== 'plan') return;
+  if (state.tab !== 'plan') return moveVehicles();
   const path = state.nav?.path ?? selectedPath();
   if (path) {
     mapView.path(withRoads(path));
@@ -2157,6 +2274,7 @@ function renderTab() {
 function setTab(tab) {
   const direction = tab === 'plan' ? 'back' : 'forward';
   state.tab = tab;
+  state.focus = null;
   stagger();
   renderTab();
   slideView(direction);
