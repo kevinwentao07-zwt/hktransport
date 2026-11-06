@@ -61,9 +61,21 @@ export function parseWish(text) {
 export function searchMessage(origin, destination, preference) {
   return `Search form\nStart: ${origin ?? 'current location'}\nDestination: ${destination}\nPreference: ${preference}`;
 }
-export function chatMessage(text, current) {
-  if (!current) return text;
-  return `Current trip\nStart: ${current.origin ?? 'current location'}\nDestination: ${current.destination}\nPreference: ${current.preference}\nRider says: ${text}`;
+/** A rider's message with everything the AI needs to tell a follow-up from a new subject. */
+export function chatMessage(text, current, context = {}) {
+  const { talk = [], search, question, mayAsk = true } = context, lines = [];
+  if (talk.length) lines.push('Conversation so far', ...talk, '');
+  if (current) lines.push('Current trip', `Start: ${current.origin ?? 'current location'}`, `Destination: ${current.destination}`, `Preference: ${current.preference}`, '');
+  if (search) {
+    lines.push('Current search', `Looking for: ${search.want}`, `Query: ${search.query}`);
+    if (search.area) lines.push(`Area: ${search.area}`);
+    if (search.extra) lines.push(`Also wants: ${search.extra}`);
+    if (search.shops?.length) lines.push('Shops on screen:', ...search.shops.map((shop, index) => `${index + 1}. ${shop}`));
+    lines.push('');
+  }
+  if (question) lines.push(`You just asked: ${question}`);
+  if (!mayAsk) lines.push('You may not ask anything more, so question must be null.');
+  return lines.length ? [...lines, `Rider says: ${text}`].join('\n') : text;
 }
 
 export const INTENT_PROMPT = `You turn Hong Kong public transport trip requests into JSON for a route planner.
@@ -108,12 +120,20 @@ export const CHAT_PROMPT = `${INTENT_PROMPT}
 The rider may instead want to find a kind of place, such as food, a shop or something to do, without
 naming one place to go to. Then reply with this JSON object instead:
 ${DISCOVER_RULES}
-- Going to a named place is still a trip, e.g. 去時代廣場 or 去理大.`;
+- Going to a named place is still a trip, e.g. 去時代廣場 or 去理大.
 
-export const REFINE_PROMPT = `A rider in Hong Kong is looking for a kind of place. You asked them something and they answered.
-Reply with one JSON object and nothing else, keeping what is already known unless the rider changed it:
-${DISCOVER_RULES}
-- The message says when you may not ask anything more. Then question must be null.`;
+The message may give the conversation, the current trip, the current search and the shops on screen.
+First decide whether "Rider says" continues them or starts something new:
+- It continues unless it is clearly a new subject. Short messages almost always continue, e.g. 平啲嘅,
+  近啲, 要有得坐, 換銅鑼灣, 唔要太辣, 少行路.
+- If you just asked something, the message is the answer, unless it plainly changes the subject.
+- Continuing a search: reply with discover. Keep want, query, area and extra, change only what the rider
+  mentioned, and put any new wish into query, e.g. 拉麵 in 旺角 + 平啲嘅 -> query 平價 拉麵, area 旺角.
+- Continuing a trip: reply with the trip, changing only what the rider mentioned.
+- Asking how to get to a shop on screen, e.g. 第一間點去, 去第二間, 呢間點去: reply with a trip whose
+  destination is that shop's exact name from the list, and origin null.
+- A new subject, e.g. 去機場 while looking at ramen shops, or 我想買手機: ignore the conversation, the
+  search and the trip completely.`;
 
 export const pickPrompt = (lang) => `You read web search results about places in Hong Kong and pull out the shops they mention.
 Reply with one JSON object and nothing else:
@@ -133,7 +153,7 @@ ${lang === 'zh' ? 'Write in Traditional Chinese as used in Hong Kong.' : 'Write 
 
 /** Every job the AI does. The server is sent a name from this list, never a prompt. */
 export const PROMPTS = {
-  intent: INTENT_PROMPT, chat: CHAT_PROMPT, refine: REFINE_PROMPT,
+  intent: INTENT_PROMPT, chat: CHAT_PROMPT,
   pick_zh: pickPrompt('zh'), pick_en: pickPrompt('en'),
   explain_zh: explainPrompt('zh'), explain_en: explainPrompt('en'),
 };
@@ -172,16 +192,6 @@ function decodeWish(object) {
     want, query: clean(object.query) || want, searchTerms: terms.length ? terms.slice(0, 4) : [want], area: clean(object.area) || null,
     extra: clean(object.extra) || null, question, options: question ? strings(object.options).slice(0, 4) : [],
   };
-}
-
-/** What the AI is told about a search it is narrowing down. */
-export function refineMessage(wish, answer, mayAsk) {
-  const lines = [`Looking for: ${wish.want}`, `Google query: ${wish.query}`, `Search terms: ${wish.searchTerms.join(', ')}`];
-  if (wish.area) lines.push(`Area: ${wish.area}`);
-  if (wish.extra) lines.push(`Also wants: ${wish.extra}`);
-  lines.push(`You asked: ${wish.question ?? 'Where should I look?'}`, `Rider says: ${answer}`);
-  if (!mayAsk) lines.push('You may not ask anything more.');
-  return lines.join('\n');
 }
 
 export function decodePicks(reply) {
@@ -248,11 +258,6 @@ function assistant(complete) {
       const reply = decodeChat(await complete('chat', message));
       if (!reply) throw new Error('DeepSeek reply was not valid trip JSON');
       return reply;
-    },
-    async refine(wish, answer, mayAsk) {
-      const refined = decodeWish(jsonObject(await complete('refine', refineMessage(wish, answer, mayAsk))));
-      if (!refined) throw new Error('DeepSeek reply was not valid search JSON');
-      return refined;
     },
     pick: async (want, area, results, lang) => decodePicks(await complete(`pick_${lang}`, pickMessage(want, area, results))),
     explain: (summary, lang) => complete(`explain_${lang}`, summary),
