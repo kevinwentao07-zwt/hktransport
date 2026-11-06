@@ -206,6 +206,10 @@ svg.icon.solid { fill: currentColor; }
 .shop-facts .shut { color: #ff453a; font-weight: 600; }
 .shop-links { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 5px; }
 .shop-links a { color: #2f7bf6; text-decoration: none; }
+.bus-marker { position: relative; width: 0; height: 0; pointer-events: none; }
+.bus-icon { position: absolute; left: -15px; top: -15px; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; border: 2.5px solid #fff; color: #fff; box-shadow: 0 2px 8px rgba(0, 0, 0, .45); animation: breathe 2.4s ease-in-out infinite; }
+.bus-note { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); padding: 2px 7px; border-radius: 8px; background: var(--surface); color: var(--ink); box-shadow: 0 1px 4px rgba(0, 0, 0, .3); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.leaflet-marker-icon.bus-holder { transition: transform 3s linear; }
 .g-anchor { width: 0; height: 0; }
 .g-stop { display: flex; align-items: center; gap: 4px; width: max-content; transform: translate(-6px, -50%); }
 .g-dot { width: 12px; height: 12px; flex: none; box-sizing: border-box; border-radius: 50%; background: #fff; border: 2.5px solid; }

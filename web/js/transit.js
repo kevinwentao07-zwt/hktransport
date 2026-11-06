@@ -508,6 +508,31 @@ export function trainServes(terminus, ride, db) {
 // MARK: Journey path
 
 /** Every stop the rider passes, from boarding to alighting. */
+const SECONDS_PER_STOP = 90;
+
+/**
+ * Where the next bus probably is, working back from its live arrival at the boarding stop. There is
+ * no public bus tracking, so this assumes an even pace along the route.
+ */
+export function estimatedVehicle(ride, db, now) {
+  if (!ride?.liveDeparture || ride.isProjected || ['mtr', 'lightRail'].includes(ride.op)) return null;
+  const route = db.routes[ride.routeKey], stops = route?.stops[ride.op];
+  if (!stops || stops.length < 2 || ride.boardPosition >= stops.length) return null;
+  const perStop = route.journeyMinutes ? (route.journeyMinutes * 60) / (stops.length - 1) : SECONDS_PER_STOP;
+  const seconds = (ride.liveDeparture - now) / 1000;
+  const position = ride.boardPosition - seconds / perStop;
+  if (position >= stops.length - 1) return null;
+  const clamped = Math.max(0, position), index = Math.floor(clamped);
+  const from = db.stops[stops[index]]?.location, to = db.stops[stops[index + 1]]?.location;
+  if (!validLocation(from) || !validLocation(to)) return null;
+  const part = clamped - index;
+  return {
+    location: { lat: from.lat + (to.lat - from.lat) * part, lng: from.lng + (to.lng - from.lng) * part },
+    minutes: Math.max(0, Math.ceil(seconds / 60)), hasLeftTerminus: position >= 0, hasPassedStop: seconds < 0,
+    color: lineColor(ride.op, ride.route),
+  };
+}
+
 export function rideStopIDs(ride, db) {
   const all = db.routes[ride.routeKey]?.stops[ride.op];
   return all && ride.boardPosition <= ride.alightPosition && ride.alightPosition < all.length

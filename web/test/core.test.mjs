@@ -223,6 +223,26 @@ test('Simplified Chinese', () => {
   assert.equal(toSimplified('著名'), '著名');
   assert.equal(toSimplified('中環'), '中环');
 });
+test('the next bus is placed by its live arrival', () => {
+  const db = {
+    routes: { r: { stops: { kmb: ['a', 'b', 'c', 'd', 'e'] }, journeyMinutes: 8 } },
+    stops: { a: { location: { lat: 22.30, lng: 114.10 } }, b: { location: { lat: 22.31, lng: 114.10 } }, c: { location: { lat: 22.32, lng: 114.10 } }, d: { location: { lat: 22.33, lng: 114.10 } }, e: { location: { lat: 22.34, lng: 114.10 } } },
+  };
+  const ride = { op: 'kmb', route: '1', routeKey: 'r', boardPosition: 3, liveDeparture: 180_000 };
+  const coming = T.estimatedVehicle(ride, db, 0); // 2 minutes a stop, so 1.5 stops back.
+  close(coming.location.lat, 22.315, 0.00001);
+  assert.equal(coming.minutes, 3);
+  assert.equal(coming.hasLeftTerminus, true);
+  assert.equal(coming.hasPassedStop, false);
+  const waiting = T.estimatedVehicle({ ...ride, liveDeparture: 3_600_000 }, db, 0);
+  close(waiting.location.lat, 22.30, 0.00001);
+  assert.equal(waiting.hasLeftTerminus, false);
+  assert.equal(T.estimatedVehicle({ ...ride, liveDeparture: -60_000 }, db, 0).hasPassedStop, true);
+  assert.equal(T.estimatedVehicle({ ...ride, liveDeparture: -600_000 }, db, 0), null);
+  assert.equal(T.estimatedVehicle({ ...ride, liveDeparture: null }, db, 0), null);
+  assert.equal(T.estimatedVehicle({ ...ride, isProjected: true }, db, 0), null);
+  assert.equal(T.estimatedVehicle({ ...ride, op: 'mtr' }, db, 0), null);
+});
 test('area words', () => {
   assert.equal(P.cleanArea('朗豪坊附近'), '朗豪坊');
   assert.equal(P.cleanArea('附近'), '附近');
