@@ -6,7 +6,7 @@ import { meters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache } from './eta.js?v=dev';
 import { chatMessage, deepSeek, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseWish, searchMessage } from './ai.js?v=dev';
-import { HONG_KONG, cleanArea, districtAt, googleSearch, googleWalk, inHongKong, isNearby, isSameShop, knownWalk, lookupPlace, photonSearch, webSearch, withinArea } from './places.js?v=dev';
+import { HONG_KONG, cleanArea, districtAt, googleSearch, googleWalk, inHongKong, isNearby, knownWalk, lookupPlace, photonSearch, withinArea } from './places.js?v=dev';
 
 // MARK: Storage
 
@@ -515,7 +515,6 @@ async function checkServer() {
     if (response.ok) shared = await response.json();
   } catch { /* The page works without it. */ }
   state.sharedAI = shared?.available === true;
-  state.web = shared?.web === true;
   if (state.sharedAI) renderTab();
   if (shared?.mapKey) useGoogleMap(shared);
   else useFreeMap();
@@ -748,44 +747,7 @@ function startDiscovery(wish, run) {
   renderBottomStatus();
 }
 
-const MOST_SHOPS = 8, MOST_LOOKUPS = 3;
-
-/** The shops the web recommends for this search, by name. */
-async function webPicks(wish, area) {
-  const ai = client();
-  if (!ai || !state.web) return [];
-  // Written as a sentence: the search engine loses the thread with words split by spaces.
-  const words = wish.query.replace(/\s+/g, '');
-  const pages = await webSearch(state.lang === 'zh' ? `${area.name}${words}推薦` : `best ${wish.query} in ${area.name} Hong Kong`);
-  if (!pages?.length) return [];
-  try {
-    return await ai.pick(wish.want, area.name, pages, state.lang);
-  } catch {
-    return [];
-  }
-}
-
-/** One Google search brings a page of shops. Only a recommended shop missing from it costs another. */
-async function findShops(wish, area) {
-  const [picks, found] = await Promise.all([
-    webPicks(wish, area),
-    googleSearch(`${wish.query} ${area.name}`, area.center, area.radius, state.lang, true),
-  ]);
-  const nearby = withinArea(found ?? [], area);
-  const inPage = (pick) => nearby.find((place) => isSameShop(place.name, pick.name));
-  const missing = picks.filter((pick) => !inPage(pick)).slice(0, MOST_LOOKUPS);
-  const lookedUp = await Promise.all(missing.map(async (pick) => {
-    const places = await googleSearch(`${pick.name} ${area.name}`, area.center, area.radius, state.lang, true);
-    return [pick, withinArea(places ?? [], area).find((place) => isSameShop(place.name, pick.name))];
-  }));
-  const recommended = picks.flatMap((pick) => {
-    const place = inPage(pick) ?? lookedUp.find(([asked]) => asked === pick)?.[1];
-    return place ? [{ place, reason: pick.reason, isFromWeb: true }] : [];
-  });
-  const seen = new Set();
-  return [...recommended, ...nearby.map((place) => ({ place, isGoogle: true }))]
-    .filter(({ place }) => !seen.has(place.id) && seen.add(place.id)).slice(0, MOST_SHOPS);
-}
+const MOST_SHOPS = 8;
 
 async function discover(wish, run = ++planRun) {
   const stale = () => run !== planRun;
@@ -818,11 +780,12 @@ async function discover(wish, run = ++planRun) {
     searchArea = { name: resolved.name, center: resolved.location, radius: 2500 };
   }
 
-  // The web says which shops are worth it, and Google says where they are.
+  // Google finds the shops in one search, which brings a full page for the price of one.
   let suggestions = [];
   if (state.google) {
-    suggestions = await findShops(wish, searchArea);
+    const found = await googleSearch(`${wish.query} ${searchArea.name}`, searchArea.center, searchArea.radius, state.lang, true);
     if (stale()) return;
+    suggestions = withinArea(found ?? [], searchArea).slice(0, MOST_SHOPS).map((place) => ({ place, isGoogle: true }));
     // With everything Google knows in hand, the AI puts them in order and says why.
     try {
       if (suggestions.length) suggestions = (await client()?.rank(wish, suggestions, state.lang)) ?? suggestions;
@@ -1313,9 +1276,7 @@ function suggestionList({ wish, areaName, suggestions }) {
   return [
     h('div', { class: 'row' }, h('span', { class: 'title grow' }, t(`${areaName}的${wish.want}`, `${wish.want} around ${areaName}`)),
       h('button', { class: 'link', onclick: () => { state.discovery = { stage: 'asking', wish: { ...wish, area: null, question: null, options: [] } }; renderSheet(); drawMap(); renderBottomStatus(); } }, t('換範圍', 'Change area'))),
-    h('div', { class: 'tiny muted' }, suggestions.some((suggestion) => suggestion.isFromWeb)
-      ? t('AI 按網上推介及 Google 地圖資料排序。出發前請確認仍在營業。', 'Ranked by AI from recommendations online and Google Maps. Check it is open before you go.')
-      : suggestions.some((suggestion) => suggestion.isGoogle)
+    h('div', { class: 'tiny muted' }, suggestions.some((suggestion) => suggestion.isGoogle)
       ? t('AI 按 Google 地圖資料排序。出發前請確認仍在營業。', 'Ranked by AI from Google Maps. Check it is open before you go.')
       : t('地點來自地圖搜尋，沒有菜單資料，未必有售，出發前請先確認。', 'Places come from a map search, which has no menus. Check before you go.')),
     suggestions.map((suggestion, index) => h('div', {
@@ -1358,7 +1319,7 @@ function homeSheet() {
 
 const PHASES = {
   understanding: () => (client() ? t('AI 正在分析你的要求…', 'AI is analysing your request…') : t('理解要求…', 'Reading your request…')),
-  findingPlaces: () => (state.google && state.web ? t('AI 正在全網搜尋，並在 Google 地圖確認…', 'AI is searching the web and checking Google Maps…') : t('正在搜尋地點…', 'Searching for places…')),
+  findingPlaces: () => (state.google ? t('正在 Google 地圖搜尋…', 'Searching Google Maps…') : t('正在搜尋地點…', 'Searching for places…')),
   locating: () => t('正在尋找起點及目的地…', 'Finding places…'),
   planning: () => t('正在計算路線…', 'Planning routes…'),
   checkingLive: () => t('正在核對實時到站時間…', 'Checking live arrivals…'),
