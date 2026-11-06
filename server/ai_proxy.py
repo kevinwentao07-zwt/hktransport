@@ -10,12 +10,14 @@ disk, and at the limit the site quietly goes back to its free map and search.
 """
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -171,10 +173,10 @@ spending = Spending(
 )
 
 # Free each month: 10,000 map loads, 5,000 searches, 1,000 searches with shop details, 10,000 walking
-# routes and 10,000 suggestions. These stop well short of all five.
+# routes, 10,000 suggestions and 10,000 place lookups. These stop well short of all six.
 budget = Budget(
     Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'usage.json',
-    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 9000, 40), 'details': (30, 900, 12), 'suggest': (300, 9000, 60)},
+    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 9000, 40), 'details': (30, 900, 12), 'suggest': (300, 9000, 60), 'place': (300, 9000, 60)},
 )
 
 
@@ -265,6 +267,17 @@ def suggest_places(query, origin, language):
         'id': place['placeId'], 'name': place['structuredFormat']['mainText']['text'],
         'address': place['structuredFormat'].get('secondaryText', {}).get('text'), 'meters': place.get('distanceMeters'),
     } for place in places]
+
+
+def place_location(place_id):
+    """Where a suggested place is, as it was only named."""
+    request = urllib.request.Request(
+        f"https://places.googleapis.com/v1/places/{urllib.parse.quote(place_id, safe='')}",
+        headers={'X-Goog-Api-Key': places_key(), 'X-Goog-FieldMask': 'location'},
+    )
+    with urllib.request.urlopen(request, timeout=8) as response:
+        location = json.load(response)['location']
+    return {'lat': location['latitude'], 'lng': location['longitude']}
 
 
 def decode_polyline(encoded):
@@ -370,12 +383,12 @@ class Handler(BaseHTTPRequestHandler):
         return body
 
     def do_POST(self):
-        if self.path not in ('/api/ai', '/api/places', '/api/walk', '/api/suggest'):
+        if self.path not in ('/api/ai', '/api/places', '/api/walk', '/api/suggest', '/api/place'):
             return self.send(404, {'error': 'Not found'})
         body = self.read_json()
         if body is None:
             return None
-        return {'/api/places': self.places, '/api/walk': self.walk, '/api/suggest': self.suggest}.get(self.path, self.ask)(body)
+        return {'/api/places': self.places, '/api/walk': self.walk, '/api/suggest': self.suggest, '/api/place': self.place}.get(self.path, self.ask)(body)
 
     def suggest(self, body):
         query, origin = body.get('query'), body.get('from')
@@ -391,6 +404,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send(502, {'error': 'Unavailable'})
         except (OSError, ValueError, KeyError, TypeError) as error:
             print(f'Suggestions failed: {type(error).__name__}', file=sys.stderr, flush=True)
+            self.send(502, {'error': 'Unavailable'})
+
+    def place(self, body):
+        place_id = body.get('id')
+        if not isinstance(place_id, str) or not re.fullmatch(r'[\w-]{1,512}', place_id):
+            return self.send(400, {'error': 'Bad request'})
+        if not places_key() or not budget.spend('place', self.visitor()):
+            return self.send(429, {'error': 'Limit reached'})
+        try:
+            self.send(200, {'location': place_location(place_id)})
+        except urllib.error.HTTPError as error:
+            print(f'Place returned {error.code}', file=sys.stderr, flush=True)
+            self.send(502, {'error': 'Unavailable'})
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f'Place failed: {type(error).__name__}', file=sys.stderr, flush=True)
             self.send(502, {'error': 'Unavailable'})
 
     def walk(self, body):

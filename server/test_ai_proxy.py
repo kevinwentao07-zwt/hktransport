@@ -238,6 +238,14 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.post({'query': '朗'}, path='/api/suggest')[0], 200)
         self.assertEqual(self.post({'query': '朗'}, path='/api/suggest')[0], 429)
 
+    def test_place_lookups_stop_at_the_limit(self):
+        ai_proxy.budget = budget(place=(1, 10, 10))
+        ai_proxy.place_location = lambda place_id: {'lat': 22.3, 'lng': 114.1}
+        self.assertEqual(self.post({'id': '../secret'}, path='/api/place')[0], 400)
+        self.assertEqual(self.post({'id': 'ChIJabc-_1'}, origin=False, path='/api/place')[0], 403)
+        self.assertEqual(self.post({'id': 'ChIJabc-_1'}, path='/api/place')[0], 200)
+        self.assertEqual(self.post({'id': 'ChIJabc-_1'}, path='/api/place')[0], 429)
+
     def test_upstream_errors_reveal_nothing(self):
         def fail(system, message):
             raise urllib.error.HTTPError('u', 401, f'bad key {SECRET}', {}, None)

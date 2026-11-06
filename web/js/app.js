@@ -7,7 +7,7 @@ import { meters,
 import { fetchETA, liveArrivalCache, routeArrivals } from './eta.js?v=dev';
 import { toSimplified } from './hans.js?v=dev';
 import { chatMessage, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
-import { HONG_KONG, cleanArea, googleSearch, googleSuggest, googleWalk, inHongKong, insideArea, isNearby, knownShape, knownWalk, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
+import { HONG_KONG, cleanArea, googlePlaceLocation, googleSearch, googleSuggest, googleWalk, inHongKong, insideArea, isNearby, knownShape, knownWalk, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
 
 // MARK: Storage
 
@@ -801,7 +801,7 @@ async function resolvePlace(text) {
   if (site) return { name: nameText(site.name, state.lang), location: site.location };
   // Google finds places while its free allowance lasts; the free sources take over after that.
   const near = state.fix && inHongKong(state.fix);
-  const found = state.google ? (await googleSearch(text, near ? state.fix : HONG_KONG, near ? 5000 : 50_000, state.lang))?.[0] : null;
+  const found = (await googleSearch(text, near ? state.fix : HONG_KONG, near ? 5000 : 50_000, state.lang))?.[0];
   if (found) return { name: found.name, location: found.location };
   const place = await lookupPlace(text);
   if (place) return state.lang === 'zh' ? { name: text, location: place.location } : place;
@@ -1657,11 +1657,11 @@ let suggestTimer = null, googlePlaces = [];
 /** Stops answer at once. Google waits for a pause in the typing, to keep within its allowance. */
 function suggestPlaces() {
   clearTimeout(suggestTimer);
-  googlePlaces = [];
-  renderSheet();
   const text = state.destination.trim();
+  if (text.length < 2) googlePlaces = [];
+  renderSheet();
   getFix();
-  if (!state.google || text.length < 2) return;
+  if (text.length < 2) return;
   suggestTimer = setTimeout(async () => {
     const near = state.fix && inHongKong(state.fix) ? state.fix : null;
     const found = await googleSuggest(text, near, state.lang);
@@ -1680,10 +1680,7 @@ function placeSuggestions() {
     class: 'item', onmousedown: (event) => event.preventDefault(),
     onclick: () => {
       clearTimeout(suggestTimer);
-      if (item.site) return planTo(item.site);
-      state.destination = item.name;
-      syncPlaceInputs();
-      return search();
+      return item.site ? planTo(item.site) : planToSuggestion(item);
     },
   },
     h('i', { class: 'dot', style: item.site ? 'color:#fff;background:var(--accent)' : '' }, icon(item.site ? 'bus' : 'pin', 16)),
@@ -1748,14 +1745,29 @@ let stopRun = 0;
 const offset = (l, m, sign) => ({ lat: l.lat + (sign * m) / 111_000, lng: l.lng + (sign * m) / 103_000 });
 
 function planTo(site) {
+  planToPlace({ name: nameText(site.name, state.lang), location: site.location });
+}
+
+function planToPlace(place) {
   state.tab = 'plan';
   state.origin = '';
-  state.destination = nameText(site.name, state.lang);
+  state.destination = place.name;
   state.discovery = null;
   state.routeView = true;
   renderTab();
   sheet.snap('half');
-  runPlan({ kind: 'place', place: { name: state.destination, location: site.location } });
+  runPlan({ kind: 'place', place });
+}
+
+/** Goes to the very place Google suggested, as a search by name could find another branch. */
+async function planToSuggestion(item) {
+  state.destination = item.name;
+  syncPlaceInputs();
+  const location = await googlePlaceLocation(item.id);
+  if (!location) return search();
+  history.add('destination', item.name);
+  document.activeElement?.blur();
+  return planToPlace({ name: item.name, location });
 }
 
 // MARK: Arrival widgets

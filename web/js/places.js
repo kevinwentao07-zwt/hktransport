@@ -52,14 +52,36 @@ export async function googleSuggest(query, from, lang) {
   }
 }
 
-/** Stops and places as one list, nearest first, and anything of unknown distance last. */
-export function mergeSuggestions(stops, places, limit = 8) {
+/** Where a suggested place is, as Google only names it. Null at the limit. */
+export async function googlePlaceLocation(id) {
+  try {
+    const response = await fetch('api/place', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    return response.ok ? (await response.json()).location : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Stops and places as one list, nearest first, and anything of unknown distance last.
+ * Each kind keeps half the list when it has that many, so neither crowds out the other.
+ */
+export function mergeSuggestions(stops, places, limit = 10) {
   const away = (item) => item.meters ?? Infinity;
-  const seen = new Set();
-  return [...stops, ...places].sort((a, b) => away(a) - away(b)).filter((item) => {
+  const seen = new Set(), isStop = new Set(stops);
+  const once = [...stops, ...places].sort((a, b) => away(a) - away(b)).filter((item) => {
     const name = item.name.replace(/\s/g, '');
     return !seen.has(name) && seen.add(name);
-  }).slice(0, limit);
+  });
+  const stopsLeft = once.filter((item) => isStop.has(item)), placesLeft = once.filter((item) => !isStop.has(item));
+  const stopRoom = Math.min(stopsLeft.length, Math.max(Math.ceil(limit / 2), limit - placesLeft.length));
+  const kept = new Set([...stopsLeft.slice(0, stopRoom), ...placesLeft.slice(0, limit - stopRoom)]);
+  return once.filter((item) => kept.has(item));
 }
 
 const shapes = new Map();

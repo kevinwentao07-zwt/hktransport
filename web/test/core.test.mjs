@@ -322,6 +322,14 @@ test('stops and places mix from near to far, once each', () => {
   assert.deepEqual(merged.map((item) => item.name), ['朗豪坊', '始創中心', '旺角站', '遠方']);
   assert.equal(merged[0].meters, 80);
   assert.equal(P.mergeSuggestions([{ name: 'a', meters: 1 }, { name: 'b', meters: 2 }], [], 1).length, 1);
+  // Shops stay on the list however many stops match, near or not, and either kind fills spare room.
+  const stops = Array.from({ length: 8 }, (_, index) => ({ name: `站${index}`, meters: index }));
+  const shops = Array.from({ length: 5 }, (_, index) => ({ name: `店${index}` }));
+  const both = P.mergeSuggestions(stops, shops);
+  assert.equal(both.length, 10);
+  assert.equal(both.filter((item) => item.name.startsWith('店')).length, 5);
+  assert.equal(P.mergeSuggestions(stops, shops.slice(0, 1)).length, 9);
+  assert.equal(P.mergeSuggestions(stops.slice(0, 1), shops).length, 6);
 });
 test('area words', () => {
   assert.equal(P.cleanArea('朗豪坊附近'), '朗豪坊');
