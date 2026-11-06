@@ -5,7 +5,7 @@ const VERSION = 'hktransport-v=dev';
 const SHELL = [
   './', 'index.html', 'styles.css?v=dev', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png',
   'vendor/leaflet.js', 'vendor/leaflet.css', 'vendor/maplibre-gl.js', 'vendor/maplibre-gl.css', 'vendor/leaflet-maplibre-gl.js',
-  'js/app.js?v=dev', 'js/transit.js?v=dev', 'js/eta.js?v=dev', 'js/ai.js?v=dev', 'js/places.js?v=dev', 'js/planner.worker.js?v=dev',
+  'js/app.js?v=dev', 'js/transit.js?v=dev', 'js/eta.js?v=dev', 'js/ai.js?v=dev', 'js/places.js?v=dev', 'js/hans.js?v=dev', 'js/planner.worker.js?v=dev',
 ];
 const DATABASE = 'routeFareList.min.json';
 

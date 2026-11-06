@@ -16,6 +16,7 @@ Without it, as on GitHub Pages, the page uses its free map and search, with no A
 | `js/eta.js` | Per-operator arrival fetchers and parsers |
 | `js/ai.js` | DeepSeek client, prompts and the rule parser used without a key |
 | `js/places.js` | Place search: Google through the server, then the free sources |
+| `js/hans.js` | Traditional to Simplified Chinese |
 | `js/planner.worker.js` | Runs the route search off the main thread |
 | `js/app.js` | The page |
 

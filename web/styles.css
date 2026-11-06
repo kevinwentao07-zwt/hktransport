@@ -116,10 +116,16 @@ svg.icon.solid { fill: currentColor; }
 .segments button[aria-pressed="true"] { font-weight: 600; }
 
 /* History */
-.history { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-.history .list { display: flex; gap: 6px; flex: 1; min-width: 0; overflow: hidden; }
-.history .list.open { flex-wrap: wrap; }
-.history .chip { background: var(--raised); border-radius: 14px; padding: 3px 10px; white-space: nowrap; flex: none; }
+#chat-input::placeholder { font-size: 14px; }
+.history { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.history .past { display: flex; gap: 7px; flex: 1; min-width: 0; padding: 3px 14px 3px 1px; overflow-x: auto; scrollbar-width: none; -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent); }
+.history .past::-webkit-scrollbar { display: none; }
+.history .past.open { flex-wrap: wrap; overflow: visible; -webkit-mask-image: none; mask-image: none; }
+.history .chip { display: inline-flex; align-items: center; gap: 5px; flex: none; height: 32px; padding: 0 12px 0 9px; border-radius: 16px; background: var(--tile); box-shadow: var(--rim), var(--tile-shadow); color: var(--ink); white-space: nowrap; transition: transform .35s var(--pop), background .2s; animation: rise .42s var(--ease-out) both; animation-delay: calc(var(--i, 0) * 35ms); }
+.history .chip svg { flex: none; color: var(--muted); }
+.history .chip:active, .history .pill:active { transform: scale(.94); background: var(--raised); }
+.history .pill { flex: none; height: 32px; min-width: 32px; padding: 0 9px; display: inline-grid; place-items: center; border-radius: 16px; background: var(--raised); color: var(--muted); font-weight: 600; transition: transform .35s var(--pop), background .2s; }
+.history .round-pill { padding: 0; }
 
 /* Cards */
 .card { background: var(--tile); box-shadow: var(--rim), var(--tile-shadow); border-radius: 20px; padding: 13px 15px; display: flex; flex-direction: column; gap: 10px; transition: box-shadow .3s; }

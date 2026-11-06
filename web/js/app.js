@@ -5,6 +5,7 @@ import { meters,
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache } from './eta.js?v=dev';
+import { toSimplified } from './hans.js?v=dev';
 import { chatMessage, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
 import { HONG_KONG, cleanArea, googleSearch, googleWalk, inHongKong, insideArea, isNearby, knownWalk, lookupPlace, mergeShops, photonSearch, withinArea } from './places.js?v=dev';
 
@@ -44,7 +45,7 @@ const history = {
 // MARK: State
 
 const state = {
-  lang: store.get('lang', 'zh'), tab: 'plan', db: null, dbError: null, index: null,
+  lang: store.get('lang', 'zh'), script: store.get('script', 'hant'), tab: 'plan', db: null, dbError: null, index: null,
   origin: '', destination: '', chat: '', preference: store.get('preference', 'fastest'), phase: 'idle', error: null,
   from: null, to: null, journeys: [], expanded: null, explanation: null, explaining: false, aiNotice: null, lastChat: null,
   discovery: null,
@@ -54,6 +55,43 @@ const state = {
 };
 const t = (zh, en) => (state.lang === 'zh' ? zh : en);
 const name = (id) => stopName(id, state.db, state.lang);
+// Everything is written in Traditional, as stop names and replies are, so Simplified converts what
+// lands on the page rather than each string on its way there.
+const TEXT_ATTRIBUTES = ['placeholder', 'title', 'aria-label'];
+
+function simplify(node) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    const text = toSimplified(node.nodeValue);
+    if (text !== node.nodeValue) node.nodeValue = text;
+    return;
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return;
+  for (const element of [node, ...node.querySelectorAll('*')]) {
+    for (const name of TEXT_ATTRIBUTES) {
+      const value = element.getAttribute(name);
+      if (value && toSimplified(value) !== value) element.setAttribute(name, toSimplified(value));
+    }
+  }
+  const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) simplify(walker.currentNode);
+}
+
+const scriptWatcher = new MutationObserver((changes) => {
+  for (const change of changes) {
+    if (change.type === 'childList') change.addedNodes.forEach(simplify);
+    else simplify(change.target);
+  }
+});
+
+function applyScript() {
+  scriptWatcher.disconnect();
+  const isSimplified = state.lang === 'zh' && state.script === 'hans';
+  document.documentElement.lang = state.lang === 'en' ? 'en' : isSimplified ? 'zh-Hans' : 'zh-Hant';
+  if (!isSimplified) return;
+  simplify($('app'));
+  scriptWatcher.observe($('app'), { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: TEXT_ATTRIBUTES });
+}
+
 const client = () => (state.sharedAI ? sharedAI() : null);
 const siteIndex = () => (state.index ??= buildStopIndex(state.db));
 
@@ -148,17 +186,17 @@ function historyBar(box, pick) {
     const shown = open ? entries : entries.slice(0, HISTORY_SHOWN);
     const hidden = entries.length - HISTORY_SHOWN;
     clear(root,
-      h('div', { class: `list${open ? ' open' : ''}` }, shown.map((text) => h('button', {
-        class: 'chip', title: text, onmousedown: (event) => event.preventDefault(), onclick: () => pick(text),
-      }, text.length > 14 ? `${text.slice(0, 14)}…` : text))),
+      h('div', { class: `past${open ? ' open' : ''}` }, shown.map((text, index) => h('button', {
+        class: 'chip', title: text, style: `--i:${Math.min(index, 6)}`, onmousedown: (event) => event.preventDefault(), onclick: () => pick(text),
+      }, icon('clock', 13), h('span', {}, text.length > 14 ? `${text.slice(0, 14)}…` : text)))),
       hidden > 0 && h('button', {
-        class: 'link', onmousedown: (event) => event.preventDefault(),
+        class: 'pill', 'aria-label': open ? t('收起', 'Less') : t(`更多 ${hidden} 項`, `${hidden} more`), onmousedown: (event) => event.preventDefault(),
         onclick: () => { open = !open; draw(); },
-      }, open ? t('收起', 'Less') : t(`更多 ${hidden}`, `${hidden} more`)),
+      }, open ? t('收起', 'Less') : `+${hidden}`),
       h('button', {
-        class: 'link', onmousedown: (event) => event.preventDefault(),
+        class: 'pill round-pill', 'aria-label': t('清除記錄', 'Clear history'), onmousedown: (event) => event.preventDefault(),
         onclick: () => { history.clear(box); root.remove(); },
-      }, t('清除', 'Clear')));
+      }, icon('close', 13)));
   };
   draw();
   return root;
@@ -432,7 +470,7 @@ function loadGoogle(key) {
   return new Promise((resolve, reject) => {
     window.hktGoogleReady = resolve;
     const script = document.createElement('script');
-    const language = state.lang === 'zh' ? 'zh-HK' : 'en';
+    const language = state.lang === 'en' ? 'en' : state.script === 'hans' ? 'zh-CN' : 'zh-HK';
     script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&v=weekly&loading=async&libraries=marker&language=${language}&region=HK&callback=hktGoogleReady`;
     script.onerror = reject;
     document.head.append(script);
@@ -961,7 +999,7 @@ function renderChatControls() {
 function chatPrompt() {
   if (state.listening) return t('正在聆聽…', 'Listening…');
   if (state.discovery?.stage === 'asking') return t('輸入你的回答…', 'Type your answer…');
-  return t('告訴 AI，例如：我想吃螺螄粉', 'Ask AI, e.g. I want rice noodles');
+  return t('告訴 AI，例如：去吃茶餐廳', 'Ask AI, e.g. Find a cha chaan teng');
 }
 
 // MARK: Actions
@@ -1587,10 +1625,12 @@ function settingsSheet() {
   const searches = Object.values(store.get('history', {})).flat().length;
   return [
     settingGroup(t('一般', 'General'),
-      setting(t('語言', 'Language'), segments([['zh', '繁體中文'], ['en', 'English']], state.lang, (lang) => {
-        state.lang = lang;
-        store.set('lang', lang);
-        document.documentElement.lang = lang === 'zh' ? 'zh-Hant' : 'en';
+      setting(t('語言', 'Language'), segments([['hant', '繁體中文'], ['hans', '简体中文'], ['en', 'English']], state.lang === 'en' ? 'en' : state.script, (choice) => {
+        state.lang = choice === 'en' ? 'en' : 'zh';
+        if (choice !== 'en') state.script = choice;
+        store.set('lang', state.lang);
+        store.set('script', state.script);
+        applyScript();
         mapView.setLanguage();
         renderTab();
       })),
@@ -1831,6 +1871,7 @@ sheet.attach();
 // Keys were once saved here, and nothing needs them now.
 try { for (const old of ['hkt.apiKey', 'hkt.model']) localStorage.removeItem(old); } catch { /* Private mode. */ }
 
+applyScript();
 mapView.init();
 renderTab();
 mapView.home();

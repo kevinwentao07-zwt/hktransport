@@ -4,6 +4,7 @@ import * as T from '../js/transit.js';
 import * as E from '../js/eta.js';
 import * as A from '../js/ai.js';
 import * as P from '../js/places.js';
+import { toSimplified } from '../js/hans.js';
 
 const raw = {
   routeList: {
@@ -215,6 +216,12 @@ test('without the AI, searches go to Google and trips stay trips', () => {
   assert.equal(A.parseSearch('去機場'), null);
   assert.equal(A.parseSearch('少行路'), null);
   assert.equal(A.parseSearch('  '), null);
+});
+test('Simplified Chinese', () => {
+  assert.equal(toSimplified('銅鑼灣的平價拉麵'), '铜锣湾的平价拉面');
+  assert.equal(toSimplified('荃灣綫 Tsuen Wan 2 號'), '荃湾线 Tsuen Wan 2 号');
+  assert.equal(toSimplified('著名'), '著名');
+  assert.equal(toSimplified('中環'), '中环');
 });
 test('area words', () => {
   assert.equal(P.cleanArea('朗豪坊附近'), '朗豪坊');
