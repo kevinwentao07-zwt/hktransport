@@ -631,10 +631,28 @@ function placeOnStops(stops, position, db) {
  * next bus comes sooner than the stop before it, a bus is between the two.
  * `arrivals` is [{position, times}], and `boardPosition` is where the rider gets on.
  */
+function secondsPerStop(route, stops) {
+  return route.journeyMinutes ? (route.journeyMinutes * 60) / (stops.length - 1) : SECONDS_PER_STOP;
+}
+
+/**
+ * The coming bus, kept true to the time shown for the rider's stop. A bus too far from
+ * that time is a different one, so it moves to where the due bus must be; null when
+ * that is before the start of the route, as the due bus has not set off yet.
+ */
+export function vehicleDueIn(vehicle, seconds, ride, db, sameBusStops) {
+  const route = db.routes[ride.routeKey], stops = route?.stops[ride.op];
+  if (!stops) return vehicle;
+  const position = ride.boardPosition - seconds / secondsPerStop(route, stops);
+  if (Math.abs(position - vehicle.position) < sameBusStops) return vehicle;
+  const place = position >= 0 ? placeOnStops(stops, position, db) : null;
+  return place ? { ...vehicle, ...place, position } : null;
+}
+
 export function vehiclesOnRoute(arrivals, ride, db, now) {
   const route = db.routes[ride.routeKey], stops = route?.stops[ride.op];
   if (!stops || stops.length < 2) return [];
-  const perStop = route.journeyMinutes ? (route.journeyMinutes * 60) / (stops.length - 1) : SECONDS_PER_STOP;
+  const perStop = secondsPerStop(route, stops);
   const nexts = arrivals.flatMap(({ position, times }) => {
     const next = Math.min(...times.filter((time) => time > now));
     return Number.isFinite(next) ? [{ position, next }] : [];
@@ -645,7 +663,8 @@ export function vehiclesOnRoute(arrivals, ride, db, now) {
     const position = Math.max(before.position, stop.position - (stop.next - now) / 1000 / perStop);
     const place = placeOnStops(stops, position, db);
     if (!place) return [];
-    const minutes = position <= ride.boardPosition ? Math.ceil(((ride.boardPosition - position) * perStop) / 60) : null;
+    // Held at the rider's own stop means it has already reached it, so it is not the one to wait for.
+    const minutes = position < ride.boardPosition ? Math.ceil(((ride.boardPosition - position) * perStop) / 60) : null;
     return [{ ...place, position, minutes, color: lineColor(ride.op, ride.route), isMinibus: ride.op === 'gmb', isNext: false }];
   });
   // Only two matter to the rider: the one coming, and the one that has just gone.

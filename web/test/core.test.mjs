@@ -251,6 +251,14 @@ test('buses are found along the whole route from its arrivals', () => {
   assert.equal(earlier.length, 1); // Two buses coming: only the nearer one shows.
   close(earlier[0].position, 2.5, 0.00001);
   assert.deepEqual(T.vehiclesOnRoute([{ position: 1, times: [] }], ride, db, 0), []);
+  // Reached the rider's stop already: it has gone, even with the next one not due for a while.
+  const left = T.vehiclesOnRoute([{ position: 0, times: [19 * min] }, { position: 3, times: [1 * min] }], { ...ride, boardPosition: 0 }, db, 0);
+  assert.equal(left.some((vehicle) => vehicle.isNext), false);
+  // Near the time shown it stays put; far from it, the due bus is elsewhere or not out yet.
+  const coming = { position: 1, location: {} };
+  assert.equal(T.vehicleDueIn(coming, 120, { ...ride, boardPosition: 2 }, db, 1.5), coming);
+  close(T.vehicleDueIn(coming, 120, { ...ride, boardPosition: 4 }, db, 1.5).position, 3, 0.00001);
+  assert.equal(T.vehicleDueIn(coming, 19 * 60, { ...ride, boardPosition: 2 }, db, 1.5), null);
   assert.deepEqual(T.vehiclesOnRoute(arrivals, { ...ride, routeKey: 'none' }, db, 0), []);
 });
 test('a route is followed by progress along it, even over the same road twice', () => {

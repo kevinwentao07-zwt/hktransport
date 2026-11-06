@@ -1,7 +1,7 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
 import { meters,
   OP_COLORS, OP_LABELS, MODES, buildStopIndex, exactSite, instruction, journeyID, journeyPath, lineColor, lineName, matchingSites,
-  nameText, normalizeDB, partialSite, placeOnTrack, primaryMode, progressAt, retime, rides, routeTrack, score, searchRoutes, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
+  nameText, normalizeDB, partialSite, placeOnTrack, primaryMode, progressAt, retime, rides, routeTrack, score, searchRoutes, vehicleDueIn, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache, routeArrivals } from './eta.js?v=dev';
@@ -372,9 +372,9 @@ const leafletMap = (() => {
       else map.flyToBounds(bounds, { ...options, duration: 0.9, easeLinearity: 0.2 });
       flying = true;
     },
-    follow(location, zoom = 16) {
+    follow(location, zoom = 16, isExact = false) {
       // Centred in the part of the map the sheet leaves showing.
-      const level = Math.max(map.getZoom(), zoom);
+      const level = isExact ? zoom : Math.max(map.getZoom(), zoom);
       const target = map.unproject(map.project(point(location), level).add([0, sheet.targetHeight() / 2]), level);
       if (map.getCenter().distanceTo(target) > 1 || map.getZoom() !== level) map.flyTo(target, level, { duration: calm.matches ? 0 : 0.8 });
     },
@@ -602,10 +602,10 @@ const googleMap = (() => {
       const center = { lat: (Math.atan(Math.exp((0.5 - y) * 2 * Math.PI)) * 360) / Math.PI - 90, lng: x * 360 - 180 };
       moveSmoothly(center, zoom);
     },
-    follow(location, zoom = 16) {
-      map.setZoom(Math.max(map.getZoom(), zoom));
-      map.setCenter(location);
-      map.panBy(0, sheet.targetHeight() / 2);
+    follow(location, zoom = 16, isExact = false) {
+      const level = isExact ? zoom : Math.max(map.getZoom(), zoom), world = 256 * 2 ** level;
+      const y = 0.5 - Math.log(Math.tan(Math.PI / 4 + (location.lat * Math.PI) / 360)) / (2 * Math.PI) + sheet.targetHeight() / 2 / world;
+      moveSmoothly({ lat: (Math.atan(Math.exp((0.5 - y) * 2 * Math.PI)) * 360) / Math.PI - 90, lng: location.lng }, level);
     },
     ends(from, to) {
       if (from) mark(from.location, div('pin start'), { title: from.name, zIndex: 400 });
@@ -675,8 +675,7 @@ function loadGoogle(key) {
 function frameMap() {
   drawMap();
   if (state.tab === 'plan' && (state.from || state.to)) fitPlanMap();
-  else if (state.fix && inHongKong(state.fix)) mapView.follow(state.fix, 15);
-  else mapView.home();
+  else showHomeMap();
 }
 
 function useFreeMap() {
@@ -842,7 +841,7 @@ function closeTrip() {
   renderTab();
   slideView('back');
   sheet.snap('half');
-  mapView.home();
+  showHomeMap();
 }
 
 function setPhase(phase, error = null) {
@@ -1114,21 +1113,21 @@ function moveVehicles() {
     routeArrivals(route, ride.op, state.db, state.lang).then((arrivals) => {
       if (key === vehicleKey) vehicleArrivals = arrivals;
     }).catch(() => {}).finally(() => {
-      const isFirst = !vehicleFetched;
       vehicleFetching = false;
       vehicleFetched = Date.now();
       moveVehicles();
-      if (isFirst && vehicleList.length && state.tab === 'plan') fitPlanMap();
     });
   }
   const track = trackOf(route, ride.op);
   const previous = vehicleList;
-  vehicleList = vehiclesOnRoute(vehicleArrivals, vehicleRide, state.db, Date.now()).map((vehicle) => {
+  vehicleList = vehiclesOnRoute(vehicleArrivals, vehicleRide, state.db, Date.now()).flatMap((found) => {
+    // The coming bus shows the stop's own arrival time, not a guess from where it is.
+    const arrival = found.isNext ? (state.focus ? chosenStopArrival() : ride.liveDeparture) : null;
+    const vehicle = arrival ? vehicleDueIn(found, (arrival - Date.now()) / 1000, ride, state.db, SAME_BUS_STOPS) : found;
+    if (!vehicle) return [];
     // On the real road when that has arrived, by how far along the route it is.
     const placed = track ? { ...vehicle, ...placeOnTrack(track, vehicle.position) } : vehicle;
-    // The coming bus shows the stop's own arrival time, not a guess from where it is.
-    const arrival = vehicle.isNext ? (state.focus ? chosenStopArrival() : ride.liveDeparture) : null;
-    return arrival ? { ...placed, minutes: minutesUntil(arrival), isLive: true } : placed;
+    return [arrival ? { ...placed, minutes: minutesUntil(arrival), isLive: true } : placed];
   });
   if (previous !== vehicleList) glideVehicles();
   const coming = vehicleList.find((vehicle) => vehicle.isNext);
@@ -1185,16 +1184,27 @@ function focusRoute(routeKey, op, position = null) {
   state.focus = { routeKey, op, position };
   sheet.snap('half');
   drawMap();
-  fitFocus();
+  fitWholeRoute();
+}
+
+function fitWholeRoute() {
+  const { routeKey, op } = state.focus;
+  mapView.fit(state.db.routes[routeKey].stops[op].map((id) => state.db.stops[id]?.location).filter(Boolean), 16, true);
+}
+
+/** The view to come back to: where the rider is, or all of Hong Kong without a position. */
+function showHomeMap() {
+  if (state.fix && inHongKong(state.fix)) mapView.follow(state.fix, 15, true);
+  else mapView.home();
 }
 
 const METERS_AROUND_STOP = 120;
 
-/** A whole route fills the map; with a stop chosen, the map comes right in on it. */
+/** With a stop chosen the map comes right in on it; without one, back out to the whole route. */
 function fitFocus() {
   if (!state.focus) return;
   const { routeKey, op, position } = state.focus, ids = state.db.routes[routeKey].stops[op];
-  if (position == null) return mapView.fit(ids.map((id) => state.db.stops[id]?.location).filter(Boolean), 16, true);
+  if (position == null) return fitWholeRoute();
   const stop = state.db.stops[ids[position]]?.location;
   if (!stop) return;
   mapView.fit([offset(stop, METERS_AROUND_STOP, -1), offset(stop, METERS_AROUND_STOP, 1)], 16.5, true);
@@ -1203,6 +1213,13 @@ function fitFocus() {
 function clearFocus() {
   state.focus = null;
   drawMap();
+}
+
+/** Out of a route: back to the stops searched for if there are any, otherwise to the rider. */
+function leaveFocus() {
+  clearFocus();
+  if (state.tab === 'stops' && state.stopPlace) fitStopArea();
+  else showHomeMap();
 }
 
 function focusPath() {
@@ -2068,7 +2085,7 @@ function stopCard(stop, isNearest) {
   const isOpen = state.stopOpen === stop.site.id;
   const numbers = [...new Set(stop.site.visits.map((v) => lineName(v.op, state.db.routes[v.routeKey].route, state.lang)))];
   return h('div', { class: `card${isOpen ? ' open' : ''}`, id: `stop-${stop.site.id}` },
-    h('button', { class: 'tap', 'aria-expanded': String(isOpen), onclick: () => { state.stopOpen = isOpen ? null : stop.site.id; renderSheet(); if (state.focus) clearFocus(); } },
+    h('button', { class: 'tap', 'aria-expanded': String(isOpen), onclick: () => { state.stopOpen = isOpen ? null : stop.site.id; renderSheet(); if (state.focus) leaveFocus(); } },
       h('div', { class: 'row' }, h('span', { class: 'bold grow' }, nameText(stop.site.name, state.lang)),
         h('span', { class: `small ${isNearest ? 'live bold' : 'muted'}` }, distanceText(stop.distance)), h('span', { class: 'muted' }, icon(isOpen ? 'up' : 'down', 16))),
       h('div', { class: 'tiny muted ellipsis' }, numbers.slice(0, 8).join(' · ') + (numbers.length > 8 ? ` +${numbers.length - 8}` : ''))),
@@ -2086,7 +2103,7 @@ function stopsSheet() {
     return routeDetail(state.db.routes[state.focus.routeKey], state.focus.op, () => {
       state.focus = null;
       renderSheet();
-      drawMap();
+      leaveFocus();
       $('sheet').scrollTop = 0;
     });
   }
@@ -2112,7 +2129,7 @@ function renderRoutesTop() {
         state.routeQuery = event.target.value;
         state.routeKey = null;
         renderSheet();
-        if (state.focus) clearFocus();
+        if (state.focus) leaveFocus();
       },
       onkeydown: (event) => { if (event.key === 'Enter') { history.add('routes', state.routeQuery); event.target.blur(); } },
     })),
@@ -2131,7 +2148,7 @@ function routesSheet() {
     return routeDetail(route, route.operators[0], () => {
       state.routeKey = null;
       renderSheet();
-      clearFocus();
+      leaveFocus();
     });
   }
   const routes = searchRoutes(state.db, state.routeQuery);
@@ -2413,8 +2430,7 @@ function drawMap() {
 function fitPlanMap() {
   const path = selectedPath();
   const points = path ? path.segments.flatMap((s) => s.points) : [state.from?.location, state.to?.location].filter(Boolean);
-  if (path) points.push(...vehicleList.map((vehicle) => vehicle.location));
-  if (points.length) mapView.fit(points);
+  if (points.length) mapView.fit(points, 16, !!path);
 }
 
 function renderTab() {
@@ -2439,8 +2455,12 @@ function renderTab() {
   renderNavBanner();
 }
 
+function fitStopArea() {
+  mapView.fit([offset(state.stopPlace.location, state.stopRadius, -1), offset(state.stopPlace.location, state.stopRadius, 1)], 18);
+}
+
 function setTab(tab) {
-  const direction = tab === 'plan' ? 'back' : 'forward';
+  const direction = tab === 'plan' ? 'back' : 'forward', hadFocus = !!state.focus;
   state.tab = tab;
   state.focus = null;
   stagger();
@@ -2448,10 +2468,11 @@ function setTab(tab) {
   slideView(direction);
   sheet.snap(tab === 'plan' || tab === 'stops' ? 'half' : 'full');
   $('sheet').scrollTop = 0;
-  if (tab === 'stops' && state.stopPlace) mapView.fit([offset(state.stopPlace.location, state.stopRadius, -1), offset(state.stopPlace.location, state.stopRadius, 1)], 18);
+  if (tab === 'stops' && state.stopPlace) fitStopArea();
+  else if (hadFocus && tab !== 'plan') showHomeMap();
   if (tab === 'plan') {
     if (state.from || state.to) fitPlanMap();
-    else mapView.home();
+    else showHomeMap();
   }
 }
 
