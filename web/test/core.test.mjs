@@ -200,6 +200,14 @@ test('the AI ranks shops but can never lose or double one', () => {
   assert.equal(ranked[0].reason, '最近');
   assert.deepEqual(A.applyRanking('not json', [a, b]), [a, b]);
 });
+test('shops keep Google order, alternate between searches and appear once', () => {
+  const shop = (id, lat) => ({ id, location: { lat, lng: 114.17 } });
+  const area = { center: { lat: 22.33, lng: 114.17 }, radius: 2500 };
+  assert.deepEqual(P.insideArea([shop('far', 22.5), shop('b', 22.34), shop('a', 22.331)], area).map((s) => s.id), ['b', 'a']);
+  assert.deepEqual(P.mergeShops([shop('a'), shop('b'), shop('c')], [shop('b'), shop('d')], 9).map((s) => s.id), ['a', 'b', 'd', 'c']);
+  assert.equal(P.mergeShops([shop('a'), shop('b')], [shop('c')], 2).length, 2);
+  assert.equal(A.decodeChat('{"kind":"discover","want":"拉麵","query":"拉麵","queryEn":"ramen"}').wish.queryEn, 'ramen');
+});
 test('area words', () => {
   assert.equal(P.cleanArea('朗豪坊附近'), '朗豪坊');
   assert.equal(P.cleanArea('附近'), '附近');
