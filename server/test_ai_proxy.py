@@ -56,6 +56,22 @@ class PolylineTests(unittest.TestCase):
         self.assertEqual(points, [{'lat': 38.5, 'lng': -120.2}, {'lat': 40.7, 'lng': -120.95}, {'lat': 43.252, 'lng': -126.453}])
 
 
+class SpendingTests(unittest.TestCase):
+    def test_cost_uses_the_tokens_reported(self):
+        usage = {'prompt_tokens': 1182, 'prompt_cache_hit_tokens': 1024, 'prompt_cache_miss_tokens': 158, 'completion_tokens': 80}
+        self.assertAlmostEqual(ai_proxy.cost_of(usage), 0.000997, places=6)
+        self.assertAlmostEqual(ai_proxy.cost_of({'prompt_tokens': 1000}), 0.002)
+
+    def test_resets_at_midnight_in_beijing(self):
+        now = [86400.0 * 100 + 15 * 3600]  # 23:00 in Beijing.
+        spending = ai_proxy.Spending(0.1, clock=lambda: now[0])
+        spending.add('a', 0.1)
+        self.assertFalse(spending.allows('a'))
+        self.assertTrue(spending.allows('b'))
+        now[0] += 2 * 3600
+        self.assertTrue(spending.allows('a'))
+
+
 class LimiterTests(unittest.TestCase):
     def test_limits(self):
         now = [0.0]
@@ -80,8 +96,9 @@ class ProxyTests(unittest.TestCase):
 
     def setUp(self):
         ai_proxy.limiter = ai_proxy.Limiter(100, 100, 100)
+        ai_proxy.spending = ai_proxy.Spending(0.1)
         self.calls = []
-        ai_proxy.ask_deepseek = lambda system, message: self.calls.append((system, message)) or 'answer'
+        ai_proxy.ask_deepseek = lambda system, message: self.calls.append((system, message)) or ('answer', {})
 
     def post(self, body, origin=True, visitor='1.1.1.1', path='/api/ai'):
         connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port)
@@ -164,6 +181,12 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.post(leg, origin=False, path='/api/walk')[0], 403)
         self.assertEqual(self.post(leg, path='/api/walk')[0], 200)
         self.assertEqual(self.post(leg, path='/api/walk')[0], 429)
+
+    def test_each_visitor_stops_at_their_daily_spend(self):
+        ai_proxy.ask_deepseek = lambda system, message: ('answer', {'prompt_cache_miss_tokens': 0, 'completion_tokens': 7000})
+        chat = {'task': 'chat', 'message': 'x'}
+        self.assertEqual([self.post(chat)[0] for _ in range(3)], [200, 200, 429])  # ¥0.056 each.
+        self.assertEqual(self.post(chat, visitor='2.2.2.2')[0], 200)
 
     def test_upstream_errors_reveal_nothing(self):
         def fail(system, message):

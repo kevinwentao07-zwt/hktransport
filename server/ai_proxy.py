@@ -99,6 +99,43 @@ class Budget:
             return True
 
 
+# deepseek-flash, in yuan per million tokens. Peak prices, so the real charge is never higher.
+PRICE_CACHED, PRICE_INPUT, PRICE_OUTPUT = 0.04, 2, 8
+DAILY_YUAN_PER_VISITOR = 0.1
+
+
+def cost_of(usage):
+    """What a reply cost in yuan, from the tokens DeepSeek says it used."""
+    cached = usage.get('prompt_cache_hit_tokens', 0)
+    fresh = usage.get('prompt_cache_miss_tokens', usage.get('prompt_tokens', 0) - cached)
+    return (cached * PRICE_CACHED + fresh * PRICE_INPUT + usage.get('completion_tokens', 0) * PRICE_OUTPUT) / 1_000_000
+
+
+class Spending:
+    """What each visitor has spent today, Beijing time. Kept in memory, as addresses aren't stored."""
+
+    def __init__(self, limit, clock=time.time):
+        self.limit, self.clock = limit, clock
+        self.lock = threading.Lock()
+        self.day, self.spent = None, {}
+
+    def today(self):
+        day = int((self.clock() + 8 * 3600) // 86400)
+        if day != self.day:
+            self.day, self.spent = day, {}
+        return self.spent
+
+    def allows(self, visitor):
+        with self.lock:
+            return self.today().get(visitor, 0) < self.limit
+
+    def add(self, visitor, yuan):
+        with self.lock:
+            spent = self.today()
+            spent[visitor] = spent.get(visitor, 0) + yuan
+
+
+spending = Spending(DAILY_YUAN_PER_VISITOR)
 limiter = Limiter(
     per_minute=int(os.environ.get('AI_PER_MINUTE', '12')),
     per_day=int(os.environ.get('AI_PER_DAY', '100')),
@@ -132,7 +169,7 @@ def routes_key():
 
 
 def ask_deepseek(system, message):
-    """Returns the answer. Errors carry no upstream text, which could quote part of the key."""
+    """Returns the answer and its token use. Errors carry no upstream text, which could quote the key."""
     request = urllib.request.Request(
         'https://api.deepseek.com/chat/completions',
         data=json.dumps({
@@ -143,7 +180,8 @@ def ask_deepseek(system, message):
         headers={'Authorization': f'Bearer {api_key()}', 'Content-Type': 'application/json'},
     )
     with urllib.request.urlopen(request, timeout=55) as response:
-        return json.load(response)['choices'][0]['message']['content'].strip()
+        reply = json.load(response)
+    return reply['choices'][0]['message']['content'].strip(), reply.get('usage', {})
 
 
 BASIC_FIELDS = 'places.id,places.displayName,places.formattedAddress,places.location,places.googleMapsUri,places.primaryTypeDisplayName,places.businessStatus'
@@ -326,12 +364,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(400, {'error': 'Bad request'})
         if not api_key():
             return self.send(503, {'error': 'AI 未設定'})
-        if not limiter.allow(self.visitor()):
+        if not spending.allows(self.visitor()) or not limiter.allow(self.visitor()):
             return self.send(429, {'error': 'AI 使用次數已達上限，請稍後再試'})
         if not in_flight.acquire(blocking=False):
             return self.send(503, {'error': 'AI 正忙，請稍後再試'})
         try:
-            self.send(200, {'reply': ask_deepseek(system, message)})
+            answer, usage = ask_deepseek(system, message)
+            spending.add(self.visitor(), cost_of(usage))
+            self.send(200, {'reply': answer})
         except urllib.error.HTTPError as error:
             print(f'DeepSeek returned {error.code}', file=sys.stderr, flush=True)
             self.send(502, {'error': 'AI 暫時未能使用'})
