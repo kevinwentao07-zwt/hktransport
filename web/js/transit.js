@@ -540,13 +540,34 @@ function pathEdges(path) {
   })));
 }
 
-function metersToEdge(here, edge) {
+function nearestOnEdge(here, edge) {
   const scale = Math.cos((here.lat * Math.PI) / 180);
   const x = (edge.to.lng - edge.from.lng) * scale, y = edge.to.lat - edge.from.lat;
   const px = (here.lng - edge.from.lng) * scale, py = here.lat - edge.from.lat;
   const length = x * x + y * y;
   const t = length > 0 ? Math.min(1, Math.max(0, (px * x + py * y) / length)) : 0;
-  return meters(here, { lat: edge.from.lat + t * y, lng: edge.from.lng + t * (edge.to.lng - edge.from.lng) });
+  return { lat: edge.from.lat + t * y, lng: edge.from.lng + t * (edge.to.lng - edge.from.lng) };
+}
+
+const metersToEdge = (here, edge) => meters(here, nearestOnEdge(here, edge));
+
+/**
+ * What is still ahead of the rider: the part already travelled is gone, the
+ * current leg starts where the rider is, and later legs are `upcoming`, drawn
+ * light until the rider gets there. `lead` is how many points come before the
+ * first of `stopIDs`. Without a position yet, the whole trip is ahead.
+ */
+export function pathAhead(path, progress, here) {
+  const edge = progress && pathEdges(path)[progress.edge];
+  if (!edge) return path;
+  if (progress.hasArrived) return { ...path, segments: [] };
+  const cut = progress.isOffRoute || !here ? edge.from : nearestOnEdge(here, edge);
+  const segments = path.segments.flatMap((segment, index) => {
+    if (index < edge.segment) return [];
+    if (index > edge.segment) return [{ ...segment, upcoming: true }];
+    return [{ ...segment, points: [cut, ...segment.points.slice(edge.toPoint)], stopIDs: segment.stopIDs.slice(edge.toPoint), lead: 1 }];
+  });
+  return { ...path, segments };
 }
 
 /** Where the rider is along a journey. `previous` stops a noisy fix from undoing progress. */

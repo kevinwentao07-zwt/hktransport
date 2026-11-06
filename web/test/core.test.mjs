@@ -122,6 +122,21 @@ test('noisy fixes cannot undo progress; arrival and leaving the route', () => {
   assert.equal(T.progressAt(path, vague).isOffRoute, true);
   assert.equal(T.progressAt(path, vague, 500).isOffRoute, false);
 });
+test('the map keeps only what is ahead, with later legs drawn light', () => {
+  const walking = { lat: 22.2997, lng: 114.17 };
+  const before = T.pathAhead(path, T.progressAt(path, walking), walking);
+  assert.deepEqual(before.segments.map((s) => s.upcoming ?? false), [false, true, true, true, true]);
+  assert.deepEqual(before.segments[1].stopIDs, ['A', 'B', 'C']);
+  const riding = { lat: 22.305, lng: 114.17 };
+  const onBus = T.pathAhead(path, T.progressAt(path, riding), riding);
+  assert.deepEqual(onBus.segments.map((s) => s.mode), ['ride', 'walk', 'ride', 'walk']);
+  assert.deepEqual(onBus.segments[0].stopIDs, ['B', 'C']);
+  assert.equal(onBus.segments[0].lead, 1);
+  close(onBus.segments[0].points[0].lat, 22.305, 1e-6);
+  assert.equal(onBus.segments[0].upcoming, undefined);
+  assert.equal(T.pathAhead(path, null, null), path);
+  assert.deepEqual(T.pathAhead(path, T.progressAt(path, end), end).segments, []);
+});
 test('stop index covers every mode and prefers stations', () => {
   const index = T.buildStopIndex(db);
   assert.ok(index.some((s) => T.siteHasMode(s, 'mtr')) && index.some((s) => T.siteHasMode(s, 'bus')));

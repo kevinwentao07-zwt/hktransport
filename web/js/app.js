@@ -1,7 +1,7 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
 import { meters,
   OP_COLORS, OP_LABELS, MODES, buildStopIndex, exactSite, instruction, journeyID, journeyPath, lineColor, lineName,
-  nameText, normalizeDB, partialSite, primaryMode, progressAt, retime, rides, score, searchRoutes, siteHasMode, stopName, stopsNear,
+  nameText, normalizeDB, partialSite, pathAhead, primaryMode, progressAt, retime, rides, score, searchRoutes, siteHasMode, stopName, stopsNear,
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache } from './eta.js?v=dev';
@@ -77,6 +77,8 @@ function h(tag, props = {}, ...children) {
 }
 const $ = (id) => document.getElementById(id);
 const calm = window.matchMedia('(prefers-reduced-motion: reduce)');
+/** Legs the rider hasn't reached yet are drawn this faint while navigating. */
+const UPCOMING_OPACITY = 0.4;
 
 const ICONS = {
   route: ['M6 19a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z', 'M18 10a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z', 'M8.5 16.5H15a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h6.5'],
@@ -247,22 +249,24 @@ const leafletMap = (() => {
       if (from) L.marker(point(from.location), { icon: pin('', 'pin start'), title: from.name }).addTo(content);
       if (to) L.marker(point(to.location), { icon: pin('', 'pin end', '#ff3b30'), title: to.name, zIndexOffset: 500 }).addTo(content);
     },
-    path(path) {
+    path(path, animate = false) {
       // A few station names always fit; a long bus route's only fit up close.
       $('map').classList.toggle('many-stops', path.segments.reduce((sum, s) => sum + s.stopIDs.length, 0) > 12);
       for (const segment of path.segments) {
-        const line = segment.points.map(point);
-        L.polyline(line, { color: '#fff', weight: 8, opacity: 0.95 }).addTo(content);
-        const isWalk = segment.mode === 'walk';
+        const line = segment.points.map(point), light = segment.upcoming ? UPCOMING_OPACITY : 1;
+        L.polyline(line, { color: '#fff', weight: 8, opacity: 0.95 * light }).addTo(content);
+        const isWalk = segment.mode === 'walk', drawOn = animate && !isWalk;
         const stroke = L.polyline(line, {
           color: isWalk ? '#2f7bf6' : lineColor(segment.op, segment.route), weight: isWalk ? 4 : 5, dashArray: isWalk ? '1 9' : null,
-          className: isWalk ? '' : 'route-line',
+          opacity: light, className: drawOn ? 'route-line' : '',
         }).addTo(content);
         // One unit long, so the line can be drawn on by animating its dash.
-        if (!isWalk) stroke.getElement()?.setAttribute('pathLength', 1);
+        if (drawOn) stroke.getElement()?.setAttribute('pathLength', 1);
         segment.stopIDs.forEach((id, index) => {
-          const dot = L.circleMarker(point(segment.points[index]), { radius: 4, color: lineColor(segment.op, segment.route), fillColor: '#fff', fillOpacity: 1, weight: 2, className: 'stop-dot' })
-            .bindTooltip(name(id), { permanent: true, direction: 'right', offset: [6, 0], className: 'stop-label' }).addTo(content);
+          const dot = L.circleMarker(point(segment.points[index + (segment.lead ?? 0)]), {
+            radius: 4, color: lineColor(segment.op, segment.route), fillColor: '#fff', fillOpacity: light, opacity: light, weight: 2,
+            className: [animate && 'stop-dot', segment.upcoming && 'upcoming'].filter(Boolean).join(' '),
+          }).bindTooltip(name(id), { permanent: true, direction: 'right', offset: [6, 0], className: 'stop-label', opacity: segment.upcoming ? 0.55 : 0.9 }).addTo(content);
           dot.getElement()?.style.setProperty('--i', Math.min(index, 14));
         });
         if (segment.mode === 'ride') {
@@ -270,7 +274,7 @@ const leafletMap = (() => {
           chip.className = `route-chip${isDarkText(segment.op) ? ' dark' : ''}`;
           chip.textContent = lineName(segment.op, segment.route, state.lang);
           chip.style.background = lineColor(segment.op, segment.route);
-          L.marker(line[0], { icon: L.divIcon({ html: chip, className: '', iconSize: [0, 0] }), interactive: false }).addTo(content);
+          L.marker(line[0], { icon: L.divIcon({ html: chip, className: '', iconSize: [0, 0] }), interactive: false, opacity: segment.upcoming ? 0.6 : 1 }).addTo(content);
         }
       }
     },
@@ -312,8 +316,9 @@ const googleMap = (() => {
     return element;
   };
   /** A zero-sized anchor, so markers sit on the point as they do on the other map. */
-  const mark = (location, element, { zIndex, title, click } = {}) => {
+  const mark = (location, element, { zIndex, title, click, opacity } = {}) => {
     const anchor = div('g-anchor');
+    if (opacity != null) anchor.style.opacity = opacity;
     anchor.append(element);
     if (title) element.title = title;
     const marker = keep(new Marker({ map, position: location, content: anchor, zIndex, gmpClickable: !!click }));
@@ -331,8 +336,8 @@ const googleMap = (() => {
   };
   const line = (path, options) => keep(new google.maps.Polyline({ map, path, clickable: false, ...options }));
   /** Draws a line along its length, as the other map does with a dash. */
-  const drawOn = (polyline, path) => {
-    if (calm.matches || !$('map').classList.contains('entering') || path.length < 2) return;
+  const drawOn = (polyline, path, animate) => {
+    if (calm.matches || !animate || path.length < 2) return;
     const started = performance.now();
     const step = (now) => {
       if (!items.includes(polyline)) return;
@@ -383,30 +388,30 @@ const googleMap = (() => {
       if (from) mark(from.location, div('pin start'), { title: from.name, zIndex: 400 });
       if (to) mark(to.location, div('pin end', '', '#ff3b30'), { title: to.name, zIndex: 500 });
     },
-    path(path) {
+    path(path, animate = false) {
       $('map').classList.toggle('many-stops', path.segments.reduce((sum, s) => sum + s.stopIDs.length, 0) > 12);
       for (const segment of path.segments) {
-        const color = lineColor(segment.op, segment.route), isWalk = segment.mode === 'walk';
+        const color = lineColor(segment.op, segment.route), isWalk = segment.mode === 'walk', light = segment.upcoming ? UPCOMING_OPACITY : 1;
         if (isWalk) {
           line(segment.points, {
             strokeOpacity: 0, zIndex: 2,
-            icons: [{ icon: { path: google.maps.SymbolPath.CIRCLE, scale: 2, fillColor: '#2f7bf6', fillOpacity: 1, strokeOpacity: 0 }, repeat: '11px' }],
+            icons: [{ icon: { path: google.maps.SymbolPath.CIRCLE, scale: 2, fillColor: '#2f7bf6', fillOpacity: light, strokeOpacity: 0 }, repeat: '11px' }],
           });
         } else {
-          drawOn(line(segment.points, { strokeColor: '#fff', strokeWeight: 8, strokeOpacity: 0.95, zIndex: 1 }), segment.points);
-          drawOn(line(segment.points, { strokeColor: color, strokeWeight: 5, strokeOpacity: 1, zIndex: 2 }), segment.points);
+          drawOn(line(segment.points, { strokeColor: '#fff', strokeWeight: 8, strokeOpacity: 0.95 * light, zIndex: 1 }), segment.points, animate);
+          drawOn(line(segment.points, { strokeColor: color, strokeWeight: 5, strokeOpacity: light, zIndex: 2 }), segment.points, animate);
         }
         segment.stopIDs.forEach((id, index) => {
-          const stop = div('g-stop');
+          const stop = div(`g-stop${animate ? ' popping' : ''}`);
           stop.style.setProperty('--i', Math.min(index, 14));
           const dot = div('g-dot');
           dot.style.borderColor = color;
           stop.append(dot, div('stop-label', name(id)));
-          mark(segment.points[index], stop, { zIndex: 100 });
+          mark(segment.points[index + (segment.lead ?? 0)], stop, { zIndex: 100, opacity: segment.upcoming ? 0.55 : null });
         });
         if (segment.mode === 'ride') {
           const chip = div(`route-chip${isDarkText(segment.op) ? ' dark' : ''}`, lineName(segment.op, segment.route, state.lang), color);
-          mark(segment.points[0], chip, { zIndex: 200 });
+          mark(segment.points[0], chip, { zIndex: 200, opacity: segment.upcoming ? 0.6 : null });
         }
       }
     },
@@ -869,9 +874,14 @@ function loadWalks(path) {
 
 async function startNavigation(journey) {
   const path = journeyPath(journey, state.from.location, state.to.location, state.db), id = journeyID(journey);
-  state.nav = { id, path, progress: null, here: null, issue: null };
-  // Tracking follows the real walking line once it arrives.
-  loadWalks(path).then(() => { if (state.nav?.id === id) state.nav.path = withWalks(path); });
+  // Tracking follows the real walking line, so progress and the map share one path.
+  state.nav = { id, path: withWalks(path), progress: null, here: null, issue: null };
+  loadWalks(path).then((arrived) => {
+    // Swapping the path once there is progress would put the rider on the wrong edge.
+    if (!arrived || state.nav?.id !== id || state.nav.progress) return;
+    state.nav.path = withWalks(path);
+    drawMap();
+  });
   watchID = navigator.geolocation?.watchPosition((position) => {
     if (!state.nav || state.nav.progress?.hasArrived) return;
     const here = { lat: position.coords.latitude, lng: position.coords.longitude };
@@ -1713,17 +1723,22 @@ function renderSheet() {
 
 let drawnScene = '', entering = null;
 
-/** Lines and pins animate in only when the scene really changes, not on every redraw. */
+/**
+ * Lines and pins animate in only when the scene really changes, not on every redraw.
+ * True only for the first drawing of a scene: redrawing a line mid-animation started it
+ * again from nothing, which left the route blank while navigation kept redrawing.
+ */
 function markScene(scene) {
-  if (scene === drawnScene) return;
+  if (scene === drawnScene) return false;
   drawnScene = scene;
   $('map').classList.add('entering');
   clearTimeout(entering);
   entering = setTimeout(() => $('map').classList.remove('entering'), 1800);
+  return true;
 }
 
 function drawMap() {
-  markScene(`${state.tab}|${state.expanded ?? ''}|${state.nav?.id ?? ''}|${state.to?.name ?? ''}|${state.discovery?.stage ?? ''}|${state.stopPlace?.name ?? ''}`);
+  const animate = markScene(`${state.tab}|${state.expanded ?? ''}|${state.nav?.id ?? ''}|${state.to?.name ?? ''}|${state.discovery?.stage ?? ''}|${state.stopPlace?.name ?? ''}`);
   mapView.clear();
   const here = state.nav?.here ?? state.fix;
   if (here) mapView.me(here);
@@ -1739,10 +1754,15 @@ function drawMap() {
     return;
   }
   if (state.tab !== 'plan') return;
-  const path = state.nav?.path ?? selectedPath();
-  if (path) {
-    mapView.path(withWalks(path));
-    loadWalks(path).then((arrived) => { if (arrived) drawMap(); });
+  if (state.nav) {
+    // Navigation shows only what is still ahead, and the legs not reached yet light.
+    mapView.path(pathAhead(state.nav.path, state.nav.progress, state.nav.here), animate);
+  } else {
+    const path = selectedPath();
+    if (path) {
+      mapView.path(withWalks(path), animate);
+      loadWalks(path).then((arrived) => { if (arrived) drawMap(); });
+    }
   }
   const choosing = state.discovery?.stage === 'choosing' && !state.journeys.length && state.phase === 'idle';
   if (choosing) mapView.numbered(state.discovery.suggestions, choosePlace);
