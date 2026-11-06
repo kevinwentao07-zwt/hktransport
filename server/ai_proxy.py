@@ -127,6 +127,10 @@ def places_key():
     return os.environ.get('GOOGLE_PLACES_KEY', '').strip()
 
 
+def routes_key():
+    return os.environ.get('GOOGLE_ROUTES_KEY', '').strip() or places_key()
+
+
 def search_key():
     return os.environ.get('TAVILY_API_KEY', '').strip()
 
@@ -206,7 +210,7 @@ def walking_route(start, end):
         'https://routes.googleapis.com/directions/v2:computeRoutes',
         data=json.dumps({'origin': place(start), 'destination': place(end), 'travelMode': 'WALK'}).encode(),
         headers={
-            'Content-Type': 'application/json', 'X-Goog-Api-Key': places_key(),
+            'Content-Type': 'application/json', 'X-Goog-Api-Key': routes_key(),
             'X-Goog-FieldMask': 'routes.polyline.encodedPolyline',
         },
     )
@@ -303,7 +307,7 @@ class Handler(BaseHTTPRequestHandler):
         start, end = body.get('from'), body.get('to')
         if not in_hong_kong(start) or not in_hong_kong(end):
             return self.send(400, {'error': 'Bad request'})
-        if not places_key() or not budget.spend('walk', self.visitor()):
+        if not routes_key() or not budget.spend('walk', self.visitor()):
             return self.send(429, {'error': 'Limit reached'})
         try:
             self.send(200, {'points': walking_route(start, end)})
