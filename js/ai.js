@@ -85,9 +85,9 @@ Rules:
 - Never suggest routes, times or fares.`;
 
 const DISCOVER_RULES = `{"kind": "discover", "want": string, "query": string, "searchTerms": [string], "area": string or null, "extra": string or null, "question": string or null, "options": [string]}
-- You only pick out what matters. Google Maps finds the places, so never name or recommend a shop.
+- You only pick out what matters here. Never name or recommend a shop from your own knowledge.
 - want is a short phrase in Traditional Chinese with typos fixed, e.g. 我想吃螺狮粉 -> 螺螄粉.
-- query is what to type into Google Maps for this kind of place: only the useful words from the whole
+- query is what to search for this kind of place: only the useful words from the whole
   conversation, without filler such as 我想 and without the area, e.g. 想飲咖啡要靜啲 -> 安靜 咖啡店,
   食拉麵要平啲 -> 平價 拉麵.
 - searchTerms are up to four map search terms, most specific first: the item itself, then short shop
@@ -115,6 +115,16 @@ Reply with one JSON object and nothing else, keeping what is already known unles
 ${DISCOVER_RULES}
 - The message says when you may not ask anything more. Then question must be null.`;
 
+export const pickPrompt = (lang) => `You read web search results about places in Hong Kong and pull out the shops they mention.
+Reply with one JSON object and nothing else:
+{"places": [{"name": string, "reason": string}]}
+- Use only the text given. Every shop must be named in it, and never add one from your own knowledge.
+- Pick up to four shops that best match what the rider wants and are in or near the area, best first.
+- name is the shop's own name as a map would know it, without the branch. Skip articles' titles, areas and websites.
+- reason is one short sentence on why it fits, based only on the text. No invented ratings, prices or hours.
+- If the text names no suitable shop, reply {"places": []}.
+${lang === 'zh' ? 'Write reasons in Traditional Chinese as used in Hong Kong.' : 'Write reasons in English.'}`;
+
 export const explainPrompt = (lang) => `You help a rider in Hong Kong choose between public transport options computed by a route planner.
 In one or two short sentences, recommend the best option for the rider's preference and say why.
 Use only the facts given. Do not invent routes, stops, times or fares.
@@ -124,6 +134,7 @@ ${lang === 'zh' ? 'Write in Traditional Chinese as used in Hong Kong.' : 'Write 
 /** Every job the AI does. The server is sent a name from this list, never a prompt. */
 export const PROMPTS = {
   intent: INTENT_PROMPT, chat: CHAT_PROMPT, refine: REFINE_PROMPT,
+  pick_zh: pickPrompt('zh'), pick_en: pickPrompt('en'),
   explain_zh: explainPrompt('zh'), explain_en: explainPrompt('en'),
 };
 
@@ -171,6 +182,21 @@ export function refineMessage(wish, answer, mayAsk) {
   lines.push(`You asked: ${wish.question ?? 'Where should I look?'}`, `Rider says: ${answer}`);
   if (!mayAsk) lines.push('You may not ask anything more.');
   return lines.join('\n');
+}
+
+export function decodePicks(reply) {
+  const places = jsonObject(reply)?.places;
+  if (!Array.isArray(places)) return [];
+  return places.flatMap((place) => {
+    const name = clean(place?.name);
+    return name ? [{ name, reason: clean(place.reason) || null }] : [];
+  }).slice(0, 4);
+}
+
+/** What the AI reads from the web, kept inside one request. */
+export function pickMessage(want, area, results) {
+  const pages = results.map((page, index) => `[${index + 1}] ${page.title}\n${page.content}`).join('\n\n');
+  return `Looking for: ${want}\nArea: ${area}\n\nWeb results:\n${pages}`.slice(0, 3900);
 }
 
 export function parseCompletion(json, status) {
@@ -228,6 +254,7 @@ function assistant(complete) {
       if (!refined) throw new Error('DeepSeek reply was not valid search JSON');
       return refined;
     },
+    pick: async (want, area, results, lang) => decodePicks(await complete(`pick_${lang}`, pickMessage(want, area, results))),
     explain: (summary, lang) => complete(`explain_${lang}`, summary),
   };
 }
