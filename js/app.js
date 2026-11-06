@@ -6,7 +6,7 @@ import { meters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache } from './eta.js?v=dev';
 import { chatMessage, deepSeek, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseWish, searchMessage } from './ai.js?v=dev';
-import { HONG_KONG, cleanArea, districtAt, googleSearch, googleWalk, inHongKong, isNearby, knownWalk, lookupPlace, photonSearch, withinArea } from './places.js?v=dev';
+import { HONG_KONG, cleanArea, googleSearch, googleWalk, inHongKong, insideArea, isNearby, knownWalk, lookupPlace, mergeShops, photonSearch, withinArea } from './places.js?v=dev';
 
 // MARK: Storage
 
@@ -747,7 +747,7 @@ function startDiscovery(wish, run) {
   renderBottomStatus();
 }
 
-const MOST_SHOPS = 8;
+const MOST_SHOPS = 16, NEARBY_METERS = 5000;
 
 async function discover(wish, run = ++planRun) {
   const stale = () => run !== planRun;
@@ -767,12 +767,8 @@ async function discover(wish, run = ++planRun) {
     const fix = await getFix();
     if (stale()) return;
     if (!fix) return giveUp(t('未能取得你的位置，請選擇一個地區或輸入範圍。', "Couldn't get your location. Pick a district or type an area."));
-    const center = { lat: fix.lat, lng: fix.lng };
-    // "Nearby" means the rider's own district, not a circle around them.
-    const district = await districtAt(center);
-    searchArea = district
-      ? { name: district[state.lang] || district.zh, center, radius: 8000, district: district.zh }
-      : { name: t('附近', 'Nearby'), center, radius: 2500 };
+    // "Nearby" means within 5 km of the rider.
+    searchArea = { name: t('5 公里內', 'Within 5 km'), center: { lat: fix.lat, lng: fix.lng }, radius: NEARBY_METERS, isAroundRider: true };
   } else {
     const resolved = await resolvePlace(place);
     if (stale()) return;
@@ -780,12 +776,15 @@ async function discover(wish, run = ++planRun) {
     searchArea = { name: resolved.name, center: resolved.location, radius: 2500 };
   }
 
-  // Google finds the shops in one search, which brings a full page for the price of one.
+  // Each Google search brings a full page for the price of one.
   let suggestions = [];
   if (state.google) {
-    const found = await googleSearch(`${wish.query} ${searchArea.name}`, searchArea.center, searchArea.radius, state.lang, true);
+    // Chinese and English names reach different shops, and Google's own order is by relevance.
+    const search = (query) => googleSearch(searchArea.isAroundRider ? query : `${query} ${searchArea.name}`, searchArea.center, searchArea.radius, state.lang, true);
+    const [chinese, english] = await Promise.all([search(wish.query), wish.queryEn ? search(wish.queryEn) : null]);
     if (stale()) return;
-    suggestions = withinArea(found ?? [], searchArea).slice(0, MOST_SHOPS).map((place) => ({ place, isGoogle: true }));
+    suggestions = mergeShops(insideArea(chinese ?? [], searchArea), insideArea(english ?? [], searchArea), MOST_SHOPS)
+      .map((place) => ({ place, isGoogle: true }));
     // With everything Google knows in hand, the AI puts them in order and says why.
     try {
       if (suggestions.length) suggestions = (await client()?.rank(wish, suggestions, state.lang)) ?? suggestions;
@@ -1574,8 +1573,8 @@ function settingsSheet() {
     h('div', { class: 'card' },
       h('div', { class: 'bold' }, t('私隱', 'Privacy')),
       h('div', { class: 'small muted' }, t(
-        '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會傳送給 OpenStreetMap 的 Photon 服務以確定所在地區。AI 請求及店舖搜尋經本站伺服器轉送給 DeepSeek 及 Google，伺服器不會保存內容。傳送給 DeepSeek 的只有你輸入的文字、地區、站名及路線號碼，不包括座標；Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
-        'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go to OpenStreetMap\'s Photon service to work out your district. AI requests and shop searches pass through this site\'s server to DeepSeek and Google, and the server keeps none of it. DeepSeek only receives your text, the district, stop names and route numbers, never coordinates. Google Maps loads straight into your browser under Google\'s privacy policy.'))),
+        '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會經本站伺服器傳送給 Google，或在額度用完時傳送給 OpenStreetMap 的 Photon 服務，用來搜尋你身邊 5 公里內的地點。AI 請求及店舖搜尋經本站伺服器轉送給 DeepSeek 及 Google，伺服器不會保存內容。傳送給 DeepSeek 的只有你輸入的文字、地區、站名及路線號碼，不包括座標；Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
+        'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go through this site\'s server to Google, or to OpenStreetMap\'s Photon service once the allowance is used up, to search within 5 km of you. AI requests and shop searches pass through this site\'s server to DeepSeek and Google, and the server keeps none of it. DeepSeek only receives your text, the district, stop names and route numbers, never coordinates. Google Maps loads straight into your browser under Google\'s privacy policy.'))),
     h('div', { class: 'card' },
       h('div', { class: 'bold' }, t('安裝到手機', 'Install on your phone')),
       h('div', { class: 'small muted' }, t('iPhone：在 Safari 按分享，再選「加入主畫面」。Android：在 Chrome 選單按「安裝應用程式」。', 'iPhone: in Safari, tap Share, then Add to Home Screen. Android: in the Chrome menu, tap Install app.'))),

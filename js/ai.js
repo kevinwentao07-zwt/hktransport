@@ -55,7 +55,7 @@ export function parseWish(text) {
   if (!prefix) return null;
   const want = strip(working.slice(prefix.length));
   if (!want) return null;
-  return { want, query: want, searchTerms: [want], area: null, extra: null, question: null, options: [] };
+  return { want, query: want, queryEn: null, searchTerms: [want], area: null, extra: null, question: null, options: [] };
 }
 
 export function searchMessage(origin, destination, preference) {
@@ -96,16 +96,17 @@ Rules:
   walk less, otherwise fastest.
 - Never suggest routes, times or fares.`;
 
-const DISCOVER_RULES = `{"kind": "discover", "want": string, "query": string, "searchTerms": [string], "area": string or null, "extra": string or null, "question": string or null, "options": [string]}
+const DISCOVER_RULES = `{"kind": "discover", "want": string, "query": string, "queryEn": string, "searchTerms": [string], "area": string or null, "extra": string or null, "question": string or null, "options": [string]}
 - You only pick out what matters here. Never name or recommend a shop from your own knowledge.
 - want is a short phrase in Traditional Chinese with typos fixed, e.g. 我想吃螺狮粉 -> 螺螄粉.
 - query is what to search for this kind of place: only the useful words from the whole
   conversation, without filler such as 我想 and without the area, e.g. 想飲咖啡要靜啲 -> 安靜 咖啡店,
   食拉麵要平啲 -> 平價 拉麵.
+- queryEn is the same search in English, e.g. cheap ramen.
 - searchTerms are up to four map search terms, most specific first: the item itself, then short shop
   types in Chinese and English that would sell it, e.g. ["螺螄粉", "米線", "mixian", "noodles"].
 - area is one district or landmark the rider named, without words such as 附近, e.g. 朗豪坊附近 -> 朗豪坊.
-  Use "附近" if they mean near them, otherwise null. With no area, the search covers the rider's own district.
+  Use "附近" if they mean near them, otherwise null. With no area, the search covers 5 km around the rider.
 - extra is any other wish, e.g. 要平啲, otherwise null.
 - You decide whether to ask the rider anything. Most requests need no question: if a useful search is
   already possible, set question to null and options to [], and the search runs at once.
@@ -138,9 +139,10 @@ First decide whether "Rider says" continues them or starts something new:
 export const rankPrompt = (lang) => `You put shops in Hong Kong in order for a rider, best first, and say why.
 Reply with one JSON object and nothing else:
 {"ranking": [{"number": number, "reason": string}]}
-- Include every shop, using its number from the list.
+- Include every shop, using its number from the list. Shops that don't really fit go last.
 - Weigh how well it fits what the rider wants first, then the rating and how many people gave it,
   then whether it is open now and how near it is. A high rating from very few people counts for less.
+- Give a reason for the top five only, and an empty reason for the rest.
 - reason is one or two short sentences saying why this shop is ranked here, using only the facts
   given. Never invent ratings, prices, hours or dishes. If a fact is missing, don't mention it.
 - Speak to the person directly as 你, or not at all. Never call them 車手, 乘客 or a rider.
@@ -190,7 +192,7 @@ function decodeWish(object) {
   if (!want) return null;
   const terms = strings(object.searchTerms), question = clean(object.question) || null;
   return {
-    want, query: clean(object.query) || want, searchTerms: terms.length ? terms.slice(0, 4) : [want], area: clean(object.area) || null,
+    want, query: clean(object.query) || want, queryEn: clean(object.queryEn) || null, searchTerms: terms.length ? terms.slice(0, 4) : [want], area: clean(object.area) || null,
     extra: clean(object.extra) || null, question, options: question ? strings(object.options).slice(0, 4) : [],
   };
 }

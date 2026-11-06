@@ -107,14 +107,6 @@ export async function photonSearch(text, center, radius) {
 }
 
 /** The district around a position: {zh, en}. Sends the position to Photon, only when "nearby" is asked for. */
-export async function districtAt(location) {
-  const found = await json(`https://photon.komoot.io/reverse?lat=${location.lat}&lon=${location.lng}`);
-  const district = found?.features?.[0]?.properties?.district;
-  if (!district) return null;
-  const match = district.match(/^(\S*區)\s*(.*)$/);
-  return match ? { zh: match[1], en: match[2] } : { zh: district, en: district };
-}
-
 /** The best single match for free text, or null. */
 export async function lookupPlace(text) {
   const wanted = text.trim().toLowerCase();
@@ -127,10 +119,26 @@ export async function lookupPlace(text) {
   return first ? { name: first.name, location: first.location } : null;
 }
 
-export function withinArea(places, area) {
+/** The places inside an area, in the order they came, each with its distance. */
+export function insideArea(places, area) {
   return places.map((place) => ({ ...place, meters: meters(area.center, place.location) }))
-    .filter((place) => place.meters <= area.radius && (!area.district || !place.district || place.district.includes(area.district)))
-    .sort((a, b) => a.meters - b.meters);
+    .filter((place) => place.meters <= area.radius && (!area.district || !place.district || place.district.includes(area.district)));
+}
+
+export const withinArea = (places, area) => insideArea(places, area).sort((a, b) => a.meters - b.meters);
+
+/** Two lists as one, best of each first, with each place once. */
+export function mergeShops(first, second, limit) {
+  const seen = new Set(), merged = [];
+  for (let index = 0; index < Math.max(first.length, second.length); index++) {
+    for (const place of [first[index], second[index]]) {
+      if (place && !seen.has(place.id)) {
+        seen.add(place.id);
+        merged.push(place);
+      }
+    }
+  }
+  return merged.slice(0, limit);
 }
 
 const NEARBY = ['附近', '呢度', '呢頭', '這裡', '這裏', '这里', '我身邊', '就近', 'nearby', 'near me', 'around here'];
