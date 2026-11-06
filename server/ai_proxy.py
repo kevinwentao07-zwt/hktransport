@@ -107,11 +107,11 @@ limiter = Limiter(
 in_flight = threading.BoundedSemaphore(int(os.environ.get('AI_CONCURRENT', '16')))
 
 
-# Free each month: 10,000 map loads, 5,000 searches, 10,000 walking routes and 1,000 web searches.
-# These stop well short of all four.
+# Free each month: 10,000 map loads, 5,000 searches, 1,000 searches with shop details, 10,000 walking
+# routes and 1,000 web searches. These stop well short of all five.
 budget = Budget(
     Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'usage.json',
-    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 9000, 40), 'web': (30, 900, 10)},
+    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 9000, 40), 'web': (30, 900, 10), 'details': (30, 900, 12)},
 )
 
 
@@ -150,8 +150,12 @@ def ask_deepseek(system, message):
         return json.load(response)['choices'][0]['message']['content'].strip()
 
 
-def search_places(query, lat, lng, radius, language):
-    """Asks only for the fields in the cheapest tier that has names, and for one page."""
+BASIC_FIELDS = 'places.id,places.displayName,places.formattedAddress,places.location,places.googleMapsUri,places.primaryTypeDisplayName,places.businessStatus'
+# These move a search into Google's dearest tier, with a far smaller free allowance.
+SHOP_FIELDS = 'places.rating,places.userRatingCount,places.priceLevel,places.currentOpeningHours.openNow,places.nationalPhoneNumber'
+
+
+def search_places(query, lat, lng, radius, language, details=False):
     request = urllib.request.Request(
         'https://places.googleapis.com/v1/places:searchText',
         data=json.dumps({
@@ -160,7 +164,7 @@ def search_places(query, lat, lng, radius, language):
         }).encode(),
         headers={
             'Content-Type': 'application/json', 'X-Goog-Api-Key': places_key(),
-            'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location',
+            'X-Goog-FieldMask': f'{BASIC_FIELDS},{SHOP_FIELDS}' if details else BASIC_FIELDS,
         },
     )
     with urllib.request.urlopen(request, timeout=15) as response:
@@ -168,6 +172,10 @@ def search_places(query, lat, lng, radius, language):
     return [{
         'id': place['id'], 'name': place['displayName']['text'], 'address': place.get('formattedAddress'),
         'location': {'lat': place['location']['latitude'], 'lng': place['location']['longitude']},
+        'mapsUrl': place.get('googleMapsUri'), 'kind': place.get('primaryTypeDisplayName', {}).get('text'),
+        'status': place.get('businessStatus'), 'rating': place.get('rating'), 'ratings': place.get('userRatingCount'),
+        'price': place.get('priceLevel'), 'open': place.get('currentOpeningHours', {}).get('openNow'),
+        'phone': place.get('nationalPhoneNumber'),
     } for place in found]
 
 
@@ -325,11 +333,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(400, {'error': 'Bad request'})
         if not (22.1 <= lat <= 22.6 and 113.8 <= lng <= 114.5 and 0 < radius <= 50000):
             return self.send(400, {'error': 'Bad request'})
-        if not places_key() or not budget.spend('places', self.visitor()):
+        # Shop details have their own allowance. Past it, a search still works without them.
+        details = bool(places_key()) and body.get('details') is True and budget.spend('details', self.visitor())
+        if not places_key() or not (details or budget.spend('places', self.visitor())):
             return self.send(429, {'error': 'Limit reached'})
         language = 'en' if body.get('lang') == 'en' else 'zh-HK'
         try:
-            self.send(200, {'places': search_places(query.strip(), lat, lng, radius, language)})
+            self.send(200, {'places': search_places(query.strip(), lat, lng, radius, language, details)})
         except urllib.error.HTTPError as error:
             print(f'Places returned {error.code}', file=sys.stderr, flush=True)
             self.send(502, {'error': 'Unavailable'})

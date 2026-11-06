@@ -145,6 +145,16 @@ Reply with one JSON object and nothing else:
 - If the text names no suitable shop, reply {"places": []}.
 ${lang === 'zh' ? 'Write reasons in Traditional Chinese as used in Hong Kong.' : 'Write reasons in English.'}`;
 
+export const rankPrompt = (lang) => `You put shops in Hong Kong in order for a rider, best first, and say why.
+Reply with one JSON object and nothing else:
+{"ranking": [{"number": number, "reason": string}]}
+- Include every shop, using its number from the list.
+- Weigh how well it fits what the rider wants first, then the rating and how many people gave it,
+  then whether it is open now and how near it is. A high rating from very few people counts for less.
+- reason is one or two short sentences saying why this shop is ranked here, using only the facts
+  given. Never invent ratings, prices, hours or dishes. If a fact is missing, don't mention it.
+${lang === 'zh' ? 'Write reasons in Traditional Chinese as used in Hong Kong.' : 'Write reasons in English.'}`;
+
 export const explainPrompt = (lang) => `You help a rider in Hong Kong choose between public transport options computed by a route planner.
 In one or two short sentences, recommend the best option for the rider's preference and say why.
 Use only the facts given. Do not invent routes, stops, times or fares.
@@ -155,6 +165,7 @@ ${lang === 'zh' ? 'Write in Traditional Chinese as used in Hong Kong.' : 'Write 
 export const PROMPTS = {
   intent: INTENT_PROMPT, chat: CHAT_PROMPT,
   pick_zh: pickPrompt('zh'), pick_en: pickPrompt('en'),
+  rank_zh: rankPrompt('zh'), rank_en: rankPrompt('en'),
   explain_zh: explainPrompt('zh'), explain_en: explainPrompt('en'),
 };
 
@@ -209,6 +220,28 @@ export function pickMessage(want, area, results) {
   return `Looking for: ${want}\nArea: ${area}\n\nWeb results:\n${pages}`.slice(0, 3900);
 }
 
+/** Shop facts for the AI, with the web's note where there is one. */
+export function rankMessage(wish, suggestions) {
+  const shops = suggestions.map(({ place, reason }, index) => {
+    const facts = [place.kind, place.rating && `rating ${place.rating} from ${place.ratings ?? 0} people`, place.price,
+      place.open === true && 'open now', place.open === false && 'closed now', Number.isFinite(place.meters) && `${Math.round(place.meters)} m away`, reason && `web says: ${reason}`];
+    return `${index + 1}. ${place.name}: ${facts.filter(Boolean).join('; ')}`;
+  });
+  return [`Rider wants: ${wish.want}`, wish.extra && `Also wants: ${wish.extra}`, 'Shops:', ...shops].filter(Boolean).join('\n').slice(0, 3900);
+}
+
+/** The AI's order. A number it skips or repeats can't lose or double a shop. */
+export function applyRanking(reply, suggestions) {
+  const ranking = jsonObject(reply)?.ranking, used = new Set(), ranked = [];
+  for (const item of Array.isArray(ranking) ? ranking : []) {
+    const index = Number(item?.number) - 1;
+    if (!suggestions[index] || used.has(index)) continue;
+    used.add(index);
+    ranked.push({ ...suggestions[index], reason: clean(item.reason) || suggestions[index].reason });
+  }
+  return [...ranked, ...suggestions.filter((_, index) => !used.has(index))];
+}
+
 export function parseCompletion(json, status) {
   if (status !== 200) throw new Error(`DeepSeek: ${json?.error?.message ?? `HTTP ${status}`}`);
   const choice = json?.choices?.[0], content = clean(choice?.message?.content);
@@ -260,6 +293,7 @@ function assistant(complete) {
       return reply;
     },
     pick: async (want, area, results, lang) => decodePicks(await complete(`pick_${lang}`, pickMessage(want, area, results))),
+    rank: async (wish, suggestions, lang) => applyRanking(await complete(`rank_${lang}`, rankMessage(wish, suggestions)), suggestions),
     explain: (summary, lang) => complete(`explain_${lang}`, summary),
   };
 }

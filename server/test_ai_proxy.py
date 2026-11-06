@@ -20,7 +20,7 @@ import ai_proxy  # noqa: E402
 
 
 def budget(**limits):
-    return ai_proxy.Budget(Path(tempfile.mkdtemp(), 'usage.json'), {'map': (9, 9, 9), 'places': (9, 9, 9), 'walk': (9, 9, 9), 'web': (9, 9, 9), **limits})
+    return ai_proxy.Budget(Path(tempfile.mkdtemp(), 'usage.json'), {'map': (9, 9, 9), 'places': (9, 9, 9), 'walk': (9, 9, 9), 'web': (9, 9, 9), 'details': (9, 9, 9), **limits})
 
 
 class BudgetTests(unittest.TestCase):
@@ -138,7 +138,15 @@ class ProxyTests(unittest.TestCase):
         good = {'query': '螺螄粉 旺角', 'lat': 22.32, 'lng': 114.17, 'radius': 2500, 'lang': 'zh'}
         self.assertEqual(self.post(good, path='/api/places')[0], 200)
         self.assertEqual(self.post(good, path='/api/places')[0], 429)
-        self.assertEqual(calls, [('螺螄粉 旺角', 22.32, 114.17, 2500, 'zh-HK')])
+        self.assertEqual(calls, [('螺螄粉 旺角', 22.32, 114.17, 2500, 'zh-HK', False)])
+
+    def test_shop_details_fall_back_to_a_plain_search_at_their_limit(self):
+        ai_proxy.budget = budget(details=(1, 10, 10), places=(1, 10, 10))
+        calls = []
+        ai_proxy.search_places = lambda *args: calls.append(args[-1]) or []
+        good = {'query': 'x', 'lat': 22.32, 'lng': 114.17, 'radius': 2500, 'details': True}
+        self.assertEqual([self.post(good, path='/api/places')[0] for _ in range(3)], [200, 200, 429])
+        self.assertEqual(calls, [True, False])
 
     def test_place_search_rejects_bad_requests_without_spending(self):
         ai_proxy.budget = budget(places=(1, 10, 10))

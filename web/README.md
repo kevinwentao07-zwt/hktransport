@@ -6,7 +6,7 @@ Every data source allows direct browser calls, so only the AI goes through a ser
 route data from hkbus.app, arrivals from the operators, maps from Google on your own server and OpenFreeMap elsewhere, place
 search from Google on your own server and otherwise the Government and OpenStreetMap's Photon, and AI
 from DeepSeek. To find shops, the AI works out what to search for, Tavily searches the web, the AI picks
-out the shops named there, and Google confirms each one.
+out the shops named there, Google confirms each one with its details, and the AI ranks them and says why.
 On your own server, `server/ai_proxy.py` holds the DeepSeek key and every visitor can use the AI.
 Without it, as on GitHub Pages, riders add their own key in Settings.
 

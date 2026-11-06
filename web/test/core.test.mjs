@@ -199,6 +199,18 @@ test('web results become shops, and only the shop asked about counts', () => {
   assert.equal(P.isSameShop('一生懸麵 (旺角店)', '一生懸麵'), true);
   assert.equal(P.isSameShop('麥當勞', '一生懸麵'), false);
 });
+test('the AI ranks shops but can never lose or double one', () => {
+  const a = { place: { name: 'A', rating: 4.5, ratings: 900, meters: 120.4, open: true, kind: '拉麵店' }, reason: '網上推介' };
+  const b = { place: { name: 'B', meters: 50 } }, c = { place: { name: 'C' } };
+  const message = A.rankMessage({ want: '拉麵', extra: '要平' }, [a, b]);
+  assert.match(message, /1\. A: 拉麵店; rating 4\.5 from 900 people; open now; 120 m away; web says: 網上推介/);
+  assert.match(message, /Also wants: 要平/);
+  const ranked = A.applyRanking('{"ranking":[{"number":2,"reason":"最近"},{"number":2,"reason":"重複"},{"number":9},{"number":1,"reason":""}]}', [a, b, c]);
+  assert.deepEqual(ranked.map((s) => s.place.name), ['B', 'A', 'C']);
+  assert.equal(ranked[0].reason, '最近');
+  assert.equal(ranked[1].reason, '網上推介');
+  assert.deepEqual(A.applyRanking('not json', [a, b]), [a, b]);
+});
 test('area words', () => {
   assert.equal(P.cleanArea('朗豪坊附近'), '朗豪坊');
   assert.equal(P.cleanArea('附近'), '附近');
