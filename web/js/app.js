@@ -2382,4 +2382,9 @@ locateOnOpen();
 checkServer();
 loadDB();
 setInterval(() => { if (state.tab === 'saved') renderSheet(); }, 30_000);
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('serviceWorker' in navigator) {
+  // A page left open would otherwise keep running the old release, so a new one reloads it.
+  const hadWorker = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadWorker) location.reload(); });
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
