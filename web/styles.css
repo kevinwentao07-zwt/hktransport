@@ -230,6 +230,9 @@ svg.icon.solid { fill: currentColor; }
 .bus-note { position: absolute; left: 0; top: 22px; transform: translateX(-50%); padding: 2px 7px; border-radius: 8px; background: var(--surface); color: var(--ink); box-shadow: 0 1px 4px rgba(0, 0, 0, .3); font-size: 11px; font-weight: 600; white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .bus3d { transition: none; } }
 .card > div:empty { display: none; }
+.stop-row { padding: 8px 12px; }
+.stop-row.chosen { box-shadow: var(--rim), inset 0 0 0 1.5px var(--accent); }
+.g-stop { cursor: pointer; }
 .arrival-tag { position: absolute; left: 0; bottom: 18px; transform: translateX(-50%); width: max-content; padding: 4px 9px; border-radius: 11px; background: #ff3b30; color: #fff; font-size: 12.5px; font-weight: 700; box-shadow: 0 2px 8px rgba(0, 0, 0, .4); }
 .arrival-tag::after { content: ""; position: absolute; left: 50%; bottom: -4px; width: 9px; height: 9px; margin-left: -4.5px; background: inherit; transform: rotate(45deg); }
 .g-anchor { width: 0; height: 0; }

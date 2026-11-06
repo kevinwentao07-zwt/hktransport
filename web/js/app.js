@@ -1,7 +1,7 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
 import { meters,
   OP_COLORS, OP_LABELS, MODES, buildStopIndex, clipLine, exactSite, instruction, journeyID, journeyPath, lineColor, lineName, matchingSites,
-  nameText, normalizeDB, partialSite, pointOnLine, primaryMode, progressAt, retime, rides, score, searchRoutes, siteHasMode, stopName, stopsNear, vehiclesOnRoute,
+  nameText, normalizeDB, partialSite, pointOnLine, primaryMode, progressAt, retime, rides, score, searchRoutes, siteHasMode, snapToLine, stopName, stopsNear, vehiclesOnRoute,
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache, routeArrivals } from './eta.js?v=dev';
@@ -239,7 +239,7 @@ function dressBus(element, vehicle) {
 }
 
 const leafletMap = (() => {
-  let map, content, base, buses = [], tag = null, approach = null, approachStops = [], approachKey = '', lastFit = '', flying = false;
+  let map, content, base, buses = [], tag = null, chosen = null, approach = null, approachStops = [], approachKey = '', lastFit = '', flying = false;
   const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
   const style = () => `https://tiles.openfreemap.org/styles/${darkMode.matches ? 'dark' : 'liberty'}`;
   /** The maps label everything in both languages; show just the one being read. */
@@ -292,9 +292,21 @@ const leafletMap = (() => {
       content?.clearLayers();
       buses = [];
       tag = null;
+      chosen = null;
       approach = null;
       approachStops = [];
       approachKey = '';
+    },
+    /** The chosen stop's pin, moved rather than redrawn. */
+    chosen(place) {
+      if (!place) {
+        chosen?.remove();
+        chosen = null;
+      } else if (chosen) {
+        chosen.setLatLng(point(place.location));
+      } else {
+        chosen = L.marker(point(place.location), { icon: pin('', 'pin end', '#ff3b30'), title: place.name, zIndexOffset: 500 }).addTo(content);
+      }
     },
     tag(location, text) {
       if (!location) {
@@ -363,7 +375,7 @@ const leafletMap = (() => {
       if (from) L.marker(point(from.location), { icon: pin('', 'pin start'), title: from.name }).addTo(content);
       if (to) L.marker(point(to.location), { icon: pin('', 'pin end', '#ff3b30'), title: to.name, zIndexOffset: 500 }).addTo(content);
     },
-    path(path) {
+    path(path, choose) {
       // A few station names always fit; a long bus route's only fit up close.
       $('map').classList.toggle('many-stops', path.segments.reduce((sum, s) => sum + s.stopIDs.length, 0) > 12);
       for (const segment of path.segments) {
@@ -377,9 +389,10 @@ const leafletMap = (() => {
         // One unit long, so the line can be drawn on by animating its dash.
         if (!isWalk) stroke.getElement()?.setAttribute('pathLength', 1);
         segment.stopIDs.forEach((id, index) => {
-          const dot = L.circleMarker(point(segment.points[index]), { radius: 4, color: lineColor(segment.op, segment.route), fillColor: '#fff', fillOpacity: 1, weight: 2, className: 'stop-dot' })
+          const dot = L.circleMarker(point(segment.marks?.[index] ?? segment.points[index]), { radius: 4, color: lineColor(segment.op, segment.route), fillColor: '#fff', fillOpacity: 1, weight: 2, className: 'stop-dot' })
             .bindTooltip(name(id), { permanent: true, direction: 'right', offset: [6, 0], className: 'stop-label' }).addTo(content);
           dot.getElement()?.style.setProperty('--i', Math.min(index, 14));
+          if (choose) dot.on('click', () => choose(index));
         });
         if (segment.mode === 'ride') {
           const chip = document.createElement('span');
@@ -414,7 +427,7 @@ const leafletMap = (() => {
 
 /** The same map on Google's tiles, used while the server has allowance left. */
 const googleMap = (() => {
-  let map, Marker, buses = [], tag = null, approach = null, approachStops = [], approachKey = '', items = [];
+  let map, Marker, buses = [], tag = null, chosen = null, glide = 0, hasFramed = false, approach = null, approachStops = [], approachKey = '', items = [];
   const padding = () => {
     const wide = window.matchMedia('(min-width: 820px)').matches;
     return { top: wide ? 30 : 50, left: wide ? 440 : 24, right: wide ? 30 : 24, bottom: wide ? 30 : sheet.targetHeight() + 32 };
@@ -446,15 +459,23 @@ const googleMap = (() => {
     return marker;
   };
   const line = (path, options) => keep(new google.maps.Polyline({ map, path, clickable: false, ...options }));
-  /** Draws a line along its length, as the other map does with a dash. */
-  const drawOn = (polyline, path) => {
-    if (calm.matches || !$('map').classList.contains('entering') || path.length < 2) return;
-    const started = performance.now();
+  /** Eases the camera to a new view. The first view, or a finger on the map, stops it. */
+  const moveSmoothly = (center, zoom) => {
+    const run = ++glide;
+    if (calm.matches || !hasFramed) {
+      hasFramed = true;
+      return map.moveCamera({ center, zoom });
+    }
+    const from = map.getCenter(), fromZoom = map.getZoom(), started = performance.now();
+    const fromLat = from.lat(), fromLng = from.lng();
     const step = (now) => {
-      if (!items.includes(polyline)) return;
-      const progress = Math.min(1, (now - started) / 900), eased = 1 - (1 - progress) ** 3;
-      polyline.setPath(path.slice(0, Math.max(2, Math.ceil(path.length * eased))));
-      if (progress < 1) requestAnimationFrame(step);
+      if (run !== glide) return;
+      const part = Math.max(0, Math.min(1, (now - started) / 750)), eased = 1 - (1 - part) ** 3;
+      map.moveCamera({
+        center: { lat: fromLat + (center.lat - fromLat) * eased, lng: fromLng + (center.lng - fromLng) * eased },
+        zoom: fromZoom + (zoom - fromZoom) * eased,
+      });
+      if (part < 1) requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
   };
@@ -467,6 +488,7 @@ const googleMap = (() => {
       });
       const markZoom = () => $('map').classList.toggle('far', map.getZoom() < 15);
       map.addListener('zoom_changed', markZoom);
+      map.addListener('dragstart', () => { glide += 1; });
       markZoom();
     },
     destroy() {
@@ -483,9 +505,24 @@ const googleMap = (() => {
       items = [];
       buses = [];
       tag = null;
+      chosen = null;
       approach = null;
       approachStops = [];
       approachKey = '';
+    },
+    /** The chosen stop's pin, moved rather than redrawn. */
+    chosen(place) {
+      if (!place) {
+        if (chosen) {
+          chosen.map = null;
+          items = items.filter((item) => item !== chosen);
+        }
+        chosen = null;
+      } else if (chosen) {
+        chosen.position = place.location;
+      } else {
+        chosen = mark(place.location, div('pin end', '', '#ff3b30'), { title: place.name, zIndex: 500 });
+      }
     },
     tag(location, text) {
       if (!location) {
@@ -551,7 +588,7 @@ const googleMap = (() => {
       const world = 256 * 2 ** zoom;
       const x = (west + east) / 2 + (right - left) / 2 / world, y = (north + south) / 2 + (bottom - top) / 2 / world;
       const center = { lat: (Math.atan(Math.exp((0.5 - y) * 2 * Math.PI)) * 360) / Math.PI - 90, lng: x * 360 - 180 };
-      map.moveCamera({ center, zoom });
+      moveSmoothly(center, zoom);
     },
     follow(location, zoom = 16) {
       map.setZoom(Math.max(map.getZoom(), zoom));
@@ -562,7 +599,7 @@ const googleMap = (() => {
       if (from) mark(from.location, div('pin start'), { title: from.name, zIndex: 400 });
       if (to) mark(to.location, div('pin end', '', '#ff3b30'), { title: to.name, zIndex: 500 });
     },
-    path(path) {
+    path(path, choose) {
       $('map').classList.toggle('many-stops', path.segments.reduce((sum, s) => sum + s.stopIDs.length, 0) > 12);
       for (const segment of path.segments) {
         const color = lineColor(segment.op, segment.route), isWalk = segment.mode === 'walk', road = segment.line ?? segment.points;
@@ -572,8 +609,8 @@ const googleMap = (() => {
             icons: [{ icon: { path: google.maps.SymbolPath.CIRCLE, scale: 2, fillColor: '#2f7bf6', fillOpacity: 1, strokeOpacity: 0 }, repeat: '11px' }],
           });
         } else {
-          drawOn(line(road, { strokeColor: '#fff', strokeWeight: 8, strokeOpacity: 0.95, zIndex: 1 }), road);
-          drawOn(line(road, { strokeColor: color, strokeWeight: 5, strokeOpacity: 1, zIndex: 2 }), road);
+          line(road, { strokeColor: '#fff', strokeWeight: 8, strokeOpacity: 0.95, zIndex: 1 });
+          line(road, { strokeColor: color, strokeWeight: 5, strokeOpacity: 1, zIndex: 2 });
         }
         segment.stopIDs.forEach((id, index) => {
           const stop = div('g-stop');
@@ -581,7 +618,7 @@ const googleMap = (() => {
           const dot = div('g-dot');
           dot.style.borderColor = color;
           stop.append(dot, div('stop-label', name(id)));
-          mark(segment.points[index], stop, { zIndex: 100 });
+          mark(segment.marks?.[index] ?? segment.points[index], stop, { zIndex: 100, click: choose && (() => choose(index)) });
         });
         if (segment.mode === 'ride') {
           const chip = div(`route-chip${isDarkText(segment.op) ? ' dark' : ''}`, lineName(segment.op, segment.route, state.lang), color);
@@ -1083,7 +1120,7 @@ function moveVehicles() {
   const ids = route.stops[ride.op], stop = state.db.stops[ids[ride.boardPosition]]?.location;
   const ahead = coming ? ids.slice(Math.ceil(coming.position), ride.boardPosition).flatMap((id) => {
     const location = state.db.stops[id]?.location;
-    return location ? [{ id, location, name: name(id) }] : [];
+    return location ? [{ id, location: snapToLine(shape, location), name: name(id) }] : [];
   }) : [];
   if (state.tab !== 'plan') return mapView.approach(null);
   mapView.approach(coming && stop ? clipLine(shape, coming.location, stop) ?? [coming.location, stop] : null, coming?.color, ahead);
@@ -1111,10 +1148,11 @@ function showArrivalTag() {
       tagETA = etas.map((eta) => eta.date).filter((date) => date != null && date > Date.now()).sort((a, b) => a - b)[0] ?? null;
     }).catch(() => { if (key === tagKey) tagETA = null; });
   }
-  const minutes = tagETA ? Math.ceil((tagETA - Date.now()) / 60_000) : null;
+  const minutes = tagETA ? Math.max(0, Math.floor((tagETA - Date.now()) / 60_000)) : null;
   const text = tagETA === undefined ? t('查詢中…', 'Checking…') : tagETA === null ? t('暫無到站資料', 'No arrivals')
     : minutes <= 1 ? t('即將到站', 'Arriving') : t(`還有 ${minutes} 分鐘`, `${minutes} min`);
-  mapView.tag(state.db.stops[route.stops[focus.op][focus.position]]?.location, text);
+  const place = state.db.stops[route.stops[focus.op][focus.position]]?.location;
+  mapView.tag(place && snapToLine(knownShape(route, focus.op), place), text);
 }
 
 /** Shows a whole route on the map, and with a stop chosen, the buses either side of it. */
@@ -1143,8 +1181,39 @@ function clearFocus() {
 
 function focusPath() {
   const { routeKey, op } = state.focus, route = state.db.routes[routeKey];
-  const stopIDs = route.stops[op].filter((id) => state.db.stops[id]?.location);
-  return { segments: [{ mode: 'ride', route: route.route, routeKey, op, stopIDs, points: stopIDs.map((id) => state.db.stops[id].location) }] };
+  const positions = route.stops[op].flatMap((id, position) => (state.db.stops[id]?.location ? [position] : []));
+  const stopIDs = positions.map((position) => route.stops[op][position]);
+  return { segments: [{ mode: 'ride', route: route.route, routeKey, op, stopIDs, positions, points: stopIDs.map((id) => state.db.stops[id].location) }] };
+}
+
+/** A stop picked on the map or in the list: the sheet shows its arrivals and the map follows. */
+function chooseFocusStop(position) {
+  state.focus = { ...state.focus, position: state.focus.position === position ? null : position };
+  renderSheet();
+  $('sheet').scrollTop = 0;
+  sheet.snap('half');
+  // The route stays drawn: only the pin moves, and the camera slides to it.
+  showChosenStop();
+  moveVehicles();
+  fitFocus();
+}
+
+function showChosenStop() {
+  const { routeKey, op, position } = state.focus, route = state.db.routes[routeKey];
+  const id = position == null ? null : route.stops[op][position];
+  mapView.chosen(id ? { name: name(id), location: snapToLine(knownShape(route, op), state.db.stops[id].location) } : null);
+}
+
+/** One route's stops, with the chosen stop's arrivals at the top. */
+function routeDetail(route, op, back) {
+  const position = state.focus?.position, id = position == null ? null : route.stops[op][position];
+  return [
+    h('button', { class: 'back', onclick: back }, icon('back', 17), t('返回', 'Back')),
+    h('div', { class: 'row' }, badge(op, route.route), h('span', { class: 'bold' }, `${nameText(route.orig, state.lang)} → ${nameText(route.dest, state.lang)}`)),
+    id && h('div', { class: 'card open' }, h('div', { class: 'bold' }, name(id)), etaWidget(route, position, op)),
+    !id && h('div', { class: 'tiny muted' }, t('在地圖或下面點選站點，查看來車時間。', 'Tap a stop on the map or below to see arrivals.')),
+    route.stops[op].map((stop, seq) => stopRow(route, seq, stop, op)),
+  ];
 }
 
 setInterval(moveVehicles, 1000);
@@ -1198,7 +1267,8 @@ function withRoads(path) {
       const first = segment.points[0], last = segment.points.at(-1);
       if (segment.mode === 'walk') return { ...segment, points: knownWalk(first, last) ?? segment.points };
       if (!hasRealLine(segment)) return segment;
-      return { ...segment, line: clipLine(knownShape(state.db.routes[segment.routeKey], segment.op), first, last) };
+      const shape = knownShape(state.db.routes[segment.routeKey], segment.op);
+      return { ...segment, line: clipLine(shape, first, last), marks: shape ? segment.points.map((point) => snapToLine(shape, point)) : null };
     }),
   };
 }
@@ -1564,20 +1634,15 @@ function starButton(key, seq, op) {
 function visitRow(visit) {
   const route = state.db.routes[visit.routeKey];
   if (!route) return null;
-  const detail = h('div');
-  let open = false;
-  return h('div', {},
-    h('div', { class: 'row' },
-      h('button', {
-        class: 'tap grow', onclick: () => {
-          open = !open;
-          clear(detail, open && etaWidget(route, visit.seq, visit.op));
-          if (open) focusRoute(visit.routeKey, visit.op, visit.seq);
-          else clearFocus();
-        },
-      }, h('div', { class: 'row' }, badge(visit.op, route.route), h('span', { class: 'small ellipsis grow' }, `→ ${nameText(route.dest, state.lang)}`), h('span', { class: 'tiny muted' }, OP_LABELS[visit.op]))),
-      starButton(visit.routeKey, visit.seq, visit.op)),
-    detail);
+  return h('div', { class: 'row' },
+    h('button', {
+      class: 'tap grow', onclick: () => {
+        focusRoute(visit.routeKey, visit.op, visit.seq);
+        renderSheet();
+        $('sheet').scrollTop = 0;
+      },
+    }, h('div', { class: 'row' }, badge(visit.op, route.route), h('span', { class: 'small ellipsis grow' }, `→ ${nameText(route.dest, state.lang)}`), h('span', { class: 'muted' }, icon('down', 15)))),
+    starButton(visit.routeKey, visit.seq, visit.op));
 }
 
 // MARK: Plan tab
@@ -1923,6 +1988,14 @@ function stopCard(stop, isNearest) {
 function stopsSheet() {
   if (state.stopSuggesting) return stopSuggestions();
   if (!state.db) return h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('正在載入站點資料…', 'Loading stops…'));
+  if (state.focus) {
+    return routeDetail(state.db.routes[state.focus.routeKey], state.focus.op, () => {
+      state.focus = null;
+      renderSheet();
+      drawMap();
+      $('sheet').scrollTop = 0;
+    });
+  }
   const stops = visibleStops();
   return [
     state.stopBusy && h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('搜尋中…', 'Searching…')),
@@ -1960,12 +2033,12 @@ function renderRoutesTop() {
 function routesSheet() {
   if (!state.db) return h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('正在載入路線資料…', 'Loading route data…'));
   if (state.routeKey) {
-    const route = state.db.routes[state.routeKey], op = route.operators[0];
-    return [
-      h('button', { class: 'back', onclick: () => { state.routeKey = null; renderSheet(); clearFocus(); } }, icon('back', 17), t('返回', 'Back')),
-      h('div', { class: 'row' }, badge(op, route.route), h('span', { class: 'bold' }, `${nameText(route.orig, state.lang)} → ${nameText(route.dest, state.lang)}`)),
-      route.stops[op].map((id, seq) => stopRow(route, seq, id, op)),
-    ];
+    const route = state.db.routes[state.routeKey];
+    return routeDetail(route, route.operators[0], () => {
+      state.routeKey = null;
+      renderSheet();
+      clearFocus();
+    });
   }
   const routes = searchRoutes(state.db, state.routeQuery);
   if (!state.routeQuery.trim()) return h('div', { class: 'small muted' }, t('輸入路線號碼，查看沿線站點及到站時間。按星號可收藏常用車站。', 'Type a route number to see its stops and arrivals. Press the star to save a stop.'));
@@ -1984,20 +2057,10 @@ function routesSheet() {
 }
 
 function stopRow(route, seq, id, op) {
-  const detail = h('div');
-  let open = false;
-  return h('div', { class: 'card', style: 'padding:8px 12px' },
+  return h('div', { class: `card stop-row${state.focus?.position === seq ? ' chosen' : ''}` },
     h('div', { class: 'row' },
-      h('button', {
-        class: 'tap grow small', onclick: () => {
-          open = !open;
-          clear(detail, open && etaWidget(route, seq, op));
-          if (open) focusRoute(route.key, op, seq);
-          else focusRoute(route.key, op);
-        },
-      }, `${seq + 1}. ${name(id)}`),
-      starButton(route.key, seq, op)),
-    detail);
+      h('button', { class: 'tap grow small', onclick: () => chooseFocusStop(seq) }, `${seq + 1}. ${name(id)}`),
+      starButton(route.key, seq, op)));
 }
 
 // MARK: Saved tab
@@ -2223,10 +2286,9 @@ function drawMap() {
   if (here) mapView.me(here);
   if (state.tab !== 'plan' && state.focus) {
     const path = focusPath(), { position, op, routeKey } = state.focus;
-    mapView.path(withRoads(path));
+    mapView.path(withRoads(path), (index) => chooseFocusStop(path.segments[0].positions[index]));
     loadRoads(path).then((arrived) => { if (arrived && state.focus) drawMap(); });
-    const id = position == null ? null : state.db.routes[routeKey].stops[op][position];
-    if (id) mapView.ends(null, { name: name(id), location: state.db.stops[id].location });
+    showChosenStop();
     moveVehicles();
     return;
   }

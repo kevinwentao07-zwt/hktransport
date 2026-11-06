@@ -261,6 +261,11 @@ test('bus lines follow the road between two stops', () => {
   assert.deepEqual(clipped[2], road[2]);
   assert.equal(T.clipLine(road, { lat: 22.5, lng: 114.3 }, road[3]), null);
   assert.equal(T.clipLine(null, road[0], road[1]), null);
+  close(clipped[0].lng, 114.10, 0.00001); // Starts on the line, not at the kerb.
+  const kerb = { lat: 22.305, lng: 114.1003 };
+  close(T.snapToLine(road, kerb).lng, 114.10, 0.00001);
+  assert.deepEqual(T.snapToLine(road, { lat: 22.305, lng: 114.2 }), { lat: 22.305, lng: 114.2 }); // Too far to be this road.
+  assert.deepEqual(T.snapToLine(null, kerb), kerb);
   const on = T.pointOnLine(road, { lat: 22.3101, lng: 114.105 });
   close(on.location.lat, 22.31, 0.00001);
   close(on.heading, 90, 0.01); // Heading east along the second stretch.

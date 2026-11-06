@@ -530,7 +530,15 @@ export function clipLine(line, from, to) {
   if (!line || line.length < 2) return null;
   const start = pointOnLine(line, from), end = start && pointOnLine(line, to, start.index);
   if (!end || start.meters > MOST_METERS_OFF_LINE || end.meters > MOST_METERS_OFF_LINE) return null;
-  return [from, ...line.slice(start.index + 1, end.index + 1), to];
+  return [start.location, ...line.slice(start.index + 1, end.index + 1), end.location];
+}
+
+const MOST_METERS_TO_SNAP = 60;
+
+/** A stop's place on its route's line, as stops are mapped at the kerb and lines down the road. */
+export function snapToLine(line, location) {
+  const onLine = line && line.length > 1 ? pointOnLine(line, location) : null;
+  return onLine && onLine.meters <= MOST_METERS_TO_SNAP ? onLine.location : location;
 }
 
 const SECONDS_PER_STOP = 90;
