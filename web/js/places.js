@@ -30,29 +30,6 @@ export async function googleSearch(query, center, radius, lang, details = false)
   }
 }
 
-/** Pages from the whole web about a search, or null at the limit. */
-export async function webSearch(query) {
-  try {
-    const response = await fetch('api/web', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
-      signal: AbortSignal.timeout(16_000),
-    });
-    return response.ok ? (await response.json()).results : null;
-  } catch {
-    return null;
-  }
-}
-
-const plain = (name) => (name ?? '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-
-/** Google returns its closest guess, which only counts if it is the shop that was asked about. */
-export function isSameShop(found, wanted) {
-  const a = plain(found), b = plain(wanted);
-  return !!a && !!b && (a.includes(b) || b.includes(a) || a.slice(0, 3) === b.slice(0, 3));
-}
-
 const walks = new Map();
 const walkKey = (from, to) => [from.lat, from.lng, to.lat, to.lng].join();
 

@@ -7,7 +7,6 @@ Wants=network-online.target
 ExecStart=/usr/bin/python3 -I /opt/hktransport-ai/ai_proxy.py
 EnvironmentFile=-/etc/hktransport/ai.env
 EnvironmentFile=-/etc/hktransport/google.env
-EnvironmentFile=-/etc/hktransport/search.env
 EnvironmentFile=-/etc/hktransport/routes.env
 DynamicUser=yes
 StateDirectory=hktransport-ai

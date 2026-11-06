@@ -107,11 +107,11 @@ limiter = Limiter(
 in_flight = threading.BoundedSemaphore(int(os.environ.get('AI_CONCURRENT', '16')))
 
 
-# Free each month: 10,000 map loads, 5,000 searches, 1,000 searches with shop details, 10,000 walking
-# routes and 1,000 web searches. These stop well short of all five.
+# Free each month: 10,000 map loads, 5,000 searches, 1,000 searches with shop details and 10,000
+# walking routes. These stop well short of all four.
 budget = Budget(
     Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'usage.json',
-    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 9000, 40), 'web': (30, 900, 10), 'details': (30, 900, 12)},
+    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 9000, 40), 'details': (30, 900, 12)},
 )
 
 
@@ -129,10 +129,6 @@ def places_key():
 
 def routes_key():
     return os.environ.get('GOOGLE_ROUTES_KEY', '').strip() or places_key()
-
-
-def search_key():
-    return os.environ.get('TAVILY_API_KEY', '').strip()
 
 
 def ask_deepseek(system, message):
@@ -178,18 +174,6 @@ def search_places(query, lat, lng, radius, language, details=False):
         'price': place.get('priceLevel'), 'open': place.get('currentOpeningHours', {}).get('openNow'),
         'phone': place.get('nationalPhoneNumber'),
     } for place in found]
-
-
-def search_web(query):
-    """The basic search costs one credit. Long pages are cut to what fits one AI request."""
-    request = urllib.request.Request(
-        'https://api.tavily.com/search',
-        data=json.dumps({'query': query, 'search_depth': 'basic', 'max_results': 6}).encode(),
-        headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {search_key()}'},
-    )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        found = json.load(response).get('results', [])
-    return [{'title': item.get('title', '')[:120], 'url': item.get('url', ''), 'content': item.get('content', '')[:450]} for item in found]
 
 
 def decode_polyline(encoded):
@@ -259,7 +243,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path != '/api/ai':
             return self.send(404, {'error': 'Not found'})
-        body = {'available': bool(api_key()), 'mapKey': None, 'places': False, 'web': bool(search_key())}
+        body = {'available': bool(api_key()), 'mapKey': None, 'places': False}
         # Handing out the key is what starts a billed map load, so this is where it is counted.
         # Only the page itself asks this way, and Google locks the key to this site.
         if map_key() and self.headers.get('Sec-Fetch-Site') == 'same-origin' and budget.spend('map', self.visitor()):
@@ -290,27 +274,12 @@ class Handler(BaseHTTPRequestHandler):
         return body
 
     def do_POST(self):
-        if self.path not in ('/api/ai', '/api/places', '/api/walk', '/api/web'):
+        if self.path not in ('/api/ai', '/api/places', '/api/walk'):
             return self.send(404, {'error': 'Not found'})
         body = self.read_json()
         if body is None:
             return None
-        return {'/api/places': self.places, '/api/walk': self.walk, '/api/web': self.web}.get(self.path, self.ask)(body)
-
-    def web(self, body):
-        query = body.get('query')
-        if not isinstance(query, str) or not 0 < len(query.strip()) <= 100:
-            return self.send(400, {'error': 'Bad request'})
-        if not search_key() or not budget.spend('web', self.visitor()):
-            return self.send(429, {'error': 'Limit reached'})
-        try:
-            self.send(200, {'results': search_web(query.strip())})
-        except urllib.error.HTTPError as error:
-            print(f'Web search returned {error.code}', file=sys.stderr, flush=True)
-            self.send(502, {'error': 'Unavailable'})
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
-            print(f'Web search failed: {type(error).__name__}', file=sys.stderr, flush=True)
-            self.send(502, {'error': 'Unavailable'})
+        return {'/api/places': self.places, '/api/walk': self.walk}.get(self.path, self.ask)(body)
 
     def walk(self, body):
         start, end = body.get('from'), body.get('to')

@@ -135,16 +135,6 @@ First decide whether "Rider says" continues them or starts something new:
 - A new subject, e.g. 去機場 while looking at ramen shops, or 我想買手機: ignore the conversation, the
   search and the trip completely.`;
 
-export const pickPrompt = (lang) => `You read web search results about places in Hong Kong and pull out the shops they mention.
-Reply with one JSON object and nothing else:
-{"places": [{"name": string, "reason": string}]}
-- Use only the text given. Every shop must be named in it, and never add one from your own knowledge.
-- Pick up to eight shops that best match what the rider wants and are in or near the area, best first.
-- name is the shop's own name as a map would know it, without the branch. Skip articles' titles, areas and websites.
-- reason is one short sentence on why it fits, based only on the text. No invented ratings, prices or hours.
-- If the text names no suitable shop, reply {"places": []}.
-${lang === 'zh' ? 'Write reasons in Traditional Chinese as used in Hong Kong.' : 'Write reasons in English.'}`;
-
 export const rankPrompt = (lang) => `You put shops in Hong Kong in order for a rider, best first, and say why.
 Reply with one JSON object and nothing else:
 {"ranking": [{"number": number, "reason": string}]}
@@ -153,6 +143,7 @@ Reply with one JSON object and nothing else:
   then whether it is open now and how near it is. A high rating from very few people counts for less.
 - reason is one or two short sentences saying why this shop is ranked here, using only the facts
   given. Never invent ratings, prices, hours or dishes. If a fact is missing, don't mention it.
+- Speak to the person directly as 你, or not at all. Never call them 車手, 乘客 or a rider.
 ${lang === 'zh' ? 'Write reasons in Traditional Chinese as used in Hong Kong.' : 'Write reasons in English.'}`;
 
 export const explainPrompt = (lang) => `You help a rider in Hong Kong choose between public transport options computed by a route planner.
@@ -164,7 +155,6 @@ ${lang === 'zh' ? 'Write in Traditional Chinese as used in Hong Kong.' : 'Write 
 /** Every job the AI does. The server is sent a name from this list, never a prompt. */
 export const PROMPTS = {
   intent: INTENT_PROMPT, chat: CHAT_PROMPT,
-  pick_zh: pickPrompt('zh'), pick_en: pickPrompt('en'),
   rank_zh: rankPrompt('zh'), rank_en: rankPrompt('en'),
   explain_zh: explainPrompt('zh'), explain_en: explainPrompt('en'),
 };
@@ -205,26 +195,11 @@ function decodeWish(object) {
   };
 }
 
-export function decodePicks(reply) {
-  const places = jsonObject(reply)?.places;
-  if (!Array.isArray(places)) return [];
-  return places.flatMap((place) => {
-    const name = clean(place?.name);
-    return name ? [{ name, reason: clean(place.reason) || null }] : [];
-  }).slice(0, 8);
-}
-
-/** What the AI reads from the web, kept inside one request. */
-export function pickMessage(want, area, results) {
-  const pages = results.map((page, index) => `[${index + 1}] ${page.title}\n${page.content}`).join('\n\n');
-  return `Looking for: ${want}\nArea: ${area}\n\nWeb results:\n${pages}`.slice(0, 3900);
-}
-
-/** Shop facts for the AI, with the web's note where there is one. */
+/** What Google knows about each shop, for the AI to rank. */
 export function rankMessage(wish, suggestions) {
-  const shops = suggestions.map(({ place, reason }, index) => {
+  const shops = suggestions.map(({ place }, index) => {
     const facts = [place.kind, place.rating && `rating ${place.rating} from ${place.ratings ?? 0} people`, place.price,
-      place.open === true && 'open now', place.open === false && 'closed now', Number.isFinite(place.meters) && `${Math.round(place.meters)} m away`, reason && `web says: ${reason}`];
+      place.open === true && 'open now', place.open === false && 'closed now', Number.isFinite(place.meters) && `${Math.round(place.meters)} m away`];
     return `${index + 1}. ${place.name}: ${facts.filter(Boolean).join('; ')}`;
   });
   return [`Rider wants: ${wish.want}`, wish.extra && `Also wants: ${wish.extra}`, 'Shops:', ...shops].filter(Boolean).join('\n').slice(0, 3900);
@@ -292,7 +267,6 @@ function assistant(complete) {
       if (!reply) throw new Error('DeepSeek reply was not valid trip JSON');
       return reply;
     },
-    pick: async (want, area, results, lang) => decodePicks(await complete(`pick_${lang}`, pickMessage(want, area, results))),
     rank: async (wish, suggestions, lang) => applyRanking(await complete(`rank_${lang}`, rankMessage(wish, suggestions)), suggestions),
     explain: (summary, lang) => complete(`explain_${lang}`, summary),
   };
