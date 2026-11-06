@@ -189,6 +189,16 @@ test('HK grid converts to WGS84', () => {
   close(langham.lat, 22.3177, 0.0008);
   close(langham.lng, 114.1684, 0.0008);
 });
+test('web results become shops, and only the shop asked about counts', () => {
+  assert.deepEqual(A.decodePicks('{"places":[{"name":"一生懸麵","reason":"多人推介"},{"reason":"x"}]}'), [{ name: '一生懸麵', reason: '多人推介' }]);
+  assert.deepEqual(A.decodePicks('not json'), []);
+  assert.equal(A.decodePicks(JSON.stringify({ places: Array(6).fill({ name: 'a' }) })).length, 4);
+  const message = A.pickMessage('拉麵', '旺角', [{ title: '十大拉麵', content: 'x'.repeat(9000) }]);
+  assert.ok(message.length <= 3900 && message.includes('十大拉麵') && message.includes('Area: 旺角'));
+  assert.ok(A.PROMPTS.pick_zh && A.PROMPTS.pick_en);
+  assert.equal(P.isSameShop('一生懸麵 (旺角店)', '一生懸麵'), true);
+  assert.equal(P.isSameShop('麥當勞', '一生懸麵'), false);
+});
 test('area words', () => {
   assert.equal(P.cleanArea('朗豪坊附近'), '朗豪坊');
   assert.equal(P.cleanArea('附近'), '附近');

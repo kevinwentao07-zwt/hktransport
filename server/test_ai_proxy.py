@@ -15,12 +15,12 @@ folder = tempfile.mkdtemp()
 copy(Path(__file__).parent / 'ai_proxy.py', folder)
 Path(folder, 'prompts.json').write_text(json.dumps({'chat': 'SYSTEM PROMPT'}))
 sys.path.insert(0, folder)
-os.environ.update(DEEPSEEK_API_KEY=SECRET, GOOGLE_MAP_KEY='map-key', GOOGLE_PLACES_KEY='places-key', STATE_DIRECTORY=folder)
+os.environ.update(DEEPSEEK_API_KEY=SECRET, GOOGLE_MAP_KEY='map-key', GOOGLE_PLACES_KEY='places-key', TAVILY_API_KEY='web-key', STATE_DIRECTORY=folder)
 import ai_proxy  # noqa: E402
 
 
 def budget(**limits):
-    return ai_proxy.Budget(Path(tempfile.mkdtemp(), 'usage.json'), {'map': (9, 9, 9), 'places': (9, 9, 9), 'walk': (9, 9, 9), **limits})
+    return ai_proxy.Budget(Path(tempfile.mkdtemp(), 'usage.json'), {'map': (9, 9, 9), 'places': (9, 9, 9), 'walk': (9, 9, 9), 'web': (9, 9, 9), **limits})
 
 
 class BudgetTests(unittest.TestCase):
@@ -120,9 +120,10 @@ class ProxyTests(unittest.TestCase):
     def test_map_key_stops_at_the_limit_and_never_shares_secrets(self):
         ai_proxy.budget = budget(map=(1, 10, 10))
         text = self.get_status()
-        self.assertEqual(json.loads(text), {'available': True, 'mapKey': 'map-key', 'places': True})
+        self.assertEqual(json.loads(text), {'available': True, 'mapKey': 'map-key', 'places': True, 'web': True})
         self.assertNotIn(SECRET, text)
         self.assertNotIn('places-key', text)
+        self.assertNotIn('web-key', text)
         self.assertEqual(json.loads(self.get_status())['mapKey'], None)
 
     def test_only_the_page_spends_map_loads(self):
@@ -156,6 +157,14 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.post(leg, origin=False, path='/api/walk')[0], 403)
         self.assertEqual(self.post(leg, path='/api/walk')[0], 200)
         self.assertEqual(self.post(leg, path='/api/walk')[0], 429)
+
+    def test_web_search_stops_at_the_limit(self):
+        ai_proxy.budget = budget(web=(1, 10, 10))
+        ai_proxy.search_web = lambda query: [{'title': query}]
+        self.assertEqual(self.post({'query': 'x' * 101}, path='/api/web')[0], 400)
+        self.assertEqual(self.post({'query': '拉麵'}, origin=False, path='/api/web')[0], 403)
+        self.assertEqual(self.post({'query': '拉麵'}, path='/api/web')[0], 200)
+        self.assertEqual(self.post({'query': '拉麵'}, path='/api/web')[0], 429)
 
     def test_upstream_errors_reveal_nothing(self):
         def fail(system, message):

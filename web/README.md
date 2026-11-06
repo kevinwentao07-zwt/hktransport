@@ -5,7 +5,8 @@ The phone version: a static page, published at <https://kevinwentao07-zwt.github
 Every data source allows direct browser calls, so only the AI goes through a server:
 route data from hkbus.app, arrivals from the operators, maps from Google on your own server and OpenFreeMap elsewhere, place
 search from Google on your own server and otherwise the Government and OpenStreetMap's Photon, and AI
-from DeepSeek, which only picks out what to search for.
+from DeepSeek. To find shops, the AI works out what to search for, Tavily searches the web, the AI picks
+out the shops named there, and Google confirms each one.
 On your own server, `server/ai_proxy.py` holds the DeepSeek key and every visitor can use the AI.
 Without it, as on GitHub Pages, riders add their own key in Settings.
 
@@ -26,7 +27,7 @@ python3 -m http.server 8642 --directory web
 
 To publish to your own server, put `DEPLOY_HOST`, `DEPLOY_KEY` and `DEPLOY_DOMAIN` in `.env.deploy`
 (ignored by git) and run `Deploy web.command`. Run `Set AI key.command` once to put the DeepSeek key
-on the server. It never goes into the repository or the web folder. Run `Set Google keys.command` to add
+on the server. It never goes into the repository or the web folder. Run `Set search key.command` for Tavily, limited to 30 searches a day, and `Set Google keys.command` to add
 Google's map and place keys. The server counts each map load and place search on disk, and stops
 at 300 and 150 a day, and 9,000 and 4,500 a month, with 300 and 9,000 for walking routes, so use stays
 inside Google's free allowance. At the

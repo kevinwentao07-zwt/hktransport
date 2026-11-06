@@ -6,7 +6,7 @@ import { meters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache } from './eta.js?v=dev';
 import { chatMessage, deepSeek, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseWish, searchMessage } from './ai.js?v=dev';
-import { HONG_KONG, cleanArea, districtAt, googleSearch, googleWalk, inHongKong, isNearby, knownWalk, lookupPlace, photonSearch, withinArea } from './places.js?v=dev';
+import { HONG_KONG, cleanArea, districtAt, googleSearch, googleWalk, inHongKong, isNearby, isSameShop, knownWalk, lookupPlace, photonSearch, webSearch, withinArea } from './places.js?v=dev';
 
 // MARK: Storage
 
@@ -515,6 +515,7 @@ async function checkServer() {
     if (response.ok) shared = await response.json();
   } catch { /* The page works without it. */ }
   state.sharedAI = shared?.available === true;
+  state.web = shared?.web === true;
   if (state.sharedAI) renderTab();
   if (shared?.mapKey) useGoogleMap(shared);
   else useFreeMap();
@@ -762,6 +763,26 @@ async function answerQuestion(answer) {
   startDiscovery({ ...next, asked, question: asked < MOST_QUESTIONS ? next.question : null }, run);
 }
 
+async function shopsFromWeb(wish, area) {
+  const ai = client();
+  if (!ai || !state.web) return [];
+  const pages = await webSearch(`${wish.query} ${area.name} 香港 推薦`);
+  if (!pages?.length) return [];
+  let picks;
+  try {
+    picks = await ai.pick(wish.want, area.name, pages, state.lang);
+  } catch {
+    return [];
+  }
+  const found = await Promise.all(picks.map(async (pick) => {
+    const places = await googleSearch(`${pick.name} ${area.name}`, area.center, area.radius, state.lang);
+    const place = withinArea(places ?? [], area).find((item) => isSameShop(item.name, pick.name));
+    return place && { place, reason: pick.reason, isFromWeb: true };
+  }));
+  const seen = new Set();
+  return found.filter((item) => item && !seen.has(item.place.id) && seen.add(item.place.id));
+}
+
 async function discover(wish, run = ++planRun) {
   const stale = () => run !== planRun;
   const giveUp = (message) => {
@@ -793,12 +814,17 @@ async function discover(wish, run = ++planRun) {
     searchArea = { name: resolved.name, center: resolved.location, radius: 2500 };
   }
 
-  // The AI only picked out what to search for. Google, or the free map after it, finds the places.
+  // The web says which shops are worth it, and Google says where they are. Without the web, or
+  // when it names nothing Google can find, Google searches for the kind of place itself.
   let suggestions = [];
   if (state.google) {
-    const found = await googleSearch(`${wish.query} ${searchArea.name}`, searchArea.center, searchArea.radius, state.lang);
+    suggestions = await shopsFromWeb(wish, searchArea);
     if (stale()) return;
-    suggestions = withinArea(found ?? [], searchArea).slice(0, 5).map((place) => ({ place, isGoogle: true }));
+    if (!suggestions.length) {
+      const found = await googleSearch(`${wish.query} ${searchArea.name}`, searchArea.center, searchArea.radius, state.lang);
+      if (stale()) return;
+      suggestions = withinArea(found ?? [], searchArea).slice(0, 5).map((place) => ({ place, isGoogle: true }));
+    }
   }
   if (!suggestions.length) {
     const found = new Map();
@@ -1237,14 +1263,17 @@ function suggestionList({ wish, areaName, suggestions }) {
   return [
     h('div', { class: 'row' }, h('span', { class: 'title grow' }, t(`${areaName}的${wish.want}`, `${wish.want} around ${areaName}`)),
       h('button', { class: 'link', onclick: () => { state.discovery = { stage: 'asking', wish: { ...wish, area: null, question: null, options: [] } }; renderSheet(); drawMap(); renderBottomStatus(); } }, t('換範圍', 'Change area'))),
-    h('div', { class: 'tiny muted' }, suggestions[0]?.isGoogle
+    h('div', { class: 'tiny muted' }, suggestions[0]?.isFromWeb
+      ? t('從網上推介找到，地址來自 Google 地圖。出發前請確認仍在營業。', 'Found in recommendations online, with addresses from Google Maps. Check it is open before you go.')
+      : suggestions[0]?.isGoogle
       ? t('資料來自 Google 地圖，出發前請確認仍在營業。', 'From Google Maps. Check it is open before you go.')
       : t('地點來自地圖搜尋，沒有菜單資料，未必有售，出發前請先確認。', 'Places come from a map search, which has no menus. Check before you go.')),
     suggestions.map((suggestion, index) => h('button', { class: 'card tap', onclick: () => choosePlace(suggestion) },
       h('div', { class: 'row', style: 'align-items:flex-start' }, h('span', { class: 'num' }, index + 1),
         h('div', { class: 'grow' },
           h('div', { class: 'row' }, h('span', { class: 'bold ellipsis grow' }, suggestion.place.name), h('span', { class: 'tiny muted' }, distanceText(suggestion.place.meters))),
-          suggestion.place.address && h('div', { class: 'tiny muted ellipsis' }, suggestion.place.address))))),
+          suggestion.place.address && h('div', { class: 'tiny muted ellipsis' }, suggestion.place.address),
+          suggestion.reason && h('div', { class: 'small ai', style: 'margin-top:3px' }, suggestion.reason))))),
   ];
 }
 
@@ -1274,7 +1303,7 @@ function homeSheet() {
 
 const PHASES = {
   understanding: () => (client() ? t('AI 正在分析你的要求…', 'AI is analysing your request…') : t('理解要求…', 'Reading your request…')),
-  findingPlaces: () => (state.google ? t('正在 Google 地圖搜尋…', 'Searching Google Maps…') : t('正在搜尋地點…', 'Searching for places…')),
+  findingPlaces: () => (state.google && state.web ? t('AI 正在全網搜尋，並在 Google 地圖確認…', 'AI is searching the web and checking Google Maps…') : t('正在搜尋地點…', 'Searching for places…')),
   locating: () => t('正在尋找起點及目的地…', 'Finding places…'),
   planning: () => t('正在計算路線…', 'Planning routes…'),
   checkingLive: () => t('正在核對實時到站時間…', 'Checking live arrivals…'),
