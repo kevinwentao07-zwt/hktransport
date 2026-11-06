@@ -227,12 +227,13 @@ svg.icon.solid { fill: currentColor; }
 .bus-marker.other { opacity: .82; }
 .bus-marker.other .bus3d { --l: 32px; --w: 13px; --h: 19px; }
 .bus-marker.other .bus3d.minibus { --l: 24px; --w: 12px; --h: 12px; }
-.bus-note:empty { display: none; }
 .bus-note { position: absolute; left: 0; top: 22px; transform: translateX(-50%); padding: 2px 7px; border-radius: 8px; background: var(--surface); color: var(--ink); box-shadow: 0 1px 4px rgba(0, 0, 0, .3); font-size: 11px; font-weight: 600; white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .bus3d { transition: none; } }
-.leaflet-marker-icon.bus-holder { transition: transform 3s linear; }
 .g-anchor { width: 0; height: 0; }
 .g-stop { display: flex; align-items: center; gap: 4px; width: max-content; transform: translate(-6px, -50%); }
+.g-stop.upcoming { opacity: .62; }
+.g-stop.upcoming .g-dot { width: 9px; height: 9px; border-color: var(--muted); background: var(--surface); }
+.g-stop.upcoming .stop-label { font-size: 10.5px; font-weight: 400; padding: 0 4px; box-shadow: none; }
 .g-dot { width: 12px; height: 12px; flex: none; box-sizing: border-box; border-radius: 50%; background: #fff; border: 2.5px solid; }
 .g-pick { width: 14px; height: 14px; margin: -7px 0 0 -7px; box-sizing: border-box; border-radius: 50%; border: 2px solid #fff; cursor: pointer; }
 .g-pick.rail { width: 20px; height: 20px; margin: -10px 0 0 -10px; }

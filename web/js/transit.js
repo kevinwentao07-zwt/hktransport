@@ -569,9 +569,10 @@ export function vehiclesOnRoute(arrivals, ride, db, now) {
     const minutes = position <= ride.boardPosition ? Math.ceil(((ride.boardPosition - position) * perStop) / 60) : null;
     return [{ ...place, position, minutes, color: lineColor(ride.op, ride.route), isMinibus: ride.op === 'gmb', isNext: false }];
   });
-  const coming = vehicles.filter((vehicle) => vehicle.minutes != null).sort((a, b) => a.minutes - b.minutes)[0];
-  if (coming) coming.isNext = true;
-  return vehicles;
+  // Only two matter to the rider: the one coming, and the one that has just gone.
+  const coming = vehicles.filter((vehicle) => vehicle.minutes != null).sort((a, b) => b.position - a.position)[0];
+  const gone = vehicles.filter((vehicle) => vehicle.minutes == null).sort((a, b) => a.position - b.position)[0];
+  return [coming && { ...coming, isNext: true }, gone].filter(Boolean);
 }
 
 export function rideStopIDs(ride, db) {

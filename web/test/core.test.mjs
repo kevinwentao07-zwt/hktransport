@@ -232,6 +232,7 @@ test('buses are found along the whole route from its arrivals', () => {
   const ride = { op: 'kmb', route: '1', routeKey: 'r', boardPosition: 3 };
   const min = 60_000;
   // One bus reaches c in 1 minute, so it is between b and c. Another reaches e in 1 minute.
+  // The rider boards at d, so these are the bus coming and the bus just gone.
   const arrivals = [
     { position: 0, times: [9 * min] }, { position: 1, times: [11 * min] }, { position: 2, times: [1 * min] },
     { position: 3, times: [3 * min] }, { position: 4, times: [1 * min] },
@@ -245,6 +246,10 @@ test('buses are found along the whole route from its arrivals', () => {
   close(vehicles[1].position, 3.5, 0.00001);
   assert.equal(vehicles[1].minutes, null); // Already past the rider's stop.
   assert.equal(vehicles[1].isNext, false);
+  const three = [...arrivals.slice(0, 1), { position: 1, times: [1 * min] }, { position: 2, times: [3 * min] }, { position: 3, times: [1 * min] }, { position: 4, times: [3 * min] }];
+  const earlier = T.vehiclesOnRoute(three, { ...ride, boardPosition: 4 }, db, 0);
+  assert.equal(earlier.length, 1); // Two buses coming: only the nearer one shows.
+  close(earlier[0].position, 2.5, 0.00001);
   assert.deepEqual(T.vehiclesOnRoute([{ position: 1, times: [] }], ride, db, 0), []);
   assert.deepEqual(T.vehiclesOnRoute(arrivals, { ...ride, routeKey: 'none' }, db, 0), []);
 });

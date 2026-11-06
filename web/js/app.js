@@ -210,17 +210,29 @@ function busMarker() {
   return h('div', { class: 'bus-marker' }, h('div', { class: 'bus3d' }, faces), h('span', { class: 'bus-note' }));
 }
 
+/** A stop still ahead of the coming bus, kept quieter than the stops on the rider's own trip. */
+function upcomingStop(text) {
+  const element = document.createElement('div');
+  element.className = 'g-stop upcoming';
+  const dot = document.createElement('div'), label = document.createElement('div');
+  dot.className = 'g-dot';
+  label.className = 'stop-label';
+  label.textContent = text;
+  element.append(dot, label);
+  return element;
+}
+
 function dressBus(element, vehicle) {
   const bus = element.querySelector('.bus3d'), note = element.querySelector('.bus-note');
   element.classList.toggle('other', !vehicle.isNext);
   bus.classList.toggle('minibus', vehicle.isMinibus);
   bus.style.setProperty('--body', vehicle.color);
   bus.style.setProperty('--heading', `${vehicle.heading}deg`);
-  note.textContent = !vehicle.isNext ? '' : vehicle.minutes ? t(`推算 ${vehicle.minutes} 分鐘到站`, `About ${vehicle.minutes} min away`) : t('即將到站', 'Arriving');
+  note.textContent = !vehicle.isNext ? t('剛開出', 'Just left') : vehicle.minutes ? t(`推算 ${vehicle.minutes} 分鐘到站`, `About ${vehicle.minutes} min away`) : t('即將到站', 'Arriving');
 }
 
 const leafletMap = (() => {
-  let map, content, base, buses = [], lastFit = '', flying = false;
+  let map, content, base, buses = [], approach = null, approachStops = [], approachKey = '', lastFit = '', flying = false;
   const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
   const style = () => `https://tiles.openfreemap.org/styles/${darkMode.matches ? 'dark' : 'liberty'}`;
   /** The maps label everything in both languages; show just the one being read. */
@@ -272,6 +284,25 @@ const leafletMap = (() => {
     clear() {
       content?.clearLayers();
       buses = [];
+      approach = null;
+      approachStops = [];
+      approachKey = '';
+    },
+    /** The road and stops still ahead of the coming bus, which go as it arrives. */
+    approach(line, color, stops = []) {
+      if (!line) {
+        approach?.remove();
+        approach = null;
+      } else if (approach) {
+        approach.setLatLngs(line.map(point));
+      } else {
+        approach = L.polyline(line.map(point), { color, weight: 4, opacity: 0.75 }).addTo(content);
+      }
+      const key = stops.map((stop) => stop.id).join();
+      if (key === approachKey) return;
+      approachKey = key;
+      approachStops.forEach((marker) => marker.remove());
+      approachStops = stops.map((stop) => L.marker(point(stop.location), { icon: L.divIcon({ html: upcomingStop(stop.name), className: '', iconSize: [0, 0] }), interactive: false }).addTo(content));
     },
     vehicles(list) {
       while (buses.length > list.length) buses.pop().marker.remove();
@@ -316,7 +347,6 @@ const leafletMap = (() => {
       $('map').classList.toggle('many-stops', path.segments.reduce((sum, s) => sum + s.stopIDs.length, 0) > 12);
       for (const segment of path.segments) {
         const line = (segment.line ?? segment.points).map(point);
-        if (segment.wholeLine) L.polyline(segment.wholeLine.map(point), { color: lineColor(segment.op, segment.route), weight: 3, opacity: 0.35 }).addTo(content);
         L.polyline(line, { color: '#fff', weight: 8, opacity: 0.95 }).addTo(content);
         const isWalk = segment.mode === 'walk';
         const stroke = L.polyline(line, {
@@ -363,7 +393,7 @@ const leafletMap = (() => {
 
 /** The same map on Google's tiles, used while the server has allowance left. */
 const googleMap = (() => {
-  let map, Marker, buses = [], items = [];
+  let map, Marker, buses = [], approach = null, approachStops = [], approachKey = '', items = [];
   const padding = () => {
     const wide = window.matchMedia('(min-width: 820px)').matches;
     return { top: wide ? 30 : 50, left: wide ? 440 : 24, right: wide ? 30 : 24, bottom: wide ? 30 : sheet.targetHeight() + 32 };
@@ -431,6 +461,27 @@ const googleMap = (() => {
       }
       items = [];
       buses = [];
+      approach = null;
+      approachStops = [];
+      approachKey = '';
+    },
+    /** The road and stops still ahead of the coming bus, which go as it arrives. */
+    approach(path, color, stops = []) {
+      if (!path) {
+        approach?.setMap(null);
+        items = items.filter((item) => item !== approach);
+        approach = null;
+      } else if (approach) {
+        approach.setPath(path);
+      } else {
+        approach = line(path, { strokeColor: color, strokeWeight: 4, strokeOpacity: 0.75, zIndex: 1 });
+      }
+      const key = stops.map((stop) => stop.id).join();
+      if (key === approachKey) return;
+      approachKey = key;
+      approachStops.forEach((marker) => { marker.map = null; });
+      items = items.filter((item) => !approachStops.includes(item));
+      approachStops = stops.map((stop) => mark(stop.location, upcomingStop(stop.name), { zIndex: 60 }));
     },
     vehicles(list) {
       while (buses.length > list.length) {
@@ -450,10 +501,18 @@ const googleMap = (() => {
     fit(points, maxZoom = 16) {
       if (!points.length) return;
       if (points.length === 1) return this.follow(points[0], maxZoom);
-      const bounds = new google.maps.LatLngBounds();
-      points.forEach((location) => bounds.extend(location));
-      map.fitBounds(bounds, padding());
-      google.maps.event.addListenerOnce(map, 'idle', () => { if (map.getZoom() > maxZoom) map.setZoom(maxZoom); });
+      // Worked out here, as Google's fitBounds lands the route under a sheet this tall.
+      const { top, bottom, left, right } = padding(), box = $('map');
+      const toX = (lng) => (lng + 180) / 360;
+      const toY = (lat) => 0.5 - Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360)) / (2 * Math.PI);
+      const xs = points.map((p) => toX(p.lng)), ys = points.map((p) => toY(p.lat));
+      const [west, east, north, south] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+      const fits = (pixels, span) => (span ? Math.log2(Math.max(1, pixels) / (256 * span)) : maxZoom);
+      const zoom = Math.max(10, Math.min(maxZoom, Math.floor(Math.min(fits(box.clientWidth - left - right, east - west), fits(box.clientHeight - top - bottom, south - north)))));
+      const world = 256 * 2 ** zoom;
+      const x = (west + east) / 2 + (right - left) / 2 / world, y = (north + south) / 2 + (bottom - top) / 2 / world;
+      const center = { lat: (Math.atan(Math.exp((0.5 - y) * 2 * Math.PI)) * 360) / Math.PI - 90, lng: x * 360 - 180 };
+      map.moveCamera({ center, zoom });
     },
     follow(location, zoom = 16) {
       map.setZoom(Math.max(map.getZoom(), zoom));
@@ -468,7 +527,6 @@ const googleMap = (() => {
       $('map').classList.toggle('many-stops', path.segments.reduce((sum, s) => sum + s.stopIDs.length, 0) > 12);
       for (const segment of path.segments) {
         const color = lineColor(segment.op, segment.route), isWalk = segment.mode === 'walk', road = segment.line ?? segment.points;
-        if (segment.wholeLine) line(segment.wholeLine, { strokeColor: color, strokeWeight: 3, strokeOpacity: 0.35, zIndex: 0 });
         if (isWalk) {
           line(road, {
             strokeOpacity: 0, zIndex: 2,
@@ -929,7 +987,8 @@ function selectedPath() {
 }
 
 const VEHICLE_REFRESH = 30_000;
-let vehicleRide = null, vehicleKey = '', vehicleArrivals = [], vehicleFetched = 0, vehicleFetching = false;
+let shownVehicles = [], gliding = false, lastGlide = 0;
+let vehicleRide = null, vehicleList = [], vehicleKey = '', vehicleArrivals = [], vehicleFetched = 0, vehicleFetching = false;
 
 /** The first bus or minibus ride of the route on screen. */
 function rideOnScreen() {
@@ -941,10 +1000,17 @@ function rideOnScreen() {
 function moveVehicles() {
   if (state.tab !== 'plan') return;
   const ride = rideOnScreen(), route = ride && state.db.routes[ride.routeKey];
-  if (!route) return mapView.vehicles([]);
+  if (!route) {
+    vehicleKey = '';
+    vehicleList = [];
+    shownVehicles = [];
+    mapView.approach(null);
+    return mapView.vehicles([]);
+  }
   const key = `${ride.routeKey}|${ride.op}`;
   if (key !== vehicleKey) {
     vehicleKey = key;
+    vehicleList = [];
     vehicleArrivals = [];
     vehicleFetched = 0;
   }
@@ -954,20 +1020,68 @@ function moveVehicles() {
     routeArrivals(route, ride.op, state.db, state.lang).then((arrivals) => {
       if (key === vehicleKey) vehicleArrivals = arrivals;
     }).catch(() => {}).finally(() => {
+      const isFirst = !vehicleFetched;
       vehicleFetching = false;
       vehicleFetched = Date.now();
       moveVehicles();
+      if (isFirst && vehicleList.length) fitPlanMap();
     });
   }
   const shape = knownShape(route, ride.op);
-  mapView.vehicles(vehiclesOnRoute(vehicleArrivals, vehicleRide, state.db, Date.now()).map((vehicle) => {
+  const previous = vehicleList;
+  vehicleList = vehiclesOnRoute(vehicleArrivals, vehicleRide, state.db, Date.now()).map((vehicle) => {
     // On the real road when that has arrived, facing the way it runs.
     const onRoad = shape && pointOnLine(shape, vehicle.location);
     return onRoad && onRoad.meters < 500 ? { ...vehicle, location: onRoad.location, heading: onRoad.heading } : vehicle;
-  }));
+  });
+  if (previous !== vehicleList) glideVehicles();
+  const coming = vehicleList.find((vehicle) => vehicle.isNext);
+  const ids = route.stops[ride.op], stop = state.db.stops[ids[ride.boardPosition]]?.location;
+  const ahead = coming ? ids.slice(Math.ceil(coming.position), ride.boardPosition).flatMap((id) => {
+    const location = state.db.stops[id]?.location;
+    return location ? [{ id, location, name: name(id) }] : [];
+  }) : [];
+  mapView.approach(coming && stop ? clipLine(shape, coming.location, stop) ?? [coming.location, stop] : null, coming?.color, ahead);
 }
 
-setInterval(moveVehicles, 3000);
+setInterval(moveVehicles, 1000);
+
+const CLOSE_ENOUGH = 0.004; // About 400 m: further than this is a different bus.
+
+/** Keeps each bus sliding toward where it should be, between the once-a-second sums. */
+function glideVehicles() {
+  shownVehicles = vehicleList.map((vehicle) => {
+    const same = shownVehicles.find(({ location }) => Math.hypot(location.lat - vehicle.location.lat, location.lng - vehicle.location.lng) < CLOSE_ENOUGH);
+    return { ...vehicle, location: same?.location ?? vehicle.location };
+  });
+  if (calm.matches) {
+    shownVehicles = vehicleList;
+    return mapView.vehicles(vehicleList);
+  }
+  mapView.vehicles(shownVehicles);
+  if (gliding || !shownVehicles.length) return;
+  gliding = true;
+  requestAnimationFrame(glideFrame);
+}
+
+function glideFrame(now) {
+  if (!vehicleList.length || state.tab !== 'plan') {
+    gliding = false;
+    return;
+  }
+  // The eased share of the way there, so a corrected position slides rather than jumps.
+  const share = 1 - Math.exp(-(now - lastGlide) / 700);
+  lastGlide = now;
+  shownVehicles = shownVehicles.map((vehicle, index) => {
+    const target = vehicleList[index]?.location ?? vehicle.location;
+    return {
+      ...(vehicleList[index] ?? vehicle),
+      location: { lat: vehicle.location.lat + (target.lat - vehicle.location.lat) * share, lng: vehicle.location.lng + (target.lng - vehicle.location.lng) * share },
+    };
+  });
+  mapView.vehicles(shownVehicles);
+  requestAnimationFrame(glideFrame);
+}
 
 const SHORTEST_GOOGLE_WALK = 40;
 
@@ -981,8 +1095,7 @@ function withRoads(path) {
       const first = segment.points[0], last = segment.points.at(-1);
       if (segment.mode === 'walk') return { ...segment, points: knownWalk(first, last) ?? segment.points };
       if (!hasRealLine(segment)) return segment;
-      const whole = knownShape(state.db.routes[segment.routeKey], segment.op);
-      return { ...segment, line: clipLine(whole, first, last), wholeLine: whole };
+      return { ...segment, line: clipLine(knownShape(state.db.routes[segment.routeKey], segment.op), first, last) };
     }),
   };
 }
@@ -2015,6 +2128,7 @@ function drawMap() {
 function fitPlanMap() {
   const path = selectedPath();
   const points = path ? path.segments.flatMap((s) => s.points) : [state.from?.location, state.to?.location].filter(Boolean);
+  if (path) points.push(...vehicleList.map((vehicle) => vehicle.location));
   if (points.length) mapView.fit(points);
 }
 
