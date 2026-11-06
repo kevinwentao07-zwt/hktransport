@@ -25,7 +25,7 @@ def spending(clock=None):
 
 
 def budget(**limits):
-    return ai_proxy.Budget(Path(tempfile.mkdtemp(), 'usage.json'), {'map': (9, 9, 9), 'places': (9, 9, 9), 'walk': (9, 9, 9), 'details': (9, 9, 9), **limits})
+    return ai_proxy.Budget(Path(tempfile.mkdtemp(), 'usage.json'), {'map': (9, 9, 9), 'places': (9, 9, 9), 'walk': (9, 9, 9), 'details': (9, 9, 9), 'suggest': (9, 9, 9), **limits})
 
 
 class BudgetTests(unittest.TestCase):
@@ -218,6 +218,15 @@ class ProxyTests(unittest.TestCase):
         chat = {'task': 'chat', 'message': 'x'}
         self.assertEqual([self.post(chat)[0] for _ in range(3)], [200, 200, 429])  # ¥0.056 each.
         self.assertEqual(self.post(chat, visitor='2.2.2.2')[0], 200)
+
+    def test_suggestions_stop_at_the_limit(self):
+        ai_proxy.budget = budget(suggest=(1, 10, 10))
+        ai_proxy.suggest_places = lambda query, origin, language: [{'name': query}]
+        self.assertEqual(self.post({'query': 'x' * 61}, path='/api/suggest')[0], 400)
+        self.assertEqual(self.post({'query': '朗', 'from': {'lat': 35, 'lng': 139}}, path='/api/suggest')[0], 400)
+        self.assertEqual(self.post({'query': '朗'}, origin=False, path='/api/suggest')[0], 403)
+        self.assertEqual(self.post({'query': '朗'}, path='/api/suggest')[0], 200)
+        self.assertEqual(self.post({'query': '朗'}, path='/api/suggest')[0], 429)
 
     def test_upstream_errors_reveal_nothing(self):
         def fail(system, message):

@@ -267,6 +267,12 @@ test('stop suggestions run from near to far', () => {
   assert.deepEqual(T.matchingSites('  ', index, near), []);
   assert.equal(T.matchingSites('站', index, near, undefined, 1).length, 1);
 });
+test('stops and places mix from near to far, once each', () => {
+  const merged = P.mergeSuggestions([{ name: '旺角站', meters: 300 }, { name: '朗豪坊', meters: 90 }], [{ name: '朗豪坊', meters: 80 }, { name: '遠方' }, { name: '始創中心', meters: 150 }]);
+  assert.deepEqual(merged.map((item) => item.name), ['朗豪坊', '始創中心', '旺角站', '遠方']);
+  assert.equal(merged[0].meters, 80);
+  assert.equal(P.mergeSuggestions([{ name: 'a', meters: 1 }, { name: 'b', meters: 2 }], [], 1).length, 1);
+});
 test('area words', () => {
   assert.equal(P.cleanArea('朗豪坊附近'), '朗豪坊');
   assert.equal(P.cleanArea('附近'), '附近');

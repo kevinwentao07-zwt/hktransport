@@ -30,6 +30,38 @@ export async function googleSearch(query, center, radius, lang, details = false)
   }
 }
 
+const suggested = new Map();
+
+/** Google's suggestions as the rider types. A repeat in the same visit costs nothing. */
+export async function googleSuggest(query, from, lang) {
+  const key = [query, lang].join('|');
+  if (suggested.has(key)) return suggested.get(key);
+  try {
+    const response = await fetch('api/suggest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, lang, from: from ? { lat: from.lat, lng: from.lng } : null }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!response.ok) return [];
+    const { places } = await response.json();
+    suggested.set(key, places);
+    return places;
+  } catch {
+    return [];
+  }
+}
+
+/** Stops and places as one list, nearest first, and anything of unknown distance last. */
+export function mergeSuggestions(stops, places, limit = 8) {
+  const away = (item) => item.meters ?? Infinity;
+  const seen = new Set();
+  return [...stops, ...places].sort((a, b) => away(a) - away(b)).filter((item) => {
+    const name = item.name.replace(/\s/g, '');
+    return !seen.has(name) && seen.add(name);
+  }).slice(0, limit);
+}
+
 const shapes = new Map();
 const shapeKey = (route, op) => (route?.gtfsId ? `${route.gtfsId}-${(route.bound?.[op] ?? 'O')[0]}` : null);
 

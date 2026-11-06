@@ -7,7 +7,7 @@ import { meters,
 import { fetchETA, liveArrivalCache } from './eta.js?v=dev';
 import { toSimplified } from './hans.js?v=dev';
 import { chatMessage, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
-import { HONG_KONG, cleanArea, googleSearch, googleWalk, inHongKong, insideArea, isNearby, knownShape, knownWalk, loadShape, lookupPlace, mergeShops, photonSearch, withinArea } from './places.js?v=dev';
+import { HONG_KONG, cleanArea, googleSearch, googleSuggest, googleWalk, inHongKong, insideArea, isNearby, knownShape, knownWalk, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
 
 // MARK: Storage
 
@@ -1167,6 +1167,47 @@ function stopSuggestions() {
   }))];
 }
 
+let suggestTimer = null, googlePlaces = [];
+
+/** Stops answer at once. Google waits for a pause in the typing, to keep within its allowance. */
+function suggestPlaces() {
+  clearTimeout(suggestTimer);
+  googlePlaces = [];
+  renderSheet();
+  const text = state.destination.trim();
+  getFix();
+  if (!state.google || text.length < 2) return;
+  suggestTimer = setTimeout(async () => {
+    const near = state.fix && inHongKong(state.fix) ? state.fix : null;
+    const found = await googleSuggest(text, near, state.lang);
+    if (text !== state.destination.trim() || state.routeView) return;
+    googlePlaces = found;
+    renderSheet();
+  }, 400);
+}
+
+function placeSuggestions() {
+  const near = state.fix && inHongKong(state.fix) ? state.fix : null;
+  const stops = matchingSites(state.destination, siteIndex(), near, siteText).map(({ site, distance }) => ({ site, name: nameText(site.name, state.lang), meters: distance ?? undefined }));
+  const items = mergeSuggestions(stops, googlePlaces);
+  if (!items.length) return h('div', { class: 'small muted', style: 'padding:6px 4px' }, t('繼續輸入，或按搜尋。', 'Keep typing, or press search.'));
+  return h('div', { class: 'list' }, items.map((item) => h('button', {
+    class: 'item', onmousedown: (event) => event.preventDefault(),
+    onclick: () => {
+      clearTimeout(suggestTimer);
+      if (item.site) return planTo(item.site);
+      state.destination = item.name;
+      syncPlaceInputs();
+      return search();
+    },
+  },
+    h('i', { class: 'dot', style: item.site ? 'color:#fff;background:var(--accent)' : '' }, icon(item.site ? 'bus' : 'pin', 16)),
+    h('span', { class: 'grow', style: 'min-width:0' },
+      h('div', { class: 'ellipsis' }, item.name),
+      h('div', { class: 'tiny muted ellipsis' }, item.site ? t('站點', 'Stop') : item.address ?? '')),
+    item.meters != null && h('span', { class: 'tiny muted' }, distanceText(item.meters)))));
+}
+
 function chooseSite(site) {
   const name = nameText(site.name, state.lang);
   state.stopQuery = name;
@@ -1318,7 +1359,10 @@ function renderPlanTop() {
     clear($('top'), h('div', { class: 'row' },
       h('label', { class: 'search-card single' }, h('span', { class: 'muted' }, icon('search', 18)), h('input', {
         id: 'destination-input', value: state.destination, placeholder: t('搜尋地點或站名', 'Search places or stops'), enterkeyhint: 'search', autocomplete: 'off',
-        oninput: (event) => { state.destination = event.target.value; },
+        oninput: (event) => {
+          state.destination = event.target.value;
+          suggestPlaces();
+        },
         onfocus: () => sheet.snap('full'),
         onkeydown: (event) => { if (event.key === 'Enter') search(); },
       }))));
@@ -1507,7 +1551,7 @@ function planSheet() {
     }
   }
   items.push(state.journeys.map(journeyCard));
-  if (!state.routeView && !state.discovery && state.phase === 'idle') items.push(homeSheet());
+  if (!state.routeView && !state.discovery && state.phase === 'idle') items.push(state.destination.trim() && state.db ? placeSuggestions() : homeSheet());
   return items;
 }
 

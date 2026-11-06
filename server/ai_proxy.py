@@ -170,11 +170,11 @@ spending = Spending(
     DAILY_YUAN_PER_VISITOR, DAILY_YUAN_SITE,
 )
 
-# Free each month: 10,000 map loads, 5,000 searches, 1,000 searches with shop details and 10,000
-# walking routes. These stop well short of all four.
+# Free each month: 10,000 map loads, 5,000 searches, 1,000 searches with shop details, 10,000 walking
+# routes and 10,000 suggestions. These stop well short of all five.
 budget = Budget(
     Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'usage.json',
-    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 9000, 40), 'details': (30, 900, 12)},
+    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 9000, 40), 'details': (30, 900, 12), 'suggest': (300, 9000, 60)},
 )
 
 
@@ -238,6 +238,29 @@ def search_places(query, lat, lng, radius, language, details=False):
         'price': place.get('priceLevel'), 'open': place.get('currentOpeningHours', {}).get('openNow'),
         'phone': place.get('nationalPhoneNumber'),
     } for place in found]
+
+
+def suggest_places(query, origin, language):
+    """Names as the rider types. With a position, Google also says how far each one is."""
+    body = {'input': query, 'languageCode': language, 'regionCode': 'hk', 'includedRegionCodes': ['hk']}
+    if origin:
+        point = {'latitude': origin['lat'], 'longitude': origin['lng']}
+        body.update(origin=point, locationBias={'circle': {'center': point, 'radius': 5000}})
+    request = urllib.request.Request(
+        'https://places.googleapis.com/v1/places:autocomplete',
+        data=json.dumps(body).encode(),
+        headers={
+            'Content-Type': 'application/json', 'X-Goog-Api-Key': places_key(),
+            'X-Goog-FieldMask': 'suggestions.placePrediction.placeId,suggestions.placePrediction.structuredFormat,suggestions.placePrediction.distanceMeters',
+        },
+    )
+    with urllib.request.urlopen(request, timeout=8) as response:
+        found = json.load(response).get('suggestions', [])
+    places = [item['placePrediction'] for item in found if 'placePrediction' in item]
+    return [{
+        'id': place['placeId'], 'name': place['structuredFormat']['mainText']['text'],
+        'address': place['structuredFormat'].get('secondaryText', {}).get('text'), 'meters': place.get('distanceMeters'),
+    } for place in places]
 
 
 def decode_polyline(encoded):
@@ -338,12 +361,28 @@ class Handler(BaseHTTPRequestHandler):
         return body
 
     def do_POST(self):
-        if self.path not in ('/api/ai', '/api/places', '/api/walk'):
+        if self.path not in ('/api/ai', '/api/places', '/api/walk', '/api/suggest'):
             return self.send(404, {'error': 'Not found'})
         body = self.read_json()
         if body is None:
             return None
-        return {'/api/places': self.places, '/api/walk': self.walk}.get(self.path, self.ask)(body)
+        return {'/api/places': self.places, '/api/walk': self.walk, '/api/suggest': self.suggest}.get(self.path, self.ask)(body)
+
+    def suggest(self, body):
+        query, origin = body.get('query'), body.get('from')
+        if not isinstance(query, str) or not 0 < len(query.strip()) <= 60 or (origin is not None and not in_hong_kong(origin)):
+            return self.send(400, {'error': 'Bad request'})
+        if not places_key() or not budget.spend('suggest', self.visitor()):
+            return self.send(429, {'error': 'Limit reached'})
+        language = 'en' if body.get('lang') == 'en' else 'zh-HK'
+        try:
+            self.send(200, {'places': suggest_places(query.strip(), origin, language)})
+        except urllib.error.HTTPError as error:
+            print(f'Suggestions returned {error.code}', file=sys.stderr, flush=True)
+            self.send(502, {'error': 'Unavailable'})
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f'Suggestions failed: {type(error).__name__}', file=sys.stderr, flush=True)
+            self.send(502, {'error': 'Unavailable'})
 
     def walk(self, body):
         start, end = body.get('from'), body.get('to')
