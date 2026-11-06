@@ -640,14 +640,17 @@ const LOOP_CLOSES_WITHIN = 300;
  */
 export function circularTurn(route, op, db) {
   const ids = route.stops[op] ?? [], places = ids.map((id) => db.stops[id]?.location);
-  if (ids.length < 4 || op === 'mtr' || op === 'lightRail' || !places[0] || !places.at(-1)) return null;
-  if (meters(places[0], places.at(-1)) > LOOP_CLOSES_WITHIN) return null;
+  if (ids.length < 3 || op === 'mtr' || !places[0] || !places.at(-1)) return null;
+  const isSigned = /循環|circular/i.test(`${route.dest?.zh} ${route.dest?.en}`);
+  if (!isSigned && (ids.length < 4 || meters(places[0], places.at(-1)) > LOOP_CLOSES_WITHIN)) return null;
   const away = places.map((place) => (place ? meters(places[0], place) : 0));
   const farthest = away.indexOf(Math.max(...away));
   const signed = cleanStopName(route.dest?.zh ?? '').replace(/\s*[(（]循環線[)）]\s*/, '').trim();
-  const named = signed && signed !== cleanStopName(route.orig?.zh ?? '').trim()
-    ? ids.flatMap((id, position) => (position && position < ids.length - 1 && db.stops[id]?.name?.zh?.includes(signed) ? [position] : [])) : [];
-  return named.sort((a, b) => Math.abs(a - farthest) - Math.abs(b - farthest))[0] ?? farthest;
+  // A terminus can share its name with a stop beside the start, which is no turning point.
+  const named = signed ? ids.flatMap((id, position) => (
+    position && position < ids.length - 1 && away[position] >= away[farthest] / 2 && db.stops[id]?.name?.zh?.includes(signed) ? [position] : [])) : [];
+  const turn = named.sort((a, b) => Math.abs(a - farthest) - Math.abs(b - farthest))[0] ?? farthest;
+  return turn > 0 && turn < ids.length - 1 ? turn : null;
 }
 
 function secondsPerStop(route, stops) {

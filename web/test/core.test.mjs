@@ -225,12 +225,17 @@ test('Simplified Chinese', () => {
 });
 test('a circular route turns at the stop it is signed for, or else its farthest', () => {
   const stop = (lat, zh) => ({ location: { lat, lng: 114.10 }, name: { zh } });
-  const stops = { a: stop(22.30, '總站'), b: stop(22.31, '三門仔'), c: stop(22.32, '路口'), d: stop(22.31, '村'), e: stop(22.30, '總站') };
+  const stops = { a: stop(22.30, '總站'), b: stop(22.315, '三門仔'), c: stop(22.32, '路口'), d: stop(22.31, '村'), e: stop(22.30, '總站') };
   const loop = { stops: { kmb: ['a', 'b', 'c', 'd', 'e'] }, orig: { zh: '總站' }, dest: { zh: '總站' } };
   const db = { stops };
   assert.equal(T.circularTurn(loop, 'kmb', db), 2);
   assert.equal(T.circularTurn({ ...loop, dest: { zh: '三門仔(循環線)' } }, 'kmb', db), 1);
   assert.equal(T.circularTurn({ ...loop, stops: { kmb: ['a', 'b', 'c', 'd'] } }, 'kmb', db), null);
+  // Signed as circular, a route counts even when its two ends are a walk apart.
+  assert.equal(T.circularTurn({ ...loop, stops: { kmb: ['a', 'b', 'c', 'd'] }, dest: { zh: '路口(循環線)' } }, 'kmb', db), 2);
+  // A stop by the start sharing the terminus's name is not where it turns.
+  const near = { ...stops, b: stop(22.3001, '碼頭') };
+  assert.equal(T.circularTurn({ ...loop, dest: { zh: '碼頭' } }, 'kmb', { stops: near }), 2);
 });
 test('buses are found along the whole route from its arrivals', () => {
   const stop = (lat) => ({ location: { lat, lng: 114.10 } });
