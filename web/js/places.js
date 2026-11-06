@@ -76,7 +76,8 @@ export function loadShape(route, op) {
   const shape = { points: null };
   shape.done = fetch(`https://hkbus.github.io/route-waypoints/${key}.json`).then((response) => (response.ok ? response.json() : null)).then((data) => {
     const lines = data?.features?.flatMap((feature) => (feature.geometry?.type === 'LineString' ? [feature.geometry.coordinates] : feature.geometry?.coordinates ?? [])) ?? [];
-    const points = lines.flat().map(([lng, lat]) => ({ lat, lng }));
+    // Some lines have a point every metre or so, far more than a map or a phone needs.
+    const points = lines.flat().map(([lng, lat]) => ({ lat, lng })).filter((point, index, all) => index % 8 === 0 || index === all.length - 1 || all.length < 3000);
     if (points.length > 1) shape.points = points;
   }).catch(() => {});
   shapes.set(key, shape);

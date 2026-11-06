@@ -517,50 +517,99 @@ function pointOnStretch(line, index, location) {
   return { index, location: point, meters: meters(point, location), heading: (Math.atan2(east, north) * 180) / Math.PI };
 }
 
-/** The closest point anywhere on a line. */
-export function pointOnLine(line, location) {
-  let best = null;
-  for (let index = 0; index < line.length - 1; index++) {
-    const here = pointOnStretch(line, index, location);
-    if (!best || here.meters < best.meters) best = here;
+const MOST_METERS_OFF_LINE = 300, EVEN_PROGRESS_METERS = 60;
+
+/**
+ * Finds the best place on the line for every stop at once, always moving forward. Stops are only metres
+ * from the opposite carriageway, so taking each one's nearest or first match would put return stops on
+ * the way out. Near-ties lean toward even progress, for routes drawn along the same road both ways.
+ */
+function alignStops(line, along, stops) {
+  const count = line.length - 1, total = along.at(-1) || 1, cameFrom = [];
+  let previous = new Float64Array(count);
+  stops.forEach(({ location, share }) => {
+    const costs = new Float64Array(count), from = new Int32Array(count);
+    let cheapest = Infinity, cheapestAt = 0;
+    for (let index = 0; index < count; index++) {
+      if (previous[index] < cheapest) {
+        cheapest = previous[index];
+        cheapestAt = index;
+      }
+      const away = Math.min(pointOnStretch(line, index, location).meters, MOST_METERS_OFF_LINE);
+      costs[index] = cheapest + away + EVEN_PROGRESS_METERS * Math.abs(along[index] / total - share);
+      from[index] = cheapestAt;
+    }
+    previous = costs;
+    cameFrom.push(from);
+  });
+  let index = previous.indexOf(Math.min(...previous));
+  const placed = new Array(stops.length);
+  for (let stop = stops.length - 1; stop >= 0; stop--) {
+    placed[stop] = index;
+    index = cameFrom[stop][index];
   }
-  return best;
+  return placed;
 }
 
-const MOST_METERS_OFF_LINE = 300, NEAR_LINE = 60;
-
-/** The first time a line passes a place after `start`, as a route can pass the same place twice. */
-function nextPassing(line, location, start) {
-  let best = null;
-  for (let index = start; index < line.length - 1; index++) {
-    const here = pointOnStretch(line, index, location);
-    if (!best || here.meters < best.meters) best = here;
-    else if (best.meters <= NEAR_LINE && here.meters > best.meters + NEAR_LINE) break;
-  }
-  return best;
+/**
+ * A route's line with every stop placed along it, in order. A route can use a road twice, as circular
+ * and out-and-back routes do, so places are found by progress along the line, never by what is nearest.
+ */
+export function routeTrack(line, stops) {
+  if (!line || line.length < 2) return null;
+  const along = [0];
+  for (let index = 1; index < line.length; index++) along[index] = along[index - 1] + meters(line[index - 1], line[index]);
+  const known = stops.flatMap((location, index) => (validLocation(location) ? [{ location, index, share: index / Math.max(1, stops.length - 1) }] : []));
+  if (known.length < 2) return null;
+  const passes = new Array(stops.length).fill(null);
+  let reached = 0;
+  alignStops(line, along, known).forEach((stretch, order) => {
+    const { location, index } = known[order], pass = pointOnStretch(line, stretch, location);
+    if (pass.meters > MOST_METERS_OFF_LINE) return;
+    // Two stops can share a stretch, and a bus still only goes forward.
+    reached = Math.max(reached, along[stretch] + meters(line[stretch], pass.location));
+    passes[index] = { location: pass.location, at: reached };
+  });
+  return passes.filter(Boolean).length >= 2 ? { line, along, passes } : null;
 }
 
-/** The stretch of a route's real line through its stops in order, or null if they aren't on it. */
-export function clipLine(line, stops) {
-  if (!line || line.length < 2 || stops.length < 2) return null;
-  const passes = [];
-  let index = 0;
-  for (const stop of stops) {
-    const pass = nextPassing(line, stop, index);
-    if (!pass || pass.meters > MOST_METERS_OFF_LINE) return null;
-    passes.push(pass);
-    index = pass.index;
-  }
-  const first = passes[0], last = passes.at(-1);
-  return [first.location, ...line.slice(first.index + 1, last.index + 1), last.location];
+/** How far along the line a fractional stop number is, between the stops that were placed. */
+function distanceAt(track, position) {
+  const { passes } = track;
+  let before = Math.min(Math.floor(position), passes.length - 1), after = before + 1;
+  while (before >= 0 && !passes[before]) before -= 1;
+  while (after < passes.length && !passes[after]) after += 1;
+  if (before < 0) return passes[after].at;
+  if (after >= passes.length) return passes[before].at;
+  return passes[before].at + ((passes[after].at - passes[before].at) * (position - before)) / (after - before);
 }
 
-const MOST_METERS_TO_SNAP = 60;
+function stretchAt(track, distance) {
+  let low = 0, high = track.line.length - 2;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (track.along[middle] <= distance) low = middle;
+    else high = middle - 1;
+  }
+  return low;
+}
 
-/** A stop's place on its route's line, as stops are mapped at the kerb and lines down the road. */
-export function snapToLine(line, location) {
-  const onLine = line && line.length > 1 ? pointOnLine(line, location) : null;
-  return onLine && onLine.meters <= MOST_METERS_TO_SNAP ? onLine.location : location;
+/** Where a fractional stop number is on the road, and which way the road runs there. */
+export function placeOnTrack(track, position) {
+  const distance = distanceAt(track, position), index = stretchAt(track, distance);
+  const a = track.line[index], b = track.line[index + 1], length = track.along[index + 1] - track.along[index];
+  const part = length ? Math.max(0, Math.min(1, (distance - track.along[index]) / length)) : 0;
+  const east = (b.lng - a.lng) * Math.cos((a.lat * Math.PI) / 180), north = b.lat - a.lat;
+  return {
+    location: { lat: a.lat + (b.lat - a.lat) * part, lng: a.lng + (b.lng - a.lng) * part },
+    heading: (Math.atan2(east, north) * 180) / Math.PI,
+  };
+}
+
+/** The road between two fractional stop numbers. */
+export function trackBetween(track, from, to) {
+  const start = stretchAt(track, distanceAt(track, from)), end = stretchAt(track, distanceAt(track, to));
+  return [placeOnTrack(track, from).location, ...track.line.slice(start + 1, end + 1), placeOnTrack(track, to).location];
 }
 
 const SECONDS_PER_STOP = 90;
@@ -621,8 +670,11 @@ export function journeyPath(journey, origin, destination, db) {
       if (!target) continue;
       segment = { mode: 'walk', points: [cursor, target], stopIDs: [] };
     } else {
-      const stops = rideStopIDs(leg, db).filter((id) => validLocation(db.stops[id]?.location));
-      segment = { mode: 'ride', route: leg.route, routeKey: leg.routeKey, op: leg.op, points: stops.map((id) => db.stops[id].location), stopIDs: stops };
+      const ids = rideStopIDs(leg, db), isWhole = ids.length === leg.alightPosition - leg.boardPosition + 1;
+      const onRoute = ids.map((id, index) => [id, isWhole ? leg.boardPosition + index : index ? leg.alightPosition : leg.boardPosition])
+        .filter(([id]) => validLocation(db.stops[id]?.location));
+      const stops = onRoute.map(([id]) => id);
+      segment = { mode: 'ride', route: leg.route, routeKey: leg.routeKey, op: leg.op, points: stops.map((id) => db.stops[id].location), stopIDs: stops, positions: onRoute.map(([, position]) => position) };
     }
     if (!segment.points.length) continue;
     segments.push(segment);

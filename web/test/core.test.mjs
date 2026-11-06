@@ -253,27 +253,25 @@ test('buses are found along the whole route from its arrivals', () => {
   assert.deepEqual(T.vehiclesOnRoute([{ position: 1, times: [] }], ride, db, 0), []);
   assert.deepEqual(T.vehiclesOnRoute(arrivals, { ...ride, routeKey: 'none' }, db, 0), []);
 });
-test('bus lines follow the road between two stops', () => {
-  const road = [{ lat: 22.30, lng: 114.10 }, { lat: 22.31, lng: 114.10 }, { lat: 22.31, lng: 114.11 }, { lat: 22.32, lng: 114.11 }];
-  const clipped = T.clipLine(road, [{ lat: 22.3051, lng: 114.1 }, { lat: 22.315, lng: 114.11 }]);
-  assert.equal(clipped.length, 4);
-  assert.deepEqual(clipped[1], road[1]);
-  assert.deepEqual(clipped[2], road[2]);
-  assert.equal(T.clipLine(road, [{ lat: 22.5, lng: 114.3 }, road[3]]), null);
-  assert.equal(T.clipLine(null, [road[0], road[1]]), null);
-  // A circular route starts and ends at the same stop, and must keep its whole loop.
-  const loop = [...road, { lat: 22.32, lng: 114.09 }, { lat: 22.30, lng: 114.09 }, road[0]];
-  const around = T.clipLine(loop, [road[0], road[2], { lat: 22.32, lng: 114.09 }, road[0]]);
-  assert.ok(around.length >= loop.length - 1);
-  assert.deepEqual(around.at(-1), road[0]);
-  close(clipped[0].lng, 114.10, 0.00001); // Starts on the line, not at the kerb.
-  const kerb = { lat: 22.305, lng: 114.1003 };
-  close(T.snapToLine(road, kerb).lng, 114.10, 0.00001);
-  assert.deepEqual(T.snapToLine(road, { lat: 22.305, lng: 114.2 }), { lat: 22.305, lng: 114.2 }); // Too far to be this road.
-  assert.deepEqual(T.snapToLine(null, kerb), kerb);
-  const on = T.pointOnLine(road, { lat: 22.3101, lng: 114.105 });
-  close(on.location.lat, 22.31, 0.00001);
-  close(on.heading, 90, 0.01); // Heading east along the second stretch.
+test('a route is followed by progress along it, even over the same road twice', () => {
+  const at = (lat, lng) => ({ lat, lng });
+  // Out along a road and back along the same road: a circular route.
+  const line = [at(22.30, 114.10), at(22.31, 114.10), at(22.32, 114.10), at(22.32, 114.101), at(22.31, 114.1001), at(22.30, 114.1001)];
+  const stops = [at(22.30, 114.10), at(22.31, 114.10), at(22.32, 114.10), at(22.31, 114.1001), at(22.30, 114.1001)];
+  const track = T.routeTrack(line, stops);
+  assert.ok(track.passes.every((pass, index) => index === 0 || pass.at > track.passes[index - 1].at));
+  const out = T.placeOnTrack(track, 0.5), back = T.placeOnTrack(track, 3.5);
+  close(out.location.lat, 22.305, 0.0002);
+  close(back.location.lat, 22.305, 0.0002); // The same stretch of road...
+  close(out.heading, 0, 1);
+  close(Math.abs(back.heading), 180, 1); // ...but running the other way.
+  const road = T.trackBetween(track, 1, 3);
+  close(road[0].lat, 22.31, 0.0001);
+  assert.ok(road.length > 3, 'keeps the bends between the stops');
+  assert.equal(T.routeTrack(null, stops), null);
+  assert.equal(T.routeTrack(line, [at(23, 115), at(23.1, 115)]), null);
+  const gap = T.routeTrack(line, [stops[0], null, stops[2]]);
+  close(T.placeOnTrack(gap, 1).location.lat, 22.31, 0.0002); // A stop it can't place is passed through.
 });
 test('stop suggestions run from near to far', () => {
   const site = (zh, en, lat, visits = 1) => ({ name: { zh, en }, platforms: [{ lat, lng: 114.17 }], visits: Array(visits) });
