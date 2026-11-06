@@ -5,7 +5,7 @@ import { meters,
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache } from './eta.js?v=dev';
-import { chatMessage, deepSeek, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseWish, searchMessage } from './ai.js?v=dev';
+import { chatMessage, deepSeek, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
 import { HONG_KONG, cleanArea, googleSearch, googleWalk, inHongKong, insideArea, isNearby, knownWalk, lookupPlace, mergeShops, photonSearch, withinArea } from './places.js?v=dev';
 
 // MARK: Storage
@@ -649,14 +649,16 @@ async function runPlan(request) {
         intent = await ai.intent(searchMessage(normalizedOrigin(state.origin), state.destination.trim(), state.preference));
       }
     } catch (error) {
-      state.aiNotice = t('AI 暫時未能使用，已改用基本解析：', 'AI unavailable, used basic parsing: ') + error.message;
+      state.aiNotice = state.google
+        ? t('AI 額度已用完或暫時未能使用，已直接用 Google 搜尋。', 'AI is used up or unavailable, so this went straight to Google.')
+        : t('AI 暫時未能使用，已改用基本解析：', 'AI unavailable, used basic parsing: ') + error.message;
     }
   }
   if (stale()) return;
   if (!intent && request.kind === 'chat') {
     // Without the AI, an answer to "where?" can only be a place.
     if (request.asked) return discover({ ...request.wish, area: request.text, question: null }, run);
-    const wish = parseWish(request.text);
+    const wish = parseWish(request.text) ?? (state.google && !request.current ? parseSearch(request.text) : null);
     if (wish) return startDiscovery(wish, run);
     intent = parseFollowUp(request.text, request.current);
   }
@@ -756,14 +758,19 @@ async function discover(wish, run = ++planRun) {
     setPhase('failed', message);
     renderBottomStatus();
   };
+  const notice = state.aiNotice;
   resetPlan();
+  state.aiNotice = notice;
   state.discovery = { stage: 'finding', wish };
   setPhase('findingPlaces');
   renderBottomStatus();
 
   const place = cleanArea(wish.area ?? '附近');
   let searchArea;
-  if (isNearby(place)) {
+  if (wish.anywhere) {
+    const near = state.fix && inHongKong(state.fix);
+    searchArea = { name: t('全港', 'Hong Kong'), center: near ? state.fix : HONG_KONG, radius: 50_000, isAroundRider: true };
+  } else if (isNearby(place)) {
     const fix = await getFix();
     if (stale()) return;
     if (!fix) return giveUp(t('未能取得你的位置，請選擇一個地區或輸入範圍。', "Couldn't get your location. Pick a district or type an area."));
@@ -777,7 +784,7 @@ async function discover(wish, run = ++planRun) {
   }
 
   // Each Google search brings a full page for the price of one.
-  let suggestions = [];
+  let suggestions = [], isRanked = false;
   if (state.google) {
     // Chinese and English names reach different shops, and Google's own order is by relevance.
     const search = (query) => googleSearch(searchArea.isAroundRider ? query : `${query} ${searchArea.name}`, searchArea.center, searchArea.radius, state.lang, true);
@@ -787,8 +794,12 @@ async function discover(wish, run = ++planRun) {
       .map((place) => ({ place, isGoogle: true }));
     // With everything Google knows in hand, the AI puts them in order and says why.
     try {
-      if (suggestions.length) suggestions = (await client()?.rank(wish, suggestions, state.lang)) ?? suggestions;
-    } catch { /* Keep the order they came in. */ }
+      const ranked = suggestions.length ? await client()?.rank(wish, suggestions, state.lang) : null;
+      if (ranked) {
+        suggestions = ranked;
+        isRanked = true;
+      }
+    } catch { /* Keep Google's order. */ }
     if (stale()) return;
   }
   if (!suggestions.length) {
@@ -802,7 +813,7 @@ async function discover(wish, run = ++planRun) {
     suggestions = [...found.values()].sort((a, b) => a.meters - b.meters).slice(0, MOST_SHOPS).map((place) => ({ place }));
     if (!suggestions.length) return giveUp(t(`${searchArea.name}找不到${wish.want}，請換一個範圍。`, `Couldn't find ${wish.want} around ${searchArea.name}. Try another area.`));
   }
-  state.discovery = { stage: 'choosing', wish, areaName: searchArea.name, suggestions };
+  state.discovery = { stage: 'choosing', wish, areaName: searchArea.name, suggestions, isRanked };
   remember('App', `Showed ${wish.want} around ${searchArea.name}: ${suggestions.map(({ place }) => place.name).join(', ')}`);
   stagger();
   setPhase('idle');
@@ -1271,12 +1282,13 @@ function shopLinks(place) {
   return links.length > 0 && h('div', { class: 'shop-links tiny' }, links);
 }
 
-function suggestionList({ wish, areaName, suggestions }) {
+function suggestionList({ wish, areaName, suggestions, isRanked }) {
   return [
-    h('div', { class: 'row' }, h('span', { class: 'title grow' }, t(`${areaName}的${wish.want}`, `${wish.want} around ${areaName}`)),
+    h('div', { class: 'row' }, h('span', { class: 'title grow' }, wish.anywhere ? t(`「${wish.want}」的結果`, `Results for "${wish.want}"`) : t(`${areaName}的${wish.want}`, `${wish.want} around ${areaName}`)),
       h('button', { class: 'link', onclick: () => { state.discovery = { stage: 'asking', wish: { ...wish, area: null, question: null, options: [] } }; renderSheet(); drawMap(); renderBottomStatus(); } }, t('換範圍', 'Change area'))),
     h('div', { class: 'tiny muted' }, suggestions.some((suggestion) => suggestion.isGoogle)
-      ? t('AI 按 Google 地圖資料排序。出發前請確認仍在營業。', 'Ranked by AI from Google Maps. Check it is open before you go.')
+      ? (isRanked ? t('AI 按 Google 地圖資料排序。出發前請確認仍在營業。', 'Ranked by AI from Google Maps. Check it is open before you go.')
+        : t('資料及排序來自 Google 地圖。出發前請確認仍在營業。', 'Details and order from Google Maps. Check it is open before you go.'))
       : t('地點來自地圖搜尋，沒有菜單資料，未必有售，出發前請先確認。', 'Places come from a map search, which has no menus. Check before you go.')),
     suggestions.map((suggestion, index) => h('div', {
       class: 'card tap', role: 'button', tabindex: 0, onclick: () => choosePlace(suggestion),
