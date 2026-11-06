@@ -55,7 +55,7 @@ export function parseWish(text) {
   if (!prefix) return null;
   const want = strip(working.slice(prefix.length));
   if (!want) return null;
-  return { want, searchTerms: [want], area: null, areaOptions: [] };
+  return { want, searchTerms: [want], area: null, extra: null, question: null, options: [] };
 }
 
 export function searchMessage(origin, destination, preference) {
@@ -84,23 +84,32 @@ Rules:
   walk less, otherwise fastest.
 - Never suggest routes, times or fares.`;
 
+const DISCOVER_RULES = `{"kind": "discover", "want": string, "searchTerms": [string], "area": string or null, "extra": string or null, "question": string or null, "options": [string]}
+- want is a short phrase in Traditional Chinese with typos fixed, e.g. 我想吃螺狮粉 -> 螺螄粉.
+- searchTerms are up to four map search terms, most specific first: the item itself, then short shop
+  types in Chinese and English that would sell it, e.g. ["螺螄粉", "米線", "mixian", "noodles"].
+- area is one district or landmark the rider named, without words such as 附近, e.g. 朗豪坊附近 -> 朗豪坊.
+  Use "附近" if they mean near them, otherwise null. With no area, the search covers the rider's own district.
+- extra is any other wish, e.g. 要平啲, otherwise null.
+- You decide whether to ask the rider anything. Most requests need no question: if a useful search is
+  already possible, set question to null and options to [], and the search runs at once.
+- Never ask where to look just because no area was given. 我想吃螺螄粉 needs no question.
+- Ask only when the answer would really change what to search for, and ask whatever matters most. It need
+  not be about the area. For example, 我想食嘢 could ask what kind of food, and 想買禮物 who it is for.
+- question is one short, natural question in Traditional Chinese as used in Hong Kong.
+- options are two to four short answers the rider can tap, written as the rider would say them.`;
+
 export const CHAT_PROMPT = `${INTENT_PROMPT}
 
 The rider may instead want to find a kind of place, such as food, a shop or something to do, without
 naming one place to go to. Then reply with this JSON object instead:
-{"kind": "discover", "want": string, "searchTerms": [string], "area": string or null, "areaOptions": [string]}
-- want is a short phrase in Traditional Chinese with typos fixed, e.g. 我想吃螺狮粉 -> 螺螄粉.
-- searchTerms are up to four map search terms, most specific first: the item itself, then short shop
-  types in Chinese and English that would sell it, e.g. ["螺螄粉", "米線", "mixian", "noodles"].
-- area is the district or landmark the rider named, "附近" if they said nearby, otherwise null.
-- areaOptions are three or four Hong Kong districts where this kind of place is easy to find.
+${DISCOVER_RULES}
 - Going to a named place is still a trip, e.g. 去時代廣場 or 去理大.`;
 
-export const AREA_PROMPT = `A rider in Hong Kong is narrowing down where to look for a place. Reply with one JSON object and nothing else:
-{"area": string, "extra": string or null}
-- area is one district or landmark a map can find, in Traditional Chinese, without words such as 附近,
-  e.g. 朗豪坊附近 -> 朗豪坊. Use "附近" when the rider means near them.
-- extra is any other wish in the message, e.g. 要平啲, otherwise null.`;
+export const REFINE_PROMPT = `A rider in Hong Kong is looking for a kind of place. You asked them something and they answered.
+Reply with one JSON object and nothing else, keeping what is already known unless the rider changed it:
+${DISCOVER_RULES}
+- The message says when you may not ask anything more. Then question must be null.`;
 
 export const suggestPrompt = (lang) => `You recommend real shops in Hong Kong from your own knowledge.
 Reply with one JSON object and nothing else:
@@ -123,7 +132,7 @@ ${lang === 'zh' ? 'Write in Traditional Chinese as used in Hong Kong.' : 'Write 
 
 /** Every job the AI does. The server is sent a name from this list, never a prompt. */
 export const PROMPTS = {
-  intent: INTENT_PROMPT, chat: CHAT_PROMPT, area: AREA_PROMPT,
+  intent: INTENT_PROMPT, chat: CHAT_PROMPT, refine: REFINE_PROMPT,
   suggest_zh: suggestPrompt('zh'), suggest_en: suggestPrompt('en'),
   explain_zh: explainPrompt('zh'), explain_en: explainPrompt('en'),
 };
@@ -150,10 +159,28 @@ export function decodeChat(reply) {
     const trip = decodeIntent(reply);
     return trip ? { trip } : null;
   }
-  const want = clean(object.want);
+  const wish = decodeWish(object);
+  return wish ? { wish } : null;
+}
+
+function decodeWish(object) {
+  const want = clean(object?.want);
   if (!want) return null;
-  const terms = strings(object.searchTerms);
-  return { wish: { want, searchTerms: terms.length ? terms.slice(0, 4) : [want], area: clean(object.area) || null, areaOptions: strings(object.areaOptions) } };
+  const terms = strings(object.searchTerms), question = clean(object.question) || null;
+  return {
+    want, searchTerms: terms.length ? terms.slice(0, 4) : [want], area: clean(object.area) || null,
+    extra: clean(object.extra) || null, question, options: question ? strings(object.options).slice(0, 4) : [],
+  };
+}
+
+/** What the AI is told about a search it is narrowing down. */
+export function refineMessage(wish, answer, mayAsk) {
+  const lines = [`Looking for: ${wish.want}`, `Search terms: ${wish.searchTerms.join(', ')}`];
+  if (wish.area) lines.push(`Area: ${wish.area}`);
+  if (wish.extra) lines.push(`Also wants: ${wish.extra}`);
+  lines.push(`You asked: ${wish.question ?? 'Where should I look?'}`, `Rider says: ${answer}`);
+  if (!mayAsk) lines.push('You may not ask anything more.');
+  return lines.join('\n');
 }
 
 export function decodePlaces(reply) {
@@ -215,10 +242,10 @@ function assistant(complete) {
       if (!reply) throw new Error('DeepSeek reply was not valid trip JSON');
       return reply;
     },
-    async area(text, want) {
-      const object = jsonObject(await complete('area', `Looking for: ${want}\nRider says: ${text}`));
-      if (!clean(object?.area)) throw new Error('DeepSeek reply was not valid area JSON');
-      return { area: clean(object.area), extra: clean(object.extra) || null };
+    async refine(wish, answer, mayAsk) {
+      const refined = decodeWish(jsonObject(await complete('refine', refineMessage(wish, answer, mayAsk))));
+      if (!refined) throw new Error('DeepSeek reply was not valid search JSON');
+      return refined;
     },
     async suggest(want, area, extra, lang) {
       const lines = [`Looking for: ${want}`, `Area: ${area}`];
