@@ -751,7 +751,9 @@ function startDiscovery(wish, run) {
 async function shopsFromWeb(wish, area) {
   const ai = client();
   if (!ai || !state.web) return [];
-  const pages = await webSearch(`${wish.query} ${area.name} 香港 推薦`);
+  // Written as a sentence: the search engine loses the thread with words split by spaces.
+  const words = wish.query.replace(/\s+/g, '');
+  const pages = await webSearch(state.lang === 'zh' ? `${area.name}${words}推薦` : `best ${wish.query} in ${area.name} Hong Kong`);
   if (!pages?.length) return [];
   let picks;
   try {
@@ -760,7 +762,7 @@ async function shopsFromWeb(wish, area) {
     return [];
   }
   const found = await Promise.all(picks.map(async (pick) => {
-    const places = await googleSearch(`${pick.name} ${area.name}`, area.center, area.radius, state.lang);
+    const places = await googleSearch(`${pick.name} ${area.name}`, area.center, area.radius, state.lang, true);
     const place = withinArea(places ?? [], area).find((item) => isSameShop(item.name, pick.name));
     return place && { place, reason: pick.reason, isFromWeb: true };
   }));
@@ -806,10 +808,15 @@ async function discover(wish, run = ++planRun) {
     suggestions = await shopsFromWeb(wish, searchArea);
     if (stale()) return;
     if (!suggestions.length) {
-      const found = await googleSearch(`${wish.query} ${searchArea.name}`, searchArea.center, searchArea.radius, state.lang);
+      const found = await googleSearch(`${wish.query} ${searchArea.name}`, searchArea.center, searchArea.radius, state.lang, true);
       if (stale()) return;
       suggestions = withinArea(found ?? [], searchArea).slice(0, 5).map((place) => ({ place, isGoogle: true }));
     }
+    // With everything Google knows in hand, the AI puts them in order and says why.
+    try {
+      if (suggestions.length) suggestions = (await client()?.rank(wish, suggestions, state.lang)) ?? suggestions;
+    } catch { /* Keep the order they came in. */ }
+    if (stale()) return;
   }
   if (!suggestions.length) {
     const found = new Map();
@@ -1269,21 +1276,48 @@ function legDetail(leg) {
   return element;
 }
 
+const PRICE_SIGNS = { PRICE_LEVEL_INEXPENSIVE: '$', PRICE_LEVEL_MODERATE: '$$', PRICE_LEVEL_EXPENSIVE: '$$$', PRICE_LEVEL_VERY_EXPENSIVE: '$$$$' };
+
+function shopFacts(place) {
+  const facts = [
+    place.rating && h('b', { class: 'stars' }, `★ ${place.rating.toFixed(1)}`),
+    place.rating && place.ratings && `(${place.ratings.toLocaleString()})`,
+    PRICE_SIGNS[place.price],
+    place.kind,
+    place.open === true && h('span', { class: 'open' }, t('營業中', 'Open')),
+    place.open === false && h('span', { class: 'shut' }, t('休息中', 'Closed')),
+  ].filter(Boolean);
+  return facts.length > 0 && h('div', { class: 'shop-facts tiny' }, facts);
+}
+
+function shopLinks(place) {
+  const links = [
+    place.phone && h('a', { href: `tel:${place.phone.replace(/\s/g, '')}`, onclick: (event) => event.stopPropagation() }, place.phone),
+    place.mapsUrl && h('a', { href: place.mapsUrl, target: '_blank', rel: 'noopener', onclick: (event) => event.stopPropagation() }, t('在 Google 地圖查看', 'View on Google Maps')),
+  ].filter(Boolean);
+  return links.length > 0 && h('div', { class: 'shop-links tiny' }, links);
+}
+
 function suggestionList({ wish, areaName, suggestions }) {
   return [
     h('div', { class: 'row' }, h('span', { class: 'title grow' }, t(`${areaName}的${wish.want}`, `${wish.want} around ${areaName}`)),
       h('button', { class: 'link', onclick: () => { state.discovery = { stage: 'asking', wish: { ...wish, area: null, question: null, options: [] } }; renderSheet(); drawMap(); renderBottomStatus(); } }, t('換範圍', 'Change area'))),
     h('div', { class: 'tiny muted' }, suggestions[0]?.isFromWeb
-      ? t('從網上推介找到，地址來自 Google 地圖。出發前請確認仍在營業。', 'Found in recommendations online, with addresses from Google Maps. Check it is open before you go.')
+      ? t('AI 按網上推介及 Google 地圖資料排序。出發前請確認仍在營業。', 'Ranked by AI from recommendations online and Google Maps. Check it is open before you go.')
       : suggestions[0]?.isGoogle
-      ? t('資料來自 Google 地圖，出發前請確認仍在營業。', 'From Google Maps. Check it is open before you go.')
+      ? t('AI 按 Google 地圖資料排序。出發前請確認仍在營業。', 'Ranked by AI from Google Maps. Check it is open before you go.')
       : t('地點來自地圖搜尋，沒有菜單資料，未必有售，出發前請先確認。', 'Places come from a map search, which has no menus. Check before you go.')),
-    suggestions.map((suggestion, index) => h('button', { class: 'card tap', onclick: () => choosePlace(suggestion) },
+    suggestions.map((suggestion, index) => h('div', {
+      class: 'card tap', role: 'button', tabindex: 0, onclick: () => choosePlace(suggestion),
+      onkeydown: (event) => { if (event.key === 'Enter') choosePlace(suggestion); },
+    },
       h('div', { class: 'row', style: 'align-items:flex-start' }, h('span', { class: 'num' }, index + 1),
         h('div', { class: 'grow' },
           h('div', { class: 'row' }, h('span', { class: 'bold ellipsis grow' }, suggestion.place.name), h('span', { class: 'tiny muted' }, distanceText(suggestion.place.meters))),
+          shopFacts(suggestion.place),
           suggestion.place.address && h('div', { class: 'tiny muted ellipsis' }, suggestion.place.address),
-          suggestion.reason && h('div', { class: 'small ai', style: 'margin-top:3px' }, suggestion.reason))))),
+          suggestion.reason && h('div', { class: 'small ai', style: 'margin-top:3px' }, suggestion.reason),
+          shopLinks(suggestion.place))))),
   ];
 }
 

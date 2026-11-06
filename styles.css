@@ -180,6 +180,12 @@ svg.icon.solid { fill: currentColor; }
 .pin { width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50%; border: 2.5px solid #fff; display: grid; place-items: center; color: #fff; font-size: 13px; font-weight: 700; box-shadow: 0 2px 6px rgba(0, 0, 0, .35); }
 .pin.start { width: 18px; height: 18px; margin: -9px 0 0 -9px; background: #fff; border: 5px solid #007aff; }
 .pin.end { width: 22px; height: 22px; margin: -11px 0 0 -11px; border-radius: 7px; }
+.shop-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 7px; margin-top: 2px; color: var(--muted, inherit); }
+.shop-facts .stars { color: #ff9f0a; font-weight: 700; }
+.shop-facts .open { color: #30d158; font-weight: 600; }
+.shop-facts .shut { color: #ff453a; font-weight: 600; }
+.shop-links { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 5px; }
+.shop-links a { color: #2f7bf6; text-decoration: none; }
 .g-anchor { width: 0; height: 0; }
 .g-stop { display: flex; align-items: center; gap: 4px; width: max-content; transform: translate(-6px, -50%); }
 .g-dot { width: 12px; height: 12px; flex: none; box-sizing: border-box; border-radius: 50%; background: #fff; border: 2.5px solid; }

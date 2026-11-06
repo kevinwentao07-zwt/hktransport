@@ -11,18 +11,18 @@ export const HONG_KONG = { lat: 22.35, lng: 114.15 };
 const googleAnswers = new Map();
 
 /** Places from Google, or null at the limit. A repeat in the same visit costs nothing. */
-export async function googleSearch(query, center, radius, lang) {
-  const key = [query, center.lat, center.lng, radius, lang].join('|');
+export async function googleSearch(query, center, radius, lang, details = false) {
+  const key = [query, center.lat, center.lng, radius, lang, details].join('|');
   if (googleAnswers.has(key)) return googleAnswers.get(key);
   try {
     const response = await fetch('api/places', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, lat: center.lat, lng: center.lng, radius, lang }),
+      body: JSON.stringify({ query, lat: center.lat, lng: center.lng, radius, lang, details }),
       signal: AbortSignal.timeout(16_000),
     });
     if (!response.ok) return null;
-    const places = (await response.json()).places.filter((place) => inHongKong(place.location));
+    const places = (await response.json()).places.filter((place) => inHongKong(place.location) && place.status !== 'CLOSED_PERMANENTLY');
     googleAnswers.set(key, places);
     return places;
   } catch {
