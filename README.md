@@ -4,7 +4,8 @@ The phone version: a static page, published at <https://kevinwentao07-zwt.github
 
 Every data source allows direct browser calls, so only the AI goes through a server:
 route data from hkbus.app, arrivals from the operators, maps from Google on your own server and OpenFreeMap elsewhere, place
-search from the Government, shops from OpenStreetMap's Photon, and AI from DeepSeek.
+search from Google on your own server and otherwise the Government and OpenStreetMap's Photon, and AI
+from DeepSeek, which only picks out what to search for.
 On your own server, `server/ai_proxy.py` holds the DeepSeek key and every visitor can use the AI.
 Without it, as on GitHub Pages, riders add their own key in Settings.
 
@@ -13,7 +14,7 @@ Without it, as on GitHub Pages, riders add their own key in Settings.
 | `js/transit.js` | Route data, RAPTOR search, journeys and navigation maths |
 | `js/eta.js` | Per-operator arrival fetchers and parsers |
 | `js/ai.js` | DeepSeek client, prompts and the rule parser used without a key |
-| `js/places.js` | Place search and checking AI recommendations on the map |
+| `js/places.js` | Place search: Google through the server, then the free sources |
 | `js/planner.worker.js` | Runs the route search off the main thread |
 | `js/app.js` | The page |
 

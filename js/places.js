@@ -104,44 +104,10 @@ export async function lookupPlace(text) {
   return first ? { name: first.name, location: first.location } : null;
 }
 
-const normalized = (name) => (name ?? '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-
-/** A map search returns its closest guess, so a result only counts when it is the shop the AI named. */
-export function isSamePlace(found, place) {
-  const a = normalized(found);
-  if (!a) return false;
-  return [place.name, place.nameEn].filter(Boolean).map(normalized).some((name) => name
-    // A prefix, not any substring: 老友記 (Lo Yau Kee) is not Yau Kee.
-    && (a.includes(name) || name.startsWith(a) || (a.length >= 6 && name.length >= 6 && a.slice(0, 6) === name.slice(0, 6))));
-}
-
 export function withinArea(places, area) {
   return places.map((place) => ({ ...place, meters: meters(area.center, place.location) }))
     .filter((place) => place.meters <= area.radius && (!area.district || !place.district || place.district.includes(area.district)))
     .sort((a, b) => a.meters - b.meters);
-}
-
-/** Looks up each shop the AI named, keeping the nearest branch that is really there. */
-export async function verifyPlaces(named, area, search = photonSearch, limit = 5) {
-  const locate = async (place) => {
-    for (const term of [place.name, place.nameEn].filter(Boolean)) {
-      const found = withinArea(await search(term, area.center, area.radius), area).find((item) => isSamePlace(item.name, place));
-      if (found) return { place: found, reason: place.reason, isNamedByAI: true };
-    }
-    return null;
-  };
-  // A few at a time: one by one took 40 seconds, and all at once would strain a free service.
-  const seen = new Set(), verified = [];
-  for (let start = 0; start < named.length && verified.length < limit; start += 4) {
-    for (const item of await Promise.all(named.slice(start, start + 4).map(locate))) {
-      const id = item && `${item.place.location.lat},${item.place.location.lng}`;
-      if (item && !seen.has(id) && verified.length < limit) {
-        seen.add(id);
-        verified.push(item);
-      }
-    }
-  }
-  return verified;
 }
 
 const NEARBY = ['附近', '呢度', '呢頭', '這裡', '這裏', '这里', '我身邊', '就近', 'nearby', 'near me', 'around here'];
