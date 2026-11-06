@@ -727,6 +727,17 @@ export function exactSite(query, index) {
   return busiest(index.filter((s) => normalizePlace(s.name.zh) === wanted || normalizePlace(s.name.en) === wanted));
 }
 
+/** Stops whose name contains the text, nearest first, or the busiest first with no position. */
+export function matchingSites(query, index, from, text = (site) => `${site.name.zh} ${site.name.en}`.toLowerCase(), limit = 8) {
+  const wanted = query.trim().toLowerCase();
+  if (!wanted) return [];
+  const found = index.filter((site) => text(site).includes(wanted)).map((site) => ({
+    site, distance: from ? Math.min(...site.platforms.map((p) => meters(from, p))) : null,
+  }));
+  found.sort((a, b) => (from ? a.distance - b.distance : b.site.visits.length - a.site.visits.length));
+  return found.slice(0, limit);
+}
+
 export function partialSite(query, index) {
   const wanted = query.trim().toLowerCase();
   if (wanted.length < 2) return null;

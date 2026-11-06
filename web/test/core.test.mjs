@@ -257,6 +257,16 @@ test('bus lines follow the road between two stops', () => {
   close(on.location.lat, 22.31, 0.00001);
   close(on.heading, 90, 0.01); // Heading east along the second stretch.
 });
+test('stop suggestions run from near to far', () => {
+  const site = (zh, en, lat, visits = 1) => ({ name: { zh, en }, platforms: [{ lat, lng: 114.17 }], visits: Array(visits) });
+  const index = [site('旺角站', 'Mong Kok Station', 22.32, 3), site('旺角東站', 'Mong Kok East', 22.33, 9), site('中環', 'Central', 22.28)];
+  const near = { lat: 22.331, lng: 114.17 };
+  assert.deepEqual(T.matchingSites('旺角', index, near).map((m) => m.site.name.zh), ['旺角東站', '旺角站']);
+  assert.ok(T.matchingSites('mong', index, near)[0].distance < 200);
+  assert.deepEqual(T.matchingSites('旺角', index, null).map((m) => m.site.name.zh), ['旺角東站', '旺角站']);
+  assert.deepEqual(T.matchingSites('  ', index, near), []);
+  assert.equal(T.matchingSites('站', index, near, undefined, 1).length, 1);
+});
 test('area words', () => {
   assert.equal(P.cleanArea('朗豪坊附近'), '朗豪坊');
   assert.equal(P.cleanArea('附近'), '附近');

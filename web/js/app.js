@@ -1,6 +1,6 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
 import { meters,
-  OP_COLORS, OP_LABELS, MODES, buildStopIndex, clipLine, estimatedVehicle, exactSite, instruction, journeyID, journeyPath, lineColor, lineName,
+  OP_COLORS, OP_LABELS, MODES, buildStopIndex, clipLine, estimatedVehicle, exactSite, instruction, journeyID, journeyPath, lineColor, lineName, matchingSites,
   nameText, normalizeDB, partialSite, pointOnLine, primaryMode, progressAt, retime, rides, score, searchRoutes, siteHasMode, stopName, stopsNear,
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
@@ -1141,15 +1141,56 @@ function syncPlaceInputs() {
   if ($('destination-input')) $('destination-input').value = state.destination;
 }
 
-async function searchStops(aroundMe = false) {
+const siteTexts = new Map();
+
+/** Everything a stop can be typed as, including Simplified. */
+function siteText(site) {
+  if (!siteTexts.has(site)) siteTexts.set(site, `${site.name.zh} ${toSimplified(site.name.zh)} ${site.name.en}`.toLowerCase());
+  return siteTexts.get(site);
+}
+
+/** Instant matches while typing, nearest first. */
+function stopSuggestions() {
+  const near = state.fix && inHongKong(state.fix) ? state.fix : null;
+  const matches = matchingSites(state.stopQuery, siteIndex(), near, siteText);
+  if (!matches.length) return [h('div', { class: 'small muted', style: 'padding:6px 4px' }, t('沒有符合的站點，按搜尋可以找地點。', 'No stops match. Search to look for a place.'))];
+  return [h('div', { class: 'list' }, matches.map(({ site, distance }) => {
+    const mode = primaryMode(site);
+    const routes = [...new Set(site.visits.map((visit) => state.db.routes[visit.routeKey]?.route).filter(Boolean))];
+    const shown = routes.slice(0, 5).join(' · ') + (routes.length > 5 ? ' …' : '');
+    return h('button', { class: 'item', onclick: () => chooseSite(site) },
+      h('i', { class: 'dot', style: `color:#fff;background:${{ mtr: OP_COLORS.mtr, lightRail: OP_COLORS.lightRail, minibus: OP_COLORS.gmb, bus: OP_COLORS.kmb }[mode]}` }, icon(mode === 'mtr' || mode === 'lightRail' ? 'pin' : 'bus', 16)),
+      h('span', { class: 'grow', style: 'min-width:0' },
+        h('div', { class: 'ellipsis' }, nameText(site.name, state.lang)),
+        h('div', { class: 'tiny muted ellipsis' }, shown)),
+      distance != null && h('span', { class: 'tiny muted' }, distanceText(distance)));
+  }))];
+}
+
+function chooseSite(site) {
+  const name = nameText(site.name, state.lang);
+  state.stopQuery = name;
+  const input = $('stop-input');
+  if (input) {
+    input.value = name;
+    input.blur();
+  }
+  searchStops(false, { name, location: site.location });
+}
+
+async function searchStops(aroundMe = false, chosen = null) {
   if (!state.db) return;
   const run = ++stopRun, text = state.stopQuery.trim(), index = siteIndex();
+  state.stopSuggesting = false;
   state.stopError = null;
   state.stopOpen = null;
   let place = null;
   state.stopBusy = true;
   renderSheet();
-  if (aroundMe) {
+  if (chosen) {
+    history.add('stops', text);
+    place = chosen;
+  } else if (aroundMe) {
     place = await here();
     if (!place) state.stopError = t('未能取得你的位置，請允許定位。', "Couldn't get your location. Allow Location access.");
   } else if (text) {
@@ -1538,7 +1579,13 @@ function renderStopsTop() {
       h('span', { class: 'muted' }, icon('search', 19)),
       h('input', {
         id: 'stop-input', value: state.stopQuery, placeholder: t('站名或地點，例如：旺角、朗豪坊', 'Stop or place, e.g. Mong Kok'), enterkeyhint: 'search', autocomplete: 'off',
-        oninput: (event) => { state.stopQuery = event.target.value; },
+        oninput: (event) => {
+          state.stopQuery = event.target.value;
+          state.stopSuggesting = !!state.stopQuery.trim();
+          getFix();
+          renderSheet();
+        },
+        onfocus: () => sheet.snap('full'),
         onkeydown: (event) => { if (event.key === 'Enter') { event.target.blur(); searchStops(); } },
       }),
       h('button', { class: 'icon-button on', 'aria-label': t('查看我附近的站點', 'Show stops around me'), onclick: () => searchStops(true) }, icon('locate', 20))),
@@ -1583,6 +1630,7 @@ function stopCard(stop, isNearest) {
 }
 
 function stopsSheet() {
+  if (state.stopSuggesting) return stopSuggestions();
   if (!state.db) return h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('正在載入站點資料…', 'Loading stops…'));
   const stops = visibleStops();
   return [
