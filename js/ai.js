@@ -139,7 +139,7 @@ export const pickPrompt = (lang) => `You read web search results about places in
 Reply with one JSON object and nothing else:
 {"places": [{"name": string, "reason": string}]}
 - Use only the text given. Every shop must be named in it, and never add one from your own knowledge.
-- Pick up to four shops that best match what the rider wants and are in or near the area, best first.
+- Pick up to eight shops that best match what the rider wants and are in or near the area, best first.
 - name is the shop's own name as a map would know it, without the branch. Skip articles' titles, areas and websites.
 - reason is one short sentence on why it fits, based only on the text. No invented ratings, prices or hours.
 - If the text names no suitable shop, reply {"places": []}.
@@ -211,7 +211,7 @@ export function decodePicks(reply) {
   return places.flatMap((place) => {
     const name = clean(place?.name);
     return name ? [{ name, reason: clean(place.reason) || null }] : [];
-  }).slice(0, 4);
+  }).slice(0, 8);
 }
 
 /** What the AI reads from the web, kept inside one request. */
