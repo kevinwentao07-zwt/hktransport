@@ -19,6 +19,11 @@ os.environ.update(DEEPSEEK_API_KEY=SECRET, GOOGLE_MAP_KEY='map-key', GOOGLE_PLAC
 import ai_proxy  # noqa: E402
 
 
+def spending(clock=None):
+    path = Path(tempfile.mkdtemp(), 'spending.json')
+    return ai_proxy.Spending(path, 0.1, 1, clock=clock) if clock else ai_proxy.Spending(path, 0.1, 1)
+
+
 def budget(**limits):
     return ai_proxy.Budget(Path(tempfile.mkdtemp(), 'usage.json'), {'map': (9, 9, 9), 'places': (9, 9, 9), 'walk': (9, 9, 9), 'details': (9, 9, 9), **limits})
 
@@ -64,12 +69,38 @@ class SpendingTests(unittest.TestCase):
 
     def test_resets_at_midnight_in_beijing(self):
         now = [86400.0 * 100 + 15 * 3600]  # 23:00 in Beijing.
-        spending = ai_proxy.Spending(0.1, clock=lambda: now[0])
-        spending.add('a', 0.1)
-        self.assertFalse(spending.allows('a'))
-        self.assertTrue(spending.allows('b'))
+        meter = spending(clock=lambda: now[0])
+        meter.allows('a')
+        meter.add('a', 0.1)
+        self.assertFalse(meter.allows('a'))
+        self.assertTrue(meter.allows('b'))
         now[0] += 2 * 3600
-        self.assertTrue(spending.allows('a'))
+        self.assertTrue(meter.allows('a'))
+
+    def test_the_day_is_shared_evenly_once_many_people_use_it(self):
+        meter = spending()
+        for index in range(20):
+            meter.add(f'v{index}', 0.04)
+        self.assertAlmostEqual(meter.share('new'), 1 / 21)
+        self.assertTrue(meter.allows('v0'))
+        meter.add('v0', 0.02)
+        self.assertFalse(meter.allows('v0'))  # 0.06 is past a twentieth of 1 yuan.
+        self.assertTrue(meter.allows('new'))
+
+    def test_nobody_gets_more_than_the_most_anyone_may_use(self):
+        self.assertEqual(spending().share('only'), 0.1)
+
+    def test_the_site_total_survives_a_restart(self):
+        path = Path(tempfile.mkdtemp(), 'spending.json')
+        now = lambda: 86400.0 * 100
+        first = ai_proxy.Spending(path, 0.1, 1, clock=now)
+        first.add('a', 1)
+        self.assertFalse(ai_proxy.Spending(path, 0.1, 1, clock=now).allows('someone-else'))
+
+    def test_stops_when_the_total_cannot_be_trusted(self):
+        path = Path(tempfile.mkdtemp(), 'spending.json')
+        path.write_text('not json')
+        self.assertFalse(ai_proxy.Spending(path, 0.1, 1).allows('a'))
 
 
 class LimiterTests(unittest.TestCase):
@@ -96,7 +127,7 @@ class ProxyTests(unittest.TestCase):
 
     def setUp(self):
         ai_proxy.limiter = ai_proxy.Limiter(100, 100, 100)
-        ai_proxy.spending = ai_proxy.Spending(0.1)
+        ai_proxy.spending = spending()
         self.calls = []
         ai_proxy.ask_deepseek = lambda system, message: self.calls.append((system, message)) or ('answer', {})
 

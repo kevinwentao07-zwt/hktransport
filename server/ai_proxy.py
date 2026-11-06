@@ -101,7 +101,7 @@ class Budget:
 
 # deepseek-flash, in yuan per million tokens. Peak prices, so the real charge is never higher.
 PRICE_CACHED, PRICE_INPUT, PRICE_OUTPUT = 0.04, 2, 8
-DAILY_YUAN_PER_VISITOR = 0.1
+DAILY_YUAN_PER_VISITOR, DAILY_YUAN_SITE = 0.1, 1
 
 
 def cost_of(usage):
@@ -112,30 +112,51 @@ def cost_of(usage):
 
 
 class Spending:
-    """What each visitor has spent today, Beijing time. Kept in memory, as addresses aren't stored."""
+    """A day's DeepSeek money, Beijing time, split evenly among whoever uses it.
 
-    def __init__(self, limit, clock=time.time):
-        self.limit, self.clock = limit, clock
+    The site's total is kept on disk so a restart can't reset it. What each visitor spent stays in
+    memory, as addresses are never stored. Unsure means no.
+    """
+
+    def __init__(self, path, per_visitor, site, clock=time.time):
+        self.path, self.per_visitor, self.site, self.clock = Path(path), per_visitor, site, clock
         self.lock = threading.Lock()
-        self.day, self.spent = None, {}
+        self.spent, self.broken = {}, False
+        try:
+            saved = json.loads(self.path.read_text())
+            self.day, self.total = saved['day'], float(saved['total'])
+        except FileNotFoundError:
+            self.day, self.total = None, 0.0
+        except (OSError, ValueError, KeyError, TypeError):
+            self.day, self.total, self.broken = None, 0.0, True
 
-    def today(self):
+    def roll_over(self):
         day = int((self.clock() + 8 * 3600) // 86400)
         if day != self.day:
-            self.day, self.spent = day, {}
-        return self.spent
+            self.day, self.total, self.spent = day, 0.0, {}
+
+    def share(self, visitor):
+        """One visitor's part of the day: an even split, but never above the most anyone may use."""
+        return min(self.per_visitor, self.site / len({*self.spent, visitor}))
 
     def allows(self, visitor):
         with self.lock:
-            return self.today().get(visitor, 0) < self.limit
+            self.roll_over()
+            return not self.broken and self.total < self.site and self.spent.get(visitor, 0) < self.share(visitor)
 
     def add(self, visitor, yuan):
         with self.lock:
-            spent = self.today()
-            spent[visitor] = spent.get(visitor, 0) + yuan
+            self.roll_over()
+            self.spent[visitor] = self.spent.get(visitor, 0) + yuan
+            self.total += yuan
+            try:
+                scratch = self.path.with_suffix('.tmp')
+                scratch.write_text(json.dumps({'day': self.day, 'total': self.total}))
+                os.replace(scratch, self.path)
+            except OSError:
+                self.broken = True
 
 
-spending = Spending(DAILY_YUAN_PER_VISITOR)
 limiter = Limiter(
     per_minute=int(os.environ.get('AI_PER_MINUTE', '12')),
     per_day=int(os.environ.get('AI_PER_DAY', '100')),
@@ -143,6 +164,11 @@ limiter = Limiter(
 )
 in_flight = threading.BoundedSemaphore(int(os.environ.get('AI_CONCURRENT', '16')))
 
+
+spending = Spending(
+    Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'spending.json',
+    DAILY_YUAN_PER_VISITOR, DAILY_YUAN_SITE,
+)
 
 # Free each month: 10,000 map loads, 5,000 searches, 1,000 searches with shop details and 10,000
 # walking routes. These stop well short of all four.
