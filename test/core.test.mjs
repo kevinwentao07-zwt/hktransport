@@ -222,21 +222,21 @@ test('AI requests keep thinking off, send no coordinates and report failures', a
   await assert.rejects(A.deepSeek('x').intent('y'), /bad key/);
 });
 
-test('the AI narrows a search with what it already knows', async () => {
-  const sent = [];
-  globalThis.fetch = async (url, options) => {
-    sent.push(JSON.parse(options.body));
-    return { ok: true, status: 200, json: async () => ({ reply: '{"want":"拉麵","searchTerms":["拉麵"],"area":"旺角","extra":"要平啲","question":null,"options":[]}' }) };
-  };
-  const wish = { want: '美食', searchTerms: ['美食'], area: '旺角', extra: null, question: '想食咩？' };
-  const refined = await A.sharedAI().refine(wish, '拉麵，要平啲', false);
-  assert.equal(sent[0].task, 'refine');
-  assert.match(sent[0].message, /Area: 旺角/);
-  assert.match(sent[0].message, /You asked: 想食咩？/);
-  assert.match(sent[0].message, /may not ask anything more/);
-  assert.equal(refined.want, '拉麵');
-  assert.equal(refined.extra, '要平啲');
-  assert.doesNotMatch(A.refineMessage(wish, 'x', true), /may not ask/);
+test('the AI sees the conversation and what is on screen', () => {
+  assert.equal(A.chatMessage('去中環'), '去中環');
+  const message = A.chatMessage('平啲嘅', null, {
+    talk: ['Rider: 旺角拉麵', 'App: Showed 拉麵 around 旺角: 一生懸麵'],
+    search: { want: '拉麵', query: '拉麵', area: '旺角', extra: null, shops: ['一生懸麵', '樸一拉麵'] },
+  });
+  assert.match(message, /Conversation so far\nRider: 旺角拉麵/);
+  assert.match(message, /Area: 旺角/);
+  assert.match(message, /2\. 樸一拉麵/);
+  assert.match(message, /Rider says: 平啲嘅$/);
+  const trip = { origin: null, destination: '中環', preference: 'fastest' };
+  assert.match(A.chatMessage('少行路', trip), /Start: current location\nDestination: 中環/);
+  const last = A.chatMessage('拉麵', null, { question: '想食咩？', mayAsk: false });
+  assert.match(last, /You just asked: 想食咩？/);
+  assert.match(last, /may not ask anything more/);
 });
 
 test('the shared AI sends a task name and the text, never a prompt or a key', async () => {

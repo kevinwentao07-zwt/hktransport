@@ -50,7 +50,7 @@ const state = {
   discovery: null,
   stopQuery: '', stopPlace: null, stops: [], stopMode: 'all', stopRadius: 500, stopBusy: false, stopError: null, stopOpen: null,
   routeQuery: '', routeKey: null, saved: store.get('saved', []),
-  routeView: false, nav: null, fix: null, speechLang: store.get('speechLang', 'zh-HK'), listening: false,
+  talk: [], routeView: false, nav: null, fix: null, speechLang: store.get('speechLang', 'zh-HK'), listening: false,
 };
 const t = (zh, en) => (state.lang === 'zh' ? zh : en);
 const name = (id) => stopName(id, state.db, state.lang);
@@ -610,7 +610,7 @@ function closeTrip() {
   planRun++;
   stopNavigation();
   resetPlan();
-  Object.assign(state, { origin: '', destination: '', discovery: null, lastChat: null, routeView: false, phase: 'idle' });
+  Object.assign(state, { origin: '', destination: '', discovery: null, lastChat: null, talk: [], routeView: false, phase: 'idle' });
   stagger();
   renderTab();
   slideView('back');
@@ -642,9 +642,9 @@ async function runPlan(request) {
   } else if (ai) {
     try {
       if (request.kind === 'chat') {
-        const reply = await ai.chat(chatMessage(request.text, request.current));
+        const reply = await ai.chat(chatMessage(request.text, request.current, request.context));
         if (stale()) return;
-        if (reply.wish) return startDiscovery(reply.wish, run);
+        if (reply.wish) return startDiscovery({ ...reply.wish, asked: request.asked, question: request.context.mayAsk ? reply.wish.question : null }, run);
         intent = reply.trip;
       } else {
         intent = await ai.intent(searchMessage(normalizedOrigin(state.origin), state.destination.trim(), state.preference));
@@ -655,6 +655,8 @@ async function runPlan(request) {
   }
   if (stale()) return;
   if (!intent && request.kind === 'chat') {
+    // Without the AI, an answer to "where?" can only be a place.
+    if (request.asked) return discover({ ...request.wish, area: request.text, question: null }, run);
     const wish = parseWish(request.text);
     if (wish) return startDiscovery(wish, run);
     intent = parseFollowUp(request.text, request.current);
@@ -676,7 +678,8 @@ async function runPlan(request) {
   const start = intent.origin ? await resolvePlace(intent.origin) : await here();
   if (stale()) return;
   if (!start) return setPhase('failed', intent.origin ? t(`找不到起點「${intent.origin}」。`, `Couldn't find the start "${intent.origin}".`) : noLocation);
-  let end = request.place;
+  // A shop on screen is already known, so it needs no search.
+  let end = request.place ?? request.shops?.find((shop) => shop.name === intent.destination);
   if (!end) end = isCurrentLocation(intent.destination) ? await here() : await resolvePlace(intent.destination);
   if (stale()) return;
   if (!end) return setPhase('failed', t(`找不到目的地「${intent.destination}」。`, `Couldn't find "${intent.destination}".`));
@@ -735,32 +738,14 @@ function summary(journeys) {
 
 // MARK: Finding places
 
-const MOST_QUESTIONS = 2;
 
 /** The AI decides whether it needs to ask anything. If not, the search starts at once. */
 function startDiscovery(wish, run) {
   if (!wish.question) return discover(wish, run);
+  remember('App', `Asked: ${wish.question}`);
   state.discovery = { stage: 'asking', wish };
   setPhase('idle');
   renderBottomStatus();
-}
-
-async function answerQuestion(answer) {
-  const { wish } = state.discovery, ai = client(), run = ++planRun, stale = () => run !== planRun;
-  const asked = (wish.asked ?? 0) + 1;
-  if (!ai) return discover({ ...wish, area: answer, question: null }, run);
-  resetPlan();
-  state.discovery = { stage: 'finding', wish };
-  setPhase('understanding');
-  renderBottomStatus();
-  let next;
-  try {
-    next = await ai.refine(wish, answer, asked < MOST_QUESTIONS);
-  } catch {
-    next = { ...wish, area: answer, question: null };
-  }
-  if (stale()) return;
-  startDiscovery({ ...next, asked, question: asked < MOST_QUESTIONS ? next.question : null }, run);
 }
 
 async function shopsFromWeb(wish, area) {
@@ -838,6 +823,7 @@ async function discover(wish, run = ++planRun) {
     if (!suggestions.length) return giveUp(t(`${searchArea.name}找不到${wish.want}，請換一個範圍。`, `Couldn't find ${wish.want} around ${searchArea.name}. Try another area.`));
   }
   state.discovery = { stage: 'choosing', wish, areaName: searchArea.name, suggestions };
+  remember('App', `Showed ${wish.want} around ${searchArea.name}: ${suggestions.map(({ place }) => place.name).join(', ')}`);
   stagger();
   setPhase('idle');
   renderBottomStatus();
@@ -999,10 +985,38 @@ function search() {
   if (origin) history.add('origin', origin);
   if (!isCurrentLocation(state.destination)) history.add('destination', state.destination);
   state.discovery = null;
+  state.talk = [];
   renderBottomStatus();
   document.activeElement?.blur();
   showRouteView();
   runPlan({ kind: 'search' });
+}
+
+const MOST_QUESTIONS = 2;
+
+const remember = (who, text) => { state.talk = [...state.talk, `${who}: ${text.slice(0, 200)}`].slice(-6); };
+
+/** What is on screen, so the AI can tell a follow-up from a new subject. */
+function chatContext() {
+  const { stage, wish, areaName, suggestions } = state.discovery ?? {}, asking = stage === 'asking';
+  const asked = asking ? (wish.asked ?? 0) + 1 : 0;
+  return {
+    talk: state.talk,
+    search: wish ? { ...wish, area: areaName ?? wish.area, shops: suggestions?.map(({ place }) => place.name) } : null,
+    question: asking ? wish.question ?? t(`想找${wish.want}，要在哪裡找？`, `Where should I look for ${wish.want}?`) : null,
+    mayAsk: asked < MOST_QUESTIONS,
+  };
+}
+
+function askAI(text) {
+  const { stage, wish, suggestions } = state.discovery ?? {}, context = chatContext(), current = currentTrip();
+  remember('Rider', text);
+  state.discovery = null;
+  renderBottomStatus();
+  runPlan({
+    kind: 'chat', text, current, context, wish, asked: stage === 'asking' ? (wish.asked ?? 0) + 1 : 0,
+    shops: suggestions?.map(({ place }) => place),
+  });
 }
 
 function sendChat() {
@@ -1017,11 +1031,7 @@ function sendChat() {
   }
   state.lastChat = text;
   renderChatHistory(false);
-  if (state.discovery?.stage === 'asking') return void answerQuestion(text);
-  const current = currentTrip();
-  state.discovery = null;
-  renderBottomStatus();
-  runPlan({ kind: 'chat', text, current });
+  askAI(text);
 }
 
 function swapEnds() {
@@ -1351,7 +1361,7 @@ function renderBottomStatus() {
     area = h('div', { class: 'area' },
       h('div', { class: 'row' }, icon('spark', 17), h('span', { class: 'bold grow' }, question),
         h('button', { 'aria-label': t('取消', 'Cancel'), class: 'muted', onclick: () => { state.discovery = null; renderBottomStatus(); renderChatControls(); renderSheet(); } }, icon('close', 17))),
-      options.length > 0 && h('div', { class: 'choices' }, options.map((option) => h('button', { onclick: () => answerQuestion(option) }, option))),
+      options.length > 0 && h('div', { class: 'choices' }, options.map((option) => h('button', { onclick: () => askAI(option) }, option))),
       h('div', { class: 'tiny muted' }, t('也可以在下方直接輸入', 'Or type your answer below')));
   }
   clear(slot,
