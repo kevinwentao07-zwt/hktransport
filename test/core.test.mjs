@@ -169,8 +169,13 @@ test('wishes', () => {
 });
 test('AI replies', () => {
   assert.deepEqual(A.decodeChat('{"origin":null,"destination":"理大","preference":"fastest"}').trip, { origin: null, destination: '理大', preference: 'fastest' });
-  const wish = A.decodeChat('```json\n{"kind":"discover","want":"螺螄粉","searchTerms":["a","b","c","d","e"],"area":null,"areaOptions":["旺角"]}\n```').wish;
+  const wish = A.decodeChat('```json\n{"kind":"discover","want":"螺螄粉","searchTerms":["a","b","c","d","e"],"area":null,"question":null,"options":["旺角"]}\n```').wish;
   assert.equal(wish.searchTerms.length, 4);
+  assert.equal(wish.question, null);
+  assert.deepEqual(wish.options, [], 'no question, so nothing to tap');
+  const asking = A.decodeChat('{"kind":"discover","want":"美食","question":"想食咩菜？","options":["日本菜","火鍋"]}').wish;
+  assert.equal(asking.question, '想食咩菜？');
+  assert.deepEqual(asking.options, ['日本菜', '火鍋']);
   assert.equal(A.decodeChat('{"kind":"discover","want":" "}'), null);
   assert.deepEqual(A.decodePlaces('{"places":[{"name":"譚仔","nameEn":"TamJai","reason":"r"},{"reason":"x"}]}'), [{ name: '譚仔', nameEn: 'TamJai', reason: 'r' }]);
   assert.throws(() => A.parseCompletion({ choices: [{ finish_reason: 'length', message: { content: '' } }] }, 200), /ran out of tokens/);
@@ -222,6 +227,23 @@ test('AI requests keep thinking off, send no coordinates and report failures', a
   assert.doesNotMatch(JSON.stringify(sent[0].body.messages[1]), /22\.\d|114\.\d/);
   globalThis.fetch = async () => ({ status: 401, json: async () => ({ error: { message: 'bad key' } }) });
   await assert.rejects(A.deepSeek('x').intent('y'), /bad key/);
+});
+
+test('the AI narrows a search with what it already knows', async () => {
+  const sent = [];
+  globalThis.fetch = async (url, options) => {
+    sent.push(JSON.parse(options.body));
+    return { ok: true, status: 200, json: async () => ({ reply: '{"want":"拉麵","searchTerms":["拉麵"],"area":"旺角","extra":"要平啲","question":null,"options":[]}' }) };
+  };
+  const wish = { want: '美食', searchTerms: ['美食'], area: '旺角', extra: null, question: '想食咩？' };
+  const refined = await A.sharedAI().refine(wish, '拉麵，要平啲', false);
+  assert.equal(sent[0].task, 'refine');
+  assert.match(sent[0].message, /Area: 旺角/);
+  assert.match(sent[0].message, /You asked: 想食咩？/);
+  assert.match(sent[0].message, /may not ask anything more/);
+  assert.equal(refined.want, '拉麵');
+  assert.equal(refined.extra, '要平啲');
+  assert.doesNotMatch(A.refineMessage(wish, 'x', true), /may not ask/);
 });
 
 test('the shared AI sends a task name and the text, never a prompt or a key', async () => {

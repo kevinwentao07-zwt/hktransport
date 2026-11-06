@@ -733,17 +733,38 @@ function summary(journeys) {
 
 // MARK: Finding places
 
-async function startDiscovery(wish, run) {
-  if (wish.area) return discover(wish, wish.area, false, run);
+const MOST_QUESTIONS = 2;
+
+/** The AI decides whether it needs to ask anything. If not, the search starts at once. */
+function startDiscovery(wish, run) {
+  if (!wish.question) return discover(wish, run);
   state.discovery = { stage: 'asking', wish };
   setPhase('idle');
   renderBottomStatus();
 }
 
-async function discover(wish, area, isTyped, run = ++planRun) {
+async function answerQuestion(answer) {
+  const { wish } = state.discovery, ai = client(), run = ++planRun, stale = () => run !== planRun;
+  const asked = (wish.asked ?? 0) + 1;
+  if (!ai) return discover({ ...wish, area: answer, question: null }, run);
+  resetPlan();
+  state.discovery = { stage: 'finding', wish };
+  setPhase('understanding');
+  renderBottomStatus();
+  let next;
+  try {
+    next = await ai.refine(wish, answer, asked < MOST_QUESTIONS);
+  } catch {
+    next = { ...wish, area: answer, question: null };
+  }
+  if (stale()) return;
+  startDiscovery({ ...next, asked, question: asked < MOST_QUESTIONS ? next.question : null }, run);
+}
+
+async function discover(wish, run = ++planRun) {
   const ai = client(), stale = () => run !== planRun;
   const giveUp = (message) => {
-    state.discovery = { stage: 'asking', wish };
+    state.discovery = { stage: 'asking', wish: { ...wish, area: null, question: null, options: [] } };
     setPhase('failed', message);
     renderBottomStatus();
   };
@@ -752,11 +773,7 @@ async function discover(wish, area, isTyped, run = ++planRun) {
   setPhase('findingPlaces');
   renderBottomStatus();
 
-  let place = cleanArea(area), extra = null;
-  if (isTyped && ai) {
-    try { ({ area: place, extra } = await ai.area(area, wish.want)); } catch { /* Use the text as typed. */ }
-  }
-  if (stale()) return;
+  const place = cleanArea(wish.area ?? '附近'), { extra } = wish;
   let searchArea;
   if (isNearby(place)) {
     const fix = await getFix();
@@ -933,7 +950,7 @@ function renderChatControls() {
 
 function chatPrompt() {
   if (state.listening) return t('正在聆聽…', 'Listening…');
-  if (state.discovery?.stage === 'asking') return t('輸入更精確的範圍，例如：朗豪坊附近', 'Type a more exact area, e.g. near Langham Place');
+  if (state.discovery?.stage === 'asking') return t('輸入你的回答…', 'Type your answer…');
   return t('告訴 AI，例如：我想吃螺螄粉', 'Ask AI, e.g. I want rice noodles');
 }
 
@@ -963,7 +980,7 @@ function sendChat() {
   }
   state.lastChat = text;
   renderChatHistory(false);
-  if (state.discovery?.stage === 'asking') return void discover(state.discovery.wish, text, true);
+  if (state.discovery?.stage === 'asking') return void answerQuestion(text);
   const current = currentTrip();
   state.discovery = null;
   renderBottomStatus();
@@ -1208,7 +1225,7 @@ function legDetail(leg) {
 function suggestionList({ wish, areaName, suggestions }) {
   return [
     h('div', { class: 'row' }, h('span', { class: 'title grow' }, t(`${areaName}的${wish.want}`, `${wish.want} around ${areaName}`)),
-      h('button', { class: 'link', onclick: () => { state.discovery = { stage: 'asking', wish: { ...wish, area: null } }; renderSheet(); drawMap(); renderBottomStatus(); } }, t('換範圍', 'Change area'))),
+      h('button', { class: 'link', onclick: () => { state.discovery = { stage: 'asking', wish: { ...wish, area: null, question: null, options: [] } }; renderSheet(); drawMap(); renderBottomStatus(); } }, t('換範圍', 'Change area'))),
     h('div', { class: 'tiny muted' }, suggestions[0]?.isGoogle
       ? t('資料來自 Google 地圖，出發前請確認仍在營業。', 'From Google Maps. Check it is open before you go.')
       : suggestions[0]?.isNamedByAI
@@ -1291,14 +1308,14 @@ function renderBottomStatus() {
   const wish = state.discovery?.stage === 'asking' ? state.discovery.wish : null;
   let area = null;
   if (wish) {
-    const options = (wish.areaOptions.length ? wish.areaOptions : ['旺角', '銅鑼灣', '尖沙咀', '中環']).filter((option) => option !== '附近').slice(0, 4);
+    // The AI's own question, or just "where?" when the search couldn't find the rider.
+    const question = wish.question ?? t(`想找${wish.want}，要在哪裡找？`, `Where should I look for ${wish.want}?`);
+    const options = wish.question ? wish.options : [t('附近', 'Nearby'), '旺角', '銅鑼灣', '尖沙咀', '中環'];
     area = h('div', { class: 'area' },
-      h('div', { class: 'row' }, icon('spark', 17), h('span', { class: 'bold grow' }, t(`想找${wish.want}，要在哪裡找？`, `Where should I look for ${wish.want}?`)),
+      h('div', { class: 'row' }, icon('spark', 17), h('span', { class: 'bold grow' }, question),
         h('button', { 'aria-label': t('取消', 'Cancel'), class: 'muted', onclick: () => { state.discovery = null; renderBottomStatus(); renderChatControls(); renderSheet(); } }, icon('close', 17))),
-      h('div', { class: 'choices' },
-        h('button', { onclick: () => discover(wish, '附近', false) }, t('附近（本區）', 'Nearby (this district)')),
-        options.map((option) => h('button', { onclick: () => discover(wish, option, false) }, option))),
-      h('div', { class: 'tiny muted' }, t('或在下方輸入更精確的範圍，例如：朗豪坊附近、要平啲', 'Or type a more exact area below')));
+      options.length > 0 && h('div', { class: 'choices' }, options.map((option) => h('button', { onclick: () => answerQuestion(option) }, option))),
+      h('div', { class: 'tiny muted' }, t('也可以在下方直接輸入', 'Or type your answer below')));
   }
   clear(slot,
     state.explanation && h('div', { class: 'reply' }, icon('spark', 15), h('span', {}, state.explanation)),
