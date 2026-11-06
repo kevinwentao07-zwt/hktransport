@@ -577,7 +577,9 @@ const googleMap = (() => {
       if (!points.length) return;
       if (points.length === 1) return this.follow(points[0], maxZoom);
       // Worked out here, as Google's fitBounds lands the route under a sheet this tall.
-      const { top, bottom, left, right } = padding(), box = $('map');
+      // Labels hang off a snug view's stops and buses, so it keeps clear of the sides.
+      const margin = isSnug ? 56 : 0, { top, bottom, left: leftEdge, right: rightEdge } = padding(), box = $('map');
+      const left = leftEdge + margin, right = rightEdge + margin;
       const toX = (lng) => (lng + 180) / 360;
       const toY = (lat) => 0.5 - Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360)) / (2 * Math.PI);
       const xs = points.map((p) => toX(p.lng)), ys = points.map((p) => toY(p.lat));
@@ -1163,15 +1165,19 @@ function focusRoute(routeKey, op, position = null) {
   fitFocus();
 }
 
-const STOPS_AROUND_FOCUS = 5;
+const MOST_METERS_TO_FRAME_BUS = 3000, METERS_AROUND_STOP = 200;
 
-/** A whole route fills the map; with a stop chosen, the map comes in on it and its buses. */
+/** A whole route fills the map; with a stop chosen, the map comes in on it and the bus on its way. */
 function fitFocus() {
   if (!state.focus) return;
-  const { routeKey, op, position } = state.focus;
-  const stops = state.db.routes[routeKey].stops[op].map((id) => state.db.stops[id]?.location);
-  const near = position == null ? stops : stops.slice(Math.max(0, position - STOPS_AROUND_FOCUS), position + STOPS_AROUND_FOCUS + 1);
-  mapView.fit([...near.filter(Boolean), ...vehicleList.map((vehicle) => vehicle.location)], 16, true);
+  const { routeKey, op, position } = state.focus, ids = state.db.routes[routeKey].stops[op];
+  if (position == null) return mapView.fit(ids.map((id) => state.db.stops[id]?.location).filter(Boolean), 16, true);
+  const stop = state.db.stops[ids[position]]?.location;
+  if (!stop) return;
+  const points = [offset(stop, METERS_AROUND_STOP, -1), offset(stop, METERS_AROUND_STOP, 1)];
+  const coming = vehicleList.find((vehicle) => vehicle.isNext);
+  if (coming && meters(coming.location, stop) <= MOST_METERS_TO_FRAME_BUS) points.push(coming.location);
+  mapView.fit(points, 16.5, true);
 }
 
 function clearFocus() {
