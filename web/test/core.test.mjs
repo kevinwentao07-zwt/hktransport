@@ -223,27 +223,30 @@ test('Simplified Chinese', () => {
   assert.equal(toSimplified('著名'), '著名');
   assert.equal(toSimplified('中環'), '中环');
 });
-test('the next bus is placed by its live arrival', () => {
+test('buses are found along the whole route from its arrivals', () => {
+  const stop = (lat) => ({ location: { lat, lng: 114.10 } });
   const db = {
-    routes: { r: { stops: { kmb: ['a', 'b', 'c', 'd', 'e'] }, journeyMinutes: 8 } },
-    stops: { a: { location: { lat: 22.30, lng: 114.10 } }, b: { location: { lat: 22.31, lng: 114.10 } }, c: { location: { lat: 22.32, lng: 114.10 } }, d: { location: { lat: 22.33, lng: 114.10 } }, e: { location: { lat: 22.34, lng: 114.10 } } },
+    routes: { r: { stops: { kmb: ['a', 'b', 'c', 'd', 'e'] }, journeyMinutes: 8 } }, // 2 minutes a stop.
+    stops: { a: stop(22.30), b: stop(22.31), c: stop(22.32), d: stop(22.33), e: stop(22.34) },
   };
-  const ride = { op: 'kmb', route: '1', routeKey: 'r', boardPosition: 3, liveDeparture: 180_000 };
-  const coming = T.estimatedVehicle(ride, db, 0); // 2 minutes a stop, so 1.5 stops back.
-  close(coming.location.lat, 22.315, 0.00001);
-  assert.equal(coming.minutes, 3);
-  assert.equal(coming.hasLeftTerminus, true);
-  assert.equal(coming.hasPassedStop, false);
-  close(coming.heading, 0, 0.01); // Due north, as the stops run.
-  assert.equal(coming.isMinibus, false);
-  const waiting = T.estimatedVehicle({ ...ride, liveDeparture: 3_600_000 }, db, 0);
-  close(waiting.location.lat, 22.30, 0.00001);
-  assert.equal(waiting.hasLeftTerminus, false);
-  assert.equal(T.estimatedVehicle({ ...ride, liveDeparture: -60_000 }, db, 0).hasPassedStop, true);
-  assert.equal(T.estimatedVehicle({ ...ride, liveDeparture: -600_000 }, db, 0), null);
-  assert.equal(T.estimatedVehicle({ ...ride, liveDeparture: null }, db, 0), null);
-  assert.equal(T.estimatedVehicle({ ...ride, isProjected: true }, db, 0), null);
-  assert.equal(T.estimatedVehicle({ ...ride, op: 'mtr' }, db, 0), null);
+  const ride = { op: 'kmb', route: '1', routeKey: 'r', boardPosition: 3 };
+  const min = 60_000;
+  // One bus reaches c in 1 minute, so it is between b and c. Another reaches e in 1 minute.
+  const arrivals = [
+    { position: 0, times: [9 * min] }, { position: 1, times: [11 * min] }, { position: 2, times: [1 * min] },
+    { position: 3, times: [3 * min] }, { position: 4, times: [1 * min] },
+  ];
+  const vehicles = T.vehiclesOnRoute(arrivals, ride, db, 0);
+  assert.equal(vehicles.length, 2);
+  close(vehicles[0].location.lat, 22.315, 0.00001);
+  assert.equal(vehicles[0].minutes, 3);
+  assert.equal(vehicles[0].isNext, true);
+  close(vehicles[0].heading, 0, 0.01);
+  close(vehicles[1].position, 3.5, 0.00001);
+  assert.equal(vehicles[1].minutes, null); // Already past the rider's stop.
+  assert.equal(vehicles[1].isNext, false);
+  assert.deepEqual(T.vehiclesOnRoute([{ position: 1, times: [] }], ride, db, 0), []);
+  assert.deepEqual(T.vehiclesOnRoute(arrivals, { ...ride, routeKey: 'none' }, db, 0), []);
 });
 test('bus lines follow the road between two stops', () => {
   const road = [{ lat: 22.30, lng: 114.10 }, { lat: 22.31, lng: 114.10 }, { lat: 22.31, lng: 114.11 }, { lat: 22.32, lng: 114.11 }];

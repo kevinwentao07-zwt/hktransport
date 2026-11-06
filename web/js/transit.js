@@ -535,29 +535,43 @@ export function clipLine(line, from, to) {
 
 const SECONDS_PER_STOP = 90;
 
-/**
- * Where the next bus probably is, working back from its live arrival at the boarding stop. There is
- * no public bus tracking, so this assumes an even pace along the route.
- */
-export function estimatedVehicle(ride, db, now) {
-  if (!ride?.liveDeparture || ride.isProjected || ['mtr', 'lightRail'].includes(ride.op)) return null;
-  const route = db.routes[ride.routeKey], stops = route?.stops[ride.op];
-  if (!stops || stops.length < 2 || ride.boardPosition >= stops.length) return null;
-  const perStop = route.journeyMinutes ? (route.journeyMinutes * 60) / (stops.length - 1) : SECONDS_PER_STOP;
-  const seconds = (ride.liveDeparture - now) / 1000;
-  const position = ride.boardPosition - seconds / perStop;
-  if (position >= stops.length - 1) return null;
-  const clamped = Math.max(0, position), index = Math.floor(clamped);
+/** A fractional stop number as a place on the map. */
+function placeOnStops(stops, position, db) {
+  const index = Math.min(Math.floor(position), stops.length - 2), part = position - index;
   const from = db.stops[stops[index]]?.location, to = db.stops[stops[index + 1]]?.location;
   if (!validLocation(from) || !validLocation(to)) return null;
-  const part = clamped - index;
   const east = (to.lng - from.lng) * Math.cos((from.lat * Math.PI) / 180), north = to.lat - from.lat;
   return {
     location: { lat: from.lat + (to.lat - from.lat) * part, lng: from.lng + (to.lng - from.lng) * part },
-    heading: (Math.atan2(east, north) * 180) / Math.PI, isMinibus: ride.op === 'gmb',
-    minutes: Math.max(0, Math.ceil(seconds / 60)), hasLeftTerminus: position >= 0, hasPassedStop: seconds < 0,
-    color: lineColor(ride.op, ride.route),
+    heading: (Math.atan2(east, north) * 180) / Math.PI,
   };
+}
+
+/**
+ * Every bus on a route, from the arrivals along it. There is no public bus tracking, but if a stop's
+ * next bus comes sooner than the stop before it, a bus is between the two.
+ * `arrivals` is [{position, times}], and `boardPosition` is where the rider gets on.
+ */
+export function vehiclesOnRoute(arrivals, ride, db, now) {
+  const route = db.routes[ride.routeKey], stops = route?.stops[ride.op];
+  if (!stops || stops.length < 2) return [];
+  const perStop = route.journeyMinutes ? (route.journeyMinutes * 60) / (stops.length - 1) : SECONDS_PER_STOP;
+  const nexts = arrivals.flatMap(({ position, times }) => {
+    const next = Math.min(...times.filter((time) => time > now));
+    return Number.isFinite(next) ? [{ position, next }] : [];
+  }).sort((a, b) => a.position - b.position);
+  const vehicles = nexts.flatMap((stop, index) => {
+    const before = nexts[index - 1];
+    if (!before || stop.next >= before.next) return [];
+    const position = Math.max(before.position, stop.position - (stop.next - now) / 1000 / perStop);
+    const place = placeOnStops(stops, position, db);
+    if (!place) return [];
+    const minutes = position <= ride.boardPosition ? Math.ceil(((ride.boardPosition - position) * perStop) / 60) : null;
+    return [{ ...place, position, minutes, color: lineColor(ride.op, ride.route), isMinibus: ride.op === 'gmb', isNext: false }];
+  });
+  const coming = vehicles.filter((vehicle) => vehicle.minutes != null).sort((a, b) => a.minutes - b.minutes)[0];
+  if (coming) coming.isNext = true;
+  return vehicles;
 }
 
 export function rideStopIDs(ride, db) {

@@ -122,6 +122,32 @@ export async function fetchETA(route, seq, db, lang, onlyOperator = null) {
   return mergeETAs(lists);
 }
 
+const MOST_SAMPLED_STOPS = 8;
+
+/**
+ * Arrivals along a whole route, as [{position, times}]. KMB answers for every stop at once; the
+ * others are asked at a handful of stops spread along the route.
+ */
+export async function routeArrivals(route, op, db, lang) {
+  const stops = route.stops[op];
+  if (op === 'kmb') {
+    const response = await fetch(`https://data.etabus.gov.hk/v1/transport/kmb/route-eta/${encodeURIComponent(route.route)}/${route.serviceType}`);
+    const bound = route.bound?.kmb;
+    const byStop = new Map();
+    for (const row of rows((await response.json()).data)) {
+      const time = parseDate(text(row.eta)), position = int(row.seq) - 1;
+      if (time == null || text(row.dir) !== bound) continue;
+      byStop.set(position, [...(byStop.get(position) ?? []), time]);
+    }
+    return [...byStop].map(([position, times]) => ({ position, times }));
+  }
+  const count = Math.min(MOST_SAMPLED_STOPS, stops.length - 1);
+  const positions = [...new Set(Array.from({ length: count }, (_, index) => Math.round((index * (stops.length - 2)) / Math.max(1, count - 1))))];
+  const answers = await Promise.allSettled(positions.map((position) => fetchETA(route, position, db, lang, op)));
+  return answers.flatMap((answer, index) => (answer.status === 'fulfilled'
+    ? [{ position: positions[index], times: answer.value.map((eta) => eta.date).filter((date) => date != null) }] : []));
+}
+
 /** Live departures for a planned ride; shared per plan so a stop is only asked once. */
 export function liveArrivalCache(db, lang) {
   const tasks = new Map();

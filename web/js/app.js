@@ -1,10 +1,10 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
 import { meters,
-  OP_COLORS, OP_LABELS, MODES, buildStopIndex, clipLine, estimatedVehicle, exactSite, instruction, journeyID, journeyPath, lineColor, lineName, matchingSites,
-  nameText, normalizeDB, partialSite, pointOnLine, primaryMode, progressAt, retime, rides, score, searchRoutes, siteHasMode, stopName, stopsNear,
+  OP_COLORS, OP_LABELS, MODES, buildStopIndex, clipLine, exactSite, instruction, journeyID, journeyPath, lineColor, lineName, matchingSites,
+  nameText, normalizeDB, partialSite, pointOnLine, primaryMode, progressAt, retime, rides, score, searchRoutes, siteHasMode, stopName, stopsNear, vehiclesOnRoute,
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
-import { fetchETA, liveArrivalCache } from './eta.js?v=dev';
+import { fetchETA, liveArrivalCache, routeArrivals } from './eta.js?v=dev';
 import { toSimplified } from './hans.js?v=dev';
 import { chatMessage, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
 import { HONG_KONG, cleanArea, googleSearch, googleSuggest, googleWalk, inHongKong, insideArea, isNearby, knownShape, knownWalk, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
@@ -204,28 +204,23 @@ function historyBar(box, pick) {
 
 // MARK: Map
 
-let busElement = null;
-
 /** A small 3D bus built from CSS faces, so it turns with the road. */
 function busMarker() {
   const faces = ['shadow', 'top', 'front', 'back', 'left', 'right'].map((face) => h('i', { class: face }));
-  busElement = h('div', { class: 'bus-marker' }, h('div', { class: 'bus3d' }, faces), h('span', { class: 'bus-note' }));
-  return busElement;
+  return h('div', { class: 'bus-marker' }, h('div', { class: 'bus3d' }, faces), h('span', { class: 'bus-note' }));
 }
 
-function dressBus(vehicle) {
-  if (!busElement) return;
-  const bus = busElement.querySelector('.bus3d');
+function dressBus(element, vehicle) {
+  const bus = element.querySelector('.bus3d'), note = element.querySelector('.bus-note');
+  element.classList.toggle('other', !vehicle.isNext);
   bus.classList.toggle('minibus', vehicle.isMinibus);
   bus.style.setProperty('--body', vehicle.color);
   bus.style.setProperty('--heading', `${vehicle.heading}deg`);
-  busElement.querySelector('.bus-note').textContent = !vehicle.hasLeftTerminus ? t('未開出', 'At terminus')
-    : vehicle.hasPassedStop ? t('已開出', 'Left the stop')
-      : vehicle.minutes ? t(`推算 ${vehicle.minutes} 分鐘到站`, `About ${vehicle.minutes} min away`) : t('即將到站', 'Arriving');
+  note.textContent = !vehicle.isNext ? '' : vehicle.minutes ? t(`推算 ${vehicle.minutes} 分鐘到站`, `About ${vehicle.minutes} min away`) : t('即將到站', 'Arriving');
 }
 
 const leafletMap = (() => {
-  let map, content, base, bus = null, lastFit = '', flying = false;
+  let map, content, base, buses = [], lastFit = '', flying = false;
   const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
   const style = () => `https://tiles.openfreemap.org/styles/${darkMode.matches ? 'dark' : 'liberty'}`;
   /** The maps label everything in both languages; show just the one being read. */
@@ -276,18 +271,19 @@ const leafletMap = (() => {
     resize() { map?.invalidateSize(); },
     clear() {
       content?.clearLayers();
-      bus = null;
+      buses = [];
     },
-    vehicle(vehicle) {
-      if (!vehicle) {
-        bus?.remove();
-        bus = null;
-      } else if (bus) {
-        bus.setLatLng(point(vehicle.location));
-      } else {
-        bus = L.marker(point(vehicle.location), { icon: L.divIcon({ html: busMarker(), className: 'bus-holder', iconSize: [0, 0] }), interactive: false, zIndexOffset: 900 }).addTo(content);
-      }
-      if (vehicle) dressBus(vehicle);
+    vehicles(list) {
+      while (buses.length > list.length) buses.pop().marker.remove();
+      list.forEach((vehicle, index) => {
+        if (!buses[index]) {
+          const element = busMarker();
+          const marker = L.marker(point(vehicle.location), { icon: L.divIcon({ html: element, className: 'bus-holder', iconSize: [0, 0] }), interactive: false, zIndexOffset: vehicle.isNext ? 900 : 800 }).addTo(content);
+          buses[index] = { marker, element };
+        }
+        buses[index].marker.setLatLng(point(vehicle.location));
+        dressBus(buses[index].element, vehicle);
+      });
     },
     fit(points, maxZoom = 16) {
       if (!points.length) return;
@@ -320,6 +316,7 @@ const leafletMap = (() => {
       $('map').classList.toggle('many-stops', path.segments.reduce((sum, s) => sum + s.stopIDs.length, 0) > 12);
       for (const segment of path.segments) {
         const line = (segment.line ?? segment.points).map(point);
+        if (segment.wholeLine) L.polyline(segment.wholeLine.map(point), { color: lineColor(segment.op, segment.route), weight: 3, opacity: 0.35 }).addTo(content);
         L.polyline(line, { color: '#fff', weight: 8, opacity: 0.95 }).addTo(content);
         const isWalk = segment.mode === 'walk';
         const stroke = L.polyline(line, {
@@ -366,7 +363,7 @@ const leafletMap = (() => {
 
 /** The same map on Google's tiles, used while the server has allowance left. */
 const googleMap = (() => {
-  let map, Marker, bus = null, items = [];
+  let map, Marker, buses = [], items = [];
   const padding = () => {
     const wide = window.matchMedia('(min-width: 820px)').matches;
     return { top: wide ? 30 : 50, left: wide ? 440 : 24, right: wide ? 30 : 24, bottom: wide ? 30 : sheet.targetHeight() + 32 };
@@ -433,21 +430,22 @@ const googleMap = (() => {
         else item.map = null;
       }
       items = [];
-      bus = null;
+      buses = [];
     },
-    vehicle(vehicle) {
-      if (!vehicle) {
-        if (bus) {
-          bus.map = null;
-          items = items.filter((item) => item !== bus);
-        }
-        bus = null;
-      } else if (bus) {
-        bus.position = vehicle.location;
-      } else {
-        bus = mark(vehicle.location, busMarker(), { zIndex: 900 });
+    vehicles(list) {
+      while (buses.length > list.length) {
+        const { marker } = buses.pop();
+        marker.map = null;
+        items = items.filter((item) => item !== marker);
       }
-      if (vehicle) dressBus(vehicle);
+      list.forEach((vehicle, index) => {
+        if (!buses[index]) {
+          const element = busMarker();
+          buses[index] = { marker: mark(vehicle.location, element, { zIndex: vehicle.isNext ? 900 : 800 }), element };
+        }
+        buses[index].marker.position = vehicle.location;
+        dressBus(buses[index].element, vehicle);
+      });
     },
     fit(points, maxZoom = 16) {
       if (!points.length) return;
@@ -470,6 +468,7 @@ const googleMap = (() => {
       $('map').classList.toggle('many-stops', path.segments.reduce((sum, s) => sum + s.stopIDs.length, 0) > 12);
       for (const segment of path.segments) {
         const color = lineColor(segment.op, segment.route), isWalk = segment.mode === 'walk', road = segment.line ?? segment.points;
+        if (segment.wholeLine) line(segment.wholeLine, { strokeColor: color, strokeWeight: 3, strokeOpacity: 0.35, zIndex: 0 });
         if (isWalk) {
           line(road, {
             strokeOpacity: 0, zIndex: 2,
@@ -929,18 +928,46 @@ function selectedPath() {
   return journey && state.from && state.to ? journeyPath(journey, state.from.location, state.to.location, state.db) : null;
 }
 
-/** The next bus on the route on screen, if arrivals say when it comes. */
-function nextVehicle() {
+const VEHICLE_REFRESH = 30_000;
+let vehicleRide = null, vehicleKey = '', vehicleArrivals = [], vehicleFetched = 0, vehicleFetching = false;
+
+/** The first bus or minibus ride of the route on screen. */
+function rideOnScreen() {
   const journey = state.journeys.find((j) => journeyID(j) === (state.nav?.id ?? state.expanded));
-  const ride = journey && rides(journey)[0], vehicle = ride && estimatedVehicle(ride, state.db, Date.now());
-  if (!vehicle) return null;
-  // On its real line when that has arrived, facing the way the road runs.
-  const shape = knownShape(state.db.routes[ride.routeKey], ride.op), onRoad = shape && pointOnLine(shape, vehicle.location);
-  return onRoad && onRoad.meters < 500 ? { ...vehicle, location: onRoad.location, heading: onRoad.heading } : vehicle;
+  return journey && rides(journey).find((ride) => !['mtr', 'lightRail'].includes(ride.op));
 }
 
-const moveVehicle = () => { if (state.tab === 'plan') mapView.vehicle(nextVehicle()); };
-setInterval(moveVehicle, 3000);
+/** Asks for arrivals along the whole route, now and then, and places every bus between times. */
+function moveVehicles() {
+  if (state.tab !== 'plan') return;
+  const ride = rideOnScreen(), route = ride && state.db.routes[ride.routeKey];
+  if (!route) return mapView.vehicles([]);
+  const key = `${ride.routeKey}|${ride.op}`;
+  if (key !== vehicleKey) {
+    vehicleKey = key;
+    vehicleArrivals = [];
+    vehicleFetched = 0;
+  }
+  vehicleRide = ride;
+  if (!vehicleFetching && Date.now() - vehicleFetched > VEHICLE_REFRESH) {
+    vehicleFetching = true;
+    routeArrivals(route, ride.op, state.db, state.lang).then((arrivals) => {
+      if (key === vehicleKey) vehicleArrivals = arrivals;
+    }).catch(() => {}).finally(() => {
+      vehicleFetching = false;
+      vehicleFetched = Date.now();
+      moveVehicles();
+    });
+  }
+  const shape = knownShape(route, ride.op);
+  mapView.vehicles(vehiclesOnRoute(vehicleArrivals, vehicleRide, state.db, Date.now()).map((vehicle) => {
+    // On the real road when that has arrived, facing the way it runs.
+    const onRoad = shape && pointOnLine(shape, vehicle.location);
+    return onRoad && onRoad.meters < 500 ? { ...vehicle, location: onRoad.location, heading: onRoad.heading } : vehicle;
+  }));
+}
+
+setInterval(moveVehicles, 3000);
 
 const SHORTEST_GOOGLE_WALK = 40;
 
@@ -954,7 +981,8 @@ function withRoads(path) {
       const first = segment.points[0], last = segment.points.at(-1);
       if (segment.mode === 'walk') return { ...segment, points: knownWalk(first, last) ?? segment.points };
       if (!hasRealLine(segment)) return segment;
-      return { ...segment, line: clipLine(knownShape(state.db.routes[segment.routeKey], segment.op), first, last) };
+      const whole = knownShape(state.db.routes[segment.routeKey], segment.op);
+      return { ...segment, line: clipLine(whole, first, last), wholeLine: whole };
     }),
   };
 }
@@ -1981,15 +2009,12 @@ function drawMap() {
   const choosing = state.discovery?.stage === 'choosing' && !state.journeys.length && state.phase === 'idle';
   if (choosing) mapView.numbered(state.discovery.suggestions, choosePlace);
   mapView.ends(state.from, state.to);
-  moveVehicle();
+  moveVehicles();
 }
 
 function fitPlanMap() {
   const path = selectedPath();
   const points = path ? path.segments.flatMap((s) => s.points) : [state.from?.location, state.to?.location].filter(Boolean);
-  // Keep the bus in view while it is on its way.
-  const vehicle = nextVehicle();
-  if (vehicle?.hasLeftTerminus) points.push(vehicle.location);
   if (points.length) mapView.fit(points);
 }
 

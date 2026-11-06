@@ -224,6 +224,10 @@ svg.icon.solid { fill: currentColor; }
 .bus3d.minibus .back { background: linear-gradient(to bottom, #20242a 0 12%, #ff453a 12% 22%, var(--body) 22% 46%, var(--glass) 46% 84%, #f4f4f0 84%); }
 .bus3d.minibus .left, .bus3d.minibus .right { background: radial-gradient(circle at 20% 10%, #111 0 2.8px, transparent 3.2px), radial-gradient(circle at 80% 10%, #111 0 2.8px, transparent 3.2px), repeating-linear-gradient(90deg, transparent 0 6px, #f4f4f0 6px 7.5px), linear-gradient(to bottom, var(--body) 0 40%, var(--glass) 40% 84%, #f4f4f0 84%); }
 .bus3d.minibus .top { background: #f4f4f0; }
+.bus-marker.other { opacity: .82; }
+.bus-marker.other .bus3d { --l: 32px; --w: 13px; --h: 19px; }
+.bus-marker.other .bus3d.minibus { --l: 24px; --w: 12px; --h: 12px; }
+.bus-note:empty { display: none; }
 .bus-note { position: absolute; left: 0; top: 22px; transform: translateX(-50%); padding: 2px 7px; border-radius: 8px; background: var(--surface); color: var(--ink); box-shadow: 0 1px 4px rgba(0, 0, 0, .3); font-size: 11px; font-weight: 600; white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .bus3d { transition: none; } }
 .leaflet-marker-icon.bus-holder { transition: transform 3s linear; }
