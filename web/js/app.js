@@ -1123,7 +1123,7 @@ function moveVehicles() {
     return location ? [{ id, location: snapToLine(shape, location), name: name(id) }] : [];
   }) : [];
   if (state.tab !== 'plan') return mapView.approach(null);
-  mapView.approach(coming && stop ? clipLine(shape, coming.location, stop) ?? [coming.location, stop] : null, coming?.color, ahead);
+  mapView.approach(coming && stop ? clipLine(shape, [coming.location, stop]) ?? [coming.location, stop] : null, coming?.color, ahead);
 }
 
 let tagKey = '', tagETA = null, tagFetched = 0;
@@ -1268,7 +1268,7 @@ function withRoads(path) {
       if (segment.mode === 'walk') return { ...segment, points: knownWalk(first, last) ?? segment.points };
       if (!hasRealLine(segment)) return segment;
       const shape = knownShape(state.db.routes[segment.routeKey], segment.op);
-      return { ...segment, line: clipLine(shape, first, last), marks: shape ? segment.points.map((point) => snapToLine(shape, point)) : null };
+      return { ...segment, line: clipLine(shape, segment.points), marks: shape ? segment.points.map((point) => snapToLine(shape, point)) : null };
     }),
   };
 }

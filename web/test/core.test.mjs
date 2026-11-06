@@ -255,12 +255,17 @@ test('buses are found along the whole route from its arrivals', () => {
 });
 test('bus lines follow the road between two stops', () => {
   const road = [{ lat: 22.30, lng: 114.10 }, { lat: 22.31, lng: 114.10 }, { lat: 22.31, lng: 114.11 }, { lat: 22.32, lng: 114.11 }];
-  const clipped = T.clipLine(road, { lat: 22.3051, lng: 114.1 }, { lat: 22.315, lng: 114.11 });
+  const clipped = T.clipLine(road, [{ lat: 22.3051, lng: 114.1 }, { lat: 22.315, lng: 114.11 }]);
   assert.equal(clipped.length, 4);
   assert.deepEqual(clipped[1], road[1]);
   assert.deepEqual(clipped[2], road[2]);
-  assert.equal(T.clipLine(road, { lat: 22.5, lng: 114.3 }, road[3]), null);
-  assert.equal(T.clipLine(null, road[0], road[1]), null);
+  assert.equal(T.clipLine(road, [{ lat: 22.5, lng: 114.3 }, road[3]]), null);
+  assert.equal(T.clipLine(null, [road[0], road[1]]), null);
+  // A circular route starts and ends at the same stop, and must keep its whole loop.
+  const loop = [...road, { lat: 22.32, lng: 114.09 }, { lat: 22.30, lng: 114.09 }, road[0]];
+  const around = T.clipLine(loop, [road[0], road[2], { lat: 22.32, lng: 114.09 }, road[0]]);
+  assert.ok(around.length >= loop.length - 1);
+  assert.deepEqual(around.at(-1), road[0]);
   close(clipped[0].lng, 114.10, 0.00001); // Starts on the line, not at the kerb.
   const kerb = { lat: 22.305, lng: 114.1003 };
   close(T.snapToLine(road, kerb).lng, 114.10, 0.00001);

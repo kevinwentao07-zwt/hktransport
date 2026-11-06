@@ -508,29 +508,51 @@ export function trainServes(terminus, ride, db) {
 // MARK: Journey path
 
 /** Every stop the rider passes, from boarding to alighting. */
-/** The closest point on a line, from `start` on, with which way the line runs there. */
-export function pointOnLine(line, location, start = 0) {
-  const scale = Math.cos((location.lat * Math.PI) / 180);
+/** The closest point on one stretch of a line, with which way it runs. */
+function pointOnStretch(line, index, location) {
+  const scale = Math.cos((location.lat * Math.PI) / 180), a = line[index], b = line[index + 1];
+  const east = (b.lng - a.lng) * scale, north = b.lat - a.lat, length = east * east + north * north;
+  const part = length ? Math.max(0, Math.min(1, (((location.lng - a.lng) * scale * east) + ((location.lat - a.lat) * north)) / length)) : 0;
+  const point = { lat: a.lat + (b.lat - a.lat) * part, lng: a.lng + (b.lng - a.lng) * part };
+  return { index, location: point, meters: meters(point, location), heading: (Math.atan2(east, north) * 180) / Math.PI };
+}
+
+/** The closest point anywhere on a line. */
+export function pointOnLine(line, location) {
   let best = null;
-  for (let index = start; index < line.length - 1; index++) {
-    const a = line[index], b = line[index + 1];
-    const east = (b.lng - a.lng) * scale, north = b.lat - a.lat, length = east * east + north * north;
-    const part = length ? Math.max(0, Math.min(1, (((location.lng - a.lng) * scale * east) + ((location.lat - a.lat) * north)) / length)) : 0;
-    const point = { lat: a.lat + (b.lat - a.lat) * part, lng: a.lng + (b.lng - a.lng) * part };
-    const away = meters(point, location);
-    if (!best || away < best.meters) best = { index, location: point, meters: away, heading: (Math.atan2(east, north) * 180) / Math.PI };
+  for (let index = 0; index < line.length - 1; index++) {
+    const here = pointOnStretch(line, index, location);
+    if (!best || here.meters < best.meters) best = here;
   }
   return best;
 }
 
-const MOST_METERS_OFF_LINE = 300;
+const MOST_METERS_OFF_LINE = 300, NEAR_LINE = 60;
 
-/** The stretch of a route's real line between two stops, or null if they aren't on it. */
-export function clipLine(line, from, to) {
-  if (!line || line.length < 2) return null;
-  const start = pointOnLine(line, from), end = start && pointOnLine(line, to, start.index);
-  if (!end || start.meters > MOST_METERS_OFF_LINE || end.meters > MOST_METERS_OFF_LINE) return null;
-  return [start.location, ...line.slice(start.index + 1, end.index + 1), end.location];
+/** The first time a line passes a place after `start`, as a route can pass the same place twice. */
+function nextPassing(line, location, start) {
+  let best = null;
+  for (let index = start; index < line.length - 1; index++) {
+    const here = pointOnStretch(line, index, location);
+    if (!best || here.meters < best.meters) best = here;
+    else if (best.meters <= NEAR_LINE && here.meters > best.meters + NEAR_LINE) break;
+  }
+  return best;
+}
+
+/** The stretch of a route's real line through its stops in order, or null if they aren't on it. */
+export function clipLine(line, stops) {
+  if (!line || line.length < 2 || stops.length < 2) return null;
+  const passes = [];
+  let index = 0;
+  for (const stop of stops) {
+    const pass = nextPassing(line, stop, index);
+    if (!pass || pass.meters > MOST_METERS_OFF_LINE) return null;
+    passes.push(pass);
+    index = pass.index;
+  }
+  const first = passes[0], last = passes.at(-1);
+  return [first.location, ...line.slice(first.index + 1, last.index + 1), last.location];
 }
 
 const MOST_METERS_TO_SNAP = 60;
