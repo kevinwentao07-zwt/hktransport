@@ -107,10 +107,10 @@ limiter = Limiter(
 in_flight = threading.BoundedSemaphore(int(os.environ.get('AI_CONCURRENT', '16')))
 
 
-# Free each month: 10,000 map loads and 5,000 searches. These stop well short of both.
+# Free each month: 10,000 map loads, 5,000 searches and 10,000 walking routes. These stop well short.
 budget = Budget(
     Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'usage.json',
-    {'map': (300, 9000, 15), 'places': (150, 4500, 30)},
+    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 9000, 40)},
 )
 
 
@@ -160,6 +160,49 @@ def search_places(query, lat, lng, radius, language):
         'id': place['id'], 'name': place['displayName']['text'], 'address': place.get('formattedAddress'),
         'location': {'lat': place['location']['latitude'], 'lng': place['location']['longitude']},
     } for place in found]
+
+
+def decode_polyline(encoded):
+    """Google's compact line format, as a list of points."""
+    points, index, lat, lng = [], 0, 0, 0
+    while index < len(encoded):
+        values = []
+        for _ in range(2):
+            shift = result = 0
+            while True:
+                byte = ord(encoded[index]) - 63
+                index += 1
+                result |= (byte & 0x1F) << shift
+                shift += 5
+                if byte < 0x20:
+                    break
+            values.append(~(result >> 1) if result & 1 else result >> 1)
+        lat, lng = lat + values[0], lng + values[1]
+        points.append({'lat': lat / 1e5, 'lng': lng / 1e5})
+    return points
+
+
+def walking_route(start, end):
+    """Asks only for the line, which keeps this in the cheapest tier."""
+    place = lambda point: {'location': {'latLng': {'latitude': point['lat'], 'longitude': point['lng']}}}
+    request = urllib.request.Request(
+        'https://routes.googleapis.com/directions/v2:computeRoutes',
+        data=json.dumps({'origin': place(start), 'destination': place(end), 'travelMode': 'WALK'}).encode(),
+        headers={
+            'Content-Type': 'application/json', 'X-Goog-Api-Key': places_key(),
+            'X-Goog-FieldMask': 'routes.polyline.encodedPolyline',
+        },
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return decode_polyline(json.load(response)['routes'][0]['polyline']['encodedPolyline'])
+
+
+def in_hong_kong(point):
+    if not isinstance(point, dict):
+        return False
+    lat, lng = point.get('lat'), point.get('lng')
+    numbers = all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (lat, lng))
+    return numbers and 22.1 <= lat <= 22.6 and 113.8 <= lng <= 114.5
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -217,12 +260,27 @@ class Handler(BaseHTTPRequestHandler):
         return body
 
     def do_POST(self):
-        if self.path not in ('/api/ai', '/api/places'):
+        if self.path not in ('/api/ai', '/api/places', '/api/walk'):
             return self.send(404, {'error': 'Not found'})
         body = self.read_json()
         if body is None:
             return None
-        return self.places(body) if self.path == '/api/places' else self.ask(body)
+        return {'/api/places': self.places, '/api/walk': self.walk}.get(self.path, self.ask)(body)
+
+    def walk(self, body):
+        start, end = body.get('from'), body.get('to')
+        if not in_hong_kong(start) or not in_hong_kong(end):
+            return self.send(400, {'error': 'Bad request'})
+        if not places_key() or not budget.spend('walk', self.visitor()):
+            return self.send(429, {'error': 'Limit reached'})
+        try:
+            self.send(200, {'points': walking_route(start, end)})
+        except urllib.error.HTTPError as error:
+            print(f'Routes returned {error.code}', file=sys.stderr, flush=True)
+            self.send(502, {'error': 'Unavailable'})
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
+            print(f'Routes failed: {type(error).__name__}', file=sys.stderr, flush=True)
+            self.send(502, {'error': 'Unavailable'})
 
     def places(self, body):
         query, lat, lng, radius = body.get('query'), body.get('lat'), body.get('lng'), body.get('radius')

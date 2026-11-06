@@ -20,7 +20,7 @@ import ai_proxy  # noqa: E402
 
 
 def budget(**limits):
-    return ai_proxy.Budget(Path(tempfile.mkdtemp(), 'usage.json'), {'map': (9, 9, 9), 'places': (9, 9, 9), **limits})
+    return ai_proxy.Budget(Path(tempfile.mkdtemp(), 'usage.json'), {'map': (9, 9, 9), 'places': (9, 9, 9), 'walk': (9, 9, 9), **limits})
 
 
 class BudgetTests(unittest.TestCase):
@@ -48,6 +48,12 @@ class BudgetTests(unittest.TestCase):
         self.assertFalse(ai_proxy.Budget(path, {'map': (9, 9, 9)}).spend('map', 'a'))
         unwritable = ai_proxy.Budget(Path(tempfile.mkdtemp(), 'missing', 'usage.json'), {'map': (9, 9, 9)})
         self.assertFalse(unwritable.spend('map', 'a'))
+
+
+class PolylineTests(unittest.TestCase):
+    def test_decodes_googles_example(self):
+        points = ai_proxy.decode_polyline('_p~iF~ps|U_ulLnnqC_mqNvxq`@')
+        self.assertEqual(points, [{'lat': 38.5, 'lng': -120.2}, {'lat': 40.7, 'lng': -120.95}, {'lat': 43.252, 'lng': -126.453}])
 
 
 class LimiterTests(unittest.TestCase):
@@ -141,6 +147,15 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.post({**good, 'lat': 35.0}, path='/api/places')[0], 400)
         self.assertEqual(self.post({**good, 'radius': 60000}, path='/api/places')[0], 400)
         self.assertEqual(self.post({**good, 'query': 'x' * 101}, path='/api/places')[0], 400)
+
+    def test_walking_route_stops_at_the_limit(self):
+        ai_proxy.budget = budget(walk=(1, 10, 10))
+        ai_proxy.walking_route = lambda start, end: [start, end]
+        leg = {'from': {'lat': 22.28, 'lng': 114.15}, 'to': {'lat': 22.29, 'lng': 114.16}}
+        self.assertEqual(self.post({**leg, 'to': {'lat': 35, 'lng': 139}}, path='/api/walk')[0], 400)
+        self.assertEqual(self.post(leg, origin=False, path='/api/walk')[0], 403)
+        self.assertEqual(self.post(leg, path='/api/walk')[0], 200)
+        self.assertEqual(self.post(leg, path='/api/walk')[0], 429)
 
     def test_upstream_errors_reveal_nothing(self):
         def fail(system, message):

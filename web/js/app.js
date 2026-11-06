@@ -1,12 +1,12 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
-import {
+import { meters,
   OP_COLORS, OP_LABELS, MODES, buildStopIndex, exactSite, instruction, journeyID, journeyPath, lineColor, lineName,
   nameText, normalizeDB, partialSite, primaryMode, progressAt, retime, rides, score, searchRoutes, siteHasMode, stopName, stopsNear,
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache } from './eta.js?v=dev';
 import { chatMessage, deepSeek, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseWish, searchMessage } from './ai.js?v=dev';
-import { HONG_KONG, cleanArea, districtAt, googleSearch, inHongKong, isNearby, lookupPlace, photonSearch, withinArea } from './places.js?v=dev';
+import { HONG_KONG, cleanArea, districtAt, googleSearch, googleWalk, inHongKong, isNearby, knownWalk, lookupPlace, photonSearch, withinArea } from './places.js?v=dev';
 
 // MARK: Storage
 
@@ -843,9 +843,32 @@ function selectedPath() {
   return journey && state.from && state.to ? journeyPath(journey, state.from.location, state.to.location, state.db) : null;
 }
 
+const SHORTEST_GOOGLE_WALK = 40;
+
+/** The path with Google's walking lines in place of straight ones, where they have arrived. */
+function withWalks(path) {
+  return path && {
+    ...path,
+    segments: path.segments.map((segment) => (segment.mode === 'walk'
+      ? { ...segment, points: knownWalk(segment.points[0], segment.points.at(-1)) ?? segment.points }
+      : segment)),
+  };
+}
+
+/** Only the route on screen asks, and each stretch only once. */
+function loadWalks(path) {
+  if (!state.google || !path) return Promise.resolve(false);
+  const stretches = path.segments.filter((segment) => segment.mode === 'walk')
+    .map((segment) => [segment.points[0], segment.points.at(-1)])
+    .filter(([from, to]) => meters(from, to) >= SHORTEST_GOOGLE_WALK && !knownWalk(from, to));
+  return Promise.all(stretches.map(([from, to]) => googleWalk(from, to))).then(() => stretches.some(([from, to]) => knownWalk(from, to)));
+}
+
 async function startNavigation(journey) {
-  const path = journeyPath(journey, state.from.location, state.to.location, state.db);
-  state.nav = { id: journeyID(journey), path, progress: null, here: null, issue: null };
+  const path = journeyPath(journey, state.from.location, state.to.location, state.db), id = journeyID(journey);
+  state.nav = { id, path, progress: null, here: null, issue: null };
+  // Tracking follows the real walking line once it arrives.
+  loadWalks(path).then(() => { if (state.nav?.id === id) state.nav.path = withWalks(path); });
   watchID = navigator.geolocation?.watchPosition((position) => {
     if (!state.nav || state.nav.progress?.hasArrived) return;
     const here = { lat: position.coords.latitude, lng: position.coords.longitude };
@@ -1661,7 +1684,10 @@ function drawMap() {
   }
   if (state.tab !== 'plan') return;
   const path = state.nav?.path ?? selectedPath();
-  if (path) mapView.path(path);
+  if (path) {
+    mapView.path(withWalks(path));
+    loadWalks(path).then((arrived) => { if (arrived) drawMap(); });
+  }
   const choosing = state.discovery?.stage === 'choosing' && !state.journeys.length && state.phase === 'idle';
   if (choosing) mapView.numbered(state.discovery.suggestions, choosePlace);
   mapView.ends(state.from, state.to);

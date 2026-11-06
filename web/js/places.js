@@ -30,6 +30,29 @@ export async function googleSearch(query, center, radius, lang) {
   }
 }
 
+const walks = new Map();
+const walkKey = (from, to) => [from.lat, from.lng, to.lat, to.lng].join();
+
+/** The walking line Google gave for this stretch, once it has arrived. */
+export const knownWalk = (from, to) => walks.get(walkKey(from, to))?.points ?? null;
+
+/** Asks Google once per stretch per visit. Without an answer the map keeps its straight line. */
+export function googleWalk(from, to) {
+  const key = walkKey(from, to);
+  if (walks.has(key)) return walks.get(key).done;
+  const walk = { points: null };
+  walk.done = fetch('api/walk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: { lat: from.lat, lng: from.lng }, to: { lat: to.lat, lng: to.lng } }),
+    signal: AbortSignal.timeout(16_000),
+  }).then((response) => (response.ok ? response.json() : null)).then((answer) => {
+    if (answer?.points?.length) walk.points = [from, ...answer.points, to];
+  }).catch(() => {});
+  walks.set(key, walk);
+  return walk.done;
+}
+
 /** Hong Kong 1980 Grid to WGS84: inverse transverse Mercator, then the published datum shift. */
 export function hk80ToWgs84(easting, northing) {
   const a = 6378388, f = 1 / 297, e2 = 2 * f - f * f, rad = Math.PI / 180;
