@@ -508,6 +508,31 @@ export function trainServes(terminus, ride, db) {
 // MARK: Journey path
 
 /** Every stop the rider passes, from boarding to alighting. */
+/** The closest point on a line, from `start` on, with which way the line runs there. */
+export function pointOnLine(line, location, start = 0) {
+  const scale = Math.cos((location.lat * Math.PI) / 180);
+  let best = null;
+  for (let index = start; index < line.length - 1; index++) {
+    const a = line[index], b = line[index + 1];
+    const east = (b.lng - a.lng) * scale, north = b.lat - a.lat, length = east * east + north * north;
+    const part = length ? Math.max(0, Math.min(1, (((location.lng - a.lng) * scale * east) + ((location.lat - a.lat) * north)) / length)) : 0;
+    const point = { lat: a.lat + (b.lat - a.lat) * part, lng: a.lng + (b.lng - a.lng) * part };
+    const away = meters(point, location);
+    if (!best || away < best.meters) best = { index, location: point, meters: away, heading: (Math.atan2(east, north) * 180) / Math.PI };
+  }
+  return best;
+}
+
+const MOST_METERS_OFF_LINE = 300;
+
+/** The stretch of a route's real line between two stops, or null if they aren't on it. */
+export function clipLine(line, from, to) {
+  if (!line || line.length < 2) return null;
+  const start = pointOnLine(line, from), end = start && pointOnLine(line, to, start.index);
+  if (!end || start.meters > MOST_METERS_OFF_LINE || end.meters > MOST_METERS_OFF_LINE) return null;
+  return [from, ...line.slice(start.index + 1, end.index + 1), to];
+}
+
 const SECONDS_PER_STOP = 90;
 
 /**
@@ -526,8 +551,10 @@ export function estimatedVehicle(ride, db, now) {
   const from = db.stops[stops[index]]?.location, to = db.stops[stops[index + 1]]?.location;
   if (!validLocation(from) || !validLocation(to)) return null;
   const part = clamped - index;
+  const east = (to.lng - from.lng) * Math.cos((from.lat * Math.PI) / 180), north = to.lat - from.lat;
   return {
     location: { lat: from.lat + (to.lat - from.lat) * part, lng: from.lng + (to.lng - from.lng) * part },
+    heading: (Math.atan2(east, north) * 180) / Math.PI, isMinibus: ride.op === 'gmb',
     minutes: Math.max(0, Math.ceil(seconds / 60)), hasLeftTerminus: position >= 0, hasPassedStop: seconds < 0,
     color: lineColor(ride.op, ride.route),
   };
@@ -550,7 +577,7 @@ export function journeyPath(journey, origin, destination, db) {
       segment = { mode: 'walk', points: [cursor, target], stopIDs: [] };
     } else {
       const stops = rideStopIDs(leg, db).filter((id) => validLocation(db.stops[id]?.location));
-      segment = { mode: 'ride', route: leg.route, op: leg.op, points: stops.map((id) => db.stops[id].location), stopIDs: stops };
+      segment = { mode: 'ride', route: leg.route, routeKey: leg.routeKey, op: leg.op, points: stops.map((id) => db.stops[id].location), stopIDs: stops };
     }
     if (!segment.points.length) continue;
     segments.push(segment);

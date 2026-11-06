@@ -30,6 +30,27 @@ export async function googleSearch(query, center, radius, lang, details = false)
   }
 }
 
+const shapes = new Map();
+const shapeKey = (route, op) => (route?.gtfsId ? `${route.gtfsId}-${(route.bound?.[op] ?? 'O')[0]}` : null);
+
+/** A route's real line, once it has arrived. */
+export const knownShape = (route, op) => shapes.get(shapeKey(route, op))?.points ?? null;
+
+/** Fetches the line the Government publishes for a route, once per visit. */
+export function loadShape(route, op) {
+  const key = shapeKey(route, op);
+  if (!key) return Promise.resolve();
+  if (shapes.has(key)) return shapes.get(key).done;
+  const shape = { points: null };
+  shape.done = fetch(`https://hkbus.github.io/route-waypoints/${key}.json`).then((response) => (response.ok ? response.json() : null)).then((data) => {
+    const lines = data?.features?.flatMap((feature) => (feature.geometry?.type === 'LineString' ? [feature.geometry.coordinates] : feature.geometry?.coordinates ?? [])) ?? [];
+    const points = lines.flat().map(([lng, lat]) => ({ lat, lng }));
+    if (points.length > 1) shape.points = points;
+  }).catch(() => {});
+  shapes.set(key, shape);
+  return shape.done;
+}
+
 const walks = new Map();
 const walkKey = (from, to) => [from.lat, from.lng, to.lat, to.lng].join();
 

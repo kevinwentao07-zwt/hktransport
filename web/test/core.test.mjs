@@ -234,6 +234,8 @@ test('the next bus is placed by its live arrival', () => {
   assert.equal(coming.minutes, 3);
   assert.equal(coming.hasLeftTerminus, true);
   assert.equal(coming.hasPassedStop, false);
+  close(coming.heading, 0, 0.01); // Due north, as the stops run.
+  assert.equal(coming.isMinibus, false);
   const waiting = T.estimatedVehicle({ ...ride, liveDeparture: 3_600_000 }, db, 0);
   close(waiting.location.lat, 22.30, 0.00001);
   assert.equal(waiting.hasLeftTerminus, false);
@@ -242,6 +244,18 @@ test('the next bus is placed by its live arrival', () => {
   assert.equal(T.estimatedVehicle({ ...ride, liveDeparture: null }, db, 0), null);
   assert.equal(T.estimatedVehicle({ ...ride, isProjected: true }, db, 0), null);
   assert.equal(T.estimatedVehicle({ ...ride, op: 'mtr' }, db, 0), null);
+});
+test('bus lines follow the road between two stops', () => {
+  const road = [{ lat: 22.30, lng: 114.10 }, { lat: 22.31, lng: 114.10 }, { lat: 22.31, lng: 114.11 }, { lat: 22.32, lng: 114.11 }];
+  const clipped = T.clipLine(road, { lat: 22.3051, lng: 114.1 }, { lat: 22.315, lng: 114.11 });
+  assert.equal(clipped.length, 4);
+  assert.deepEqual(clipped[1], road[1]);
+  assert.deepEqual(clipped[2], road[2]);
+  assert.equal(T.clipLine(road, { lat: 22.5, lng: 114.3 }, road[3]), null);
+  assert.equal(T.clipLine(null, road[0], road[1]), null);
+  const on = T.pointOnLine(road, { lat: 22.3101, lng: 114.105 });
+  close(on.location.lat, 22.31, 0.00001);
+  close(on.heading, 90, 0.01); // Heading east along the second stretch.
 });
 test('area words', () => {
   assert.equal(P.cleanArea('朗豪坊附近'), '朗豪坊');

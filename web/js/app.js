@@ -1,13 +1,13 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
 import { meters,
-  OP_COLORS, OP_LABELS, MODES, buildStopIndex, estimatedVehicle, exactSite, instruction, journeyID, journeyPath, lineColor, lineName,
-  nameText, normalizeDB, partialSite, primaryMode, progressAt, retime, rides, score, searchRoutes, siteHasMode, stopName, stopsNear,
+  OP_COLORS, OP_LABELS, MODES, buildStopIndex, clipLine, estimatedVehicle, exactSite, instruction, journeyID, journeyPath, lineColor, lineName,
+  nameText, normalizeDB, partialSite, pointOnLine, primaryMode, progressAt, retime, rides, score, searchRoutes, siteHasMode, stopName, stopsNear,
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache } from './eta.js?v=dev';
 import { toSimplified } from './hans.js?v=dev';
 import { chatMessage, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
-import { HONG_KONG, cleanArea, googleSearch, googleWalk, inHongKong, insideArea, isNearby, knownWalk, lookupPlace, mergeShops, photonSearch, withinArea } from './places.js?v=dev';
+import { HONG_KONG, cleanArea, googleSearch, googleWalk, inHongKong, insideArea, isNearby, knownShape, knownWalk, loadShape, lookupPlace, mergeShops, photonSearch, withinArea } from './places.js?v=dev';
 
 // MARK: Storage
 
@@ -206,14 +206,19 @@ function historyBar(box, pick) {
 
 let busElement = null;
 
+/** A small 3D bus built from CSS faces, so it turns with the road. */
 function busMarker() {
-  busElement = h('div', { class: 'bus-marker' }, h('span', { class: 'bus-icon' }, icon('bus', 16)), h('span', { class: 'bus-note' }));
+  const faces = ['shadow', 'top', 'front', 'back', 'left', 'right'].map((face) => h('i', { class: face }));
+  busElement = h('div', { class: 'bus-marker' }, h('div', { class: 'bus3d' }, faces), h('span', { class: 'bus-note' }));
   return busElement;
 }
 
 function dressBus(vehicle) {
   if (!busElement) return;
-  busElement.querySelector('.bus-icon').style.background = vehicle.color;
+  const bus = busElement.querySelector('.bus3d');
+  bus.classList.toggle('minibus', vehicle.isMinibus);
+  bus.style.setProperty('--body', vehicle.color);
+  bus.style.setProperty('--heading', `${vehicle.heading}deg`);
   busElement.querySelector('.bus-note').textContent = !vehicle.hasLeftTerminus ? t('未開出', 'At terminus')
     : vehicle.hasPassedStop ? t('已開出', 'Left the stop')
       : vehicle.minutes ? t(`推算 ${vehicle.minutes} 分鐘到站`, `About ${vehicle.minutes} min away`) : t('即將到站', 'Arriving');
@@ -314,7 +319,7 @@ const leafletMap = (() => {
       // A few station names always fit; a long bus route's only fit up close.
       $('map').classList.toggle('many-stops', path.segments.reduce((sum, s) => sum + s.stopIDs.length, 0) > 12);
       for (const segment of path.segments) {
-        const line = segment.points.map(point);
+        const line = (segment.line ?? segment.points).map(point);
         L.polyline(line, { color: '#fff', weight: 8, opacity: 0.95 }).addTo(content);
         const isWalk = segment.mode === 'walk';
         const stroke = L.polyline(line, {
@@ -387,7 +392,7 @@ const googleMap = (() => {
         if (performance.now() - tapped > 500) click();
         tapped = performance.now();
       };
-      marker.addListener('gmp-click', tap);
+      marker.addEventListener('gmp-click', tap);
       element.addEventListener('click', tap);
     }
     return marker;
@@ -464,15 +469,15 @@ const googleMap = (() => {
     path(path) {
       $('map').classList.toggle('many-stops', path.segments.reduce((sum, s) => sum + s.stopIDs.length, 0) > 12);
       for (const segment of path.segments) {
-        const color = lineColor(segment.op, segment.route), isWalk = segment.mode === 'walk';
+        const color = lineColor(segment.op, segment.route), isWalk = segment.mode === 'walk', road = segment.line ?? segment.points;
         if (isWalk) {
-          line(segment.points, {
+          line(road, {
             strokeOpacity: 0, zIndex: 2,
             icons: [{ icon: { path: google.maps.SymbolPath.CIRCLE, scale: 2, fillColor: '#2f7bf6', fillOpacity: 1, strokeOpacity: 0 }, repeat: '11px' }],
           });
         } else {
-          drawOn(line(segment.points, { strokeColor: '#fff', strokeWeight: 8, strokeOpacity: 0.95, zIndex: 1 }), segment.points);
-          drawOn(line(segment.points, { strokeColor: color, strokeWeight: 5, strokeOpacity: 1, zIndex: 2 }), segment.points);
+          drawOn(line(road, { strokeColor: '#fff', strokeWeight: 8, strokeOpacity: 0.95, zIndex: 1 }), road);
+          drawOn(line(road, { strokeColor: color, strokeWeight: 5, strokeOpacity: 1, zIndex: 2 }), road);
         }
         segment.stopIDs.forEach((id, index) => {
           const stop = div('g-stop');
@@ -927,7 +932,11 @@ function selectedPath() {
 /** The next bus on the route on screen, if arrivals say when it comes. */
 function nextVehicle() {
   const journey = state.journeys.find((j) => journeyID(j) === (state.nav?.id ?? state.expanded));
-  return journey ? estimatedVehicle(rides(journey)[0], state.db, Date.now()) : null;
+  const ride = journey && rides(journey)[0], vehicle = ride && estimatedVehicle(ride, state.db, Date.now());
+  if (!vehicle) return null;
+  // On its real line when that has arrived, facing the way the road runs.
+  const shape = knownShape(state.db.routes[ride.routeKey], ride.op), onRoad = shape && pointOnLine(shape, vehicle.location);
+  return onRoad && onRoad.meters < 500 ? { ...vehicle, location: onRoad.location, heading: onRoad.heading } : vehicle;
 }
 
 const moveVehicle = () => { if (state.tab === 'plan') mapView.vehicle(nextVehicle()); };
@@ -935,30 +944,38 @@ setInterval(moveVehicle, 3000);
 
 const SHORTEST_GOOGLE_WALK = 40;
 
-/** The path with Google's walking lines in place of straight ones, where they have arrived. */
-function withWalks(path) {
+const hasRealLine = (segment) => segment.mode === 'ride' && !['mtr', 'lightRail'].includes(segment.op);
+
+/** The path with real walking and bus lines in place of straight ones, where they have arrived. */
+function withRoads(path) {
   return path && {
     ...path,
-    segments: path.segments.map((segment) => (segment.mode === 'walk'
-      ? { ...segment, points: knownWalk(segment.points[0], segment.points.at(-1)) ?? segment.points }
-      : segment)),
+    segments: path.segments.map((segment) => {
+      const first = segment.points[0], last = segment.points.at(-1);
+      if (segment.mode === 'walk') return { ...segment, points: knownWalk(first, last) ?? segment.points };
+      if (!hasRealLine(segment)) return segment;
+      return { ...segment, line: clipLine(knownShape(state.db.routes[segment.routeKey], segment.op), first, last) };
+    }),
   };
 }
 
-/** Only the route on screen asks, and each stretch only once. */
-function loadWalks(path) {
-  if (!state.google || !path) return Promise.resolve(false);
-  const stretches = path.segments.filter((segment) => segment.mode === 'walk')
+/** Only the route on screen asks, and each line only once. Bus lines are free; walks use Google's allowance. */
+function loadRoads(path) {
+  if (!path) return Promise.resolve(false);
+  const buses = path.segments.filter(hasRealLine).map((segment) => [state.db.routes[segment.routeKey], segment.op])
+    .filter(([route, op]) => !knownShape(route, op));
+  const walks = !state.google ? [] : path.segments.filter((segment) => segment.mode === 'walk')
     .map((segment) => [segment.points[0], segment.points.at(-1)])
     .filter(([from, to]) => meters(from, to) >= SHORTEST_GOOGLE_WALK && !knownWalk(from, to));
-  return Promise.all(stretches.map(([from, to]) => googleWalk(from, to))).then(() => stretches.some(([from, to]) => knownWalk(from, to)));
+  return Promise.all([...buses.map(([route, op]) => loadShape(route, op)), ...walks.map(([from, to]) => googleWalk(from, to))])
+    .then(() => buses.some(([route, op]) => knownShape(route, op)) || walks.some(([from, to]) => knownWalk(from, to)));
 }
 
 async function startNavigation(journey) {
   const path = journeyPath(journey, state.from.location, state.to.location, state.db), id = journeyID(journey);
   state.nav = { id, path, progress: null, here: null, issue: null };
   // Tracking follows the real walking line once it arrives.
-  loadWalks(path).then(() => { if (state.nav?.id === id) state.nav.path = withWalks(path); });
+  loadRoads(path).then(() => { if (state.nav?.id === id) state.nav.path = withRoads(path); });
   watchID = navigator.geolocation?.watchPosition((position) => {
     if (!state.nav || state.nav.progress?.hasArrived) return;
     const here = { lat: position.coords.latitude, lng: position.coords.longitude };
@@ -1866,8 +1883,8 @@ function drawMap() {
   if (state.tab !== 'plan') return;
   const path = state.nav?.path ?? selectedPath();
   if (path) {
-    mapView.path(withWalks(path));
-    loadWalks(path).then((arrived) => { if (arrived) drawMap(); });
+    mapView.path(withRoads(path));
+    loadRoads(path).then((arrived) => { if (arrived) drawMap(); });
   }
   const choosing = state.discovery?.stage === 'choosing' && !state.journeys.length && state.phase === 'idle';
   if (choosing) mapView.numbered(state.discovery.suggestions, choosePlace);

@@ -206,9 +206,26 @@ svg.icon.solid { fill: currentColor; }
 .shop-facts .shut { color: #ff453a; font-weight: 600; }
 .shop-links { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 5px; }
 .shop-links a { color: #2f7bf6; text-decoration: none; }
-.bus-marker { position: relative; width: 0; height: 0; pointer-events: none; }
-.bus-icon { position: absolute; left: -15px; top: -15px; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; border: 2.5px solid #fff; color: #fff; box-shadow: 0 2px 8px rgba(0, 0, 0, .45); animation: breathe 2.4s ease-in-out infinite; }
-.bus-note { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); padding: 2px 7px; border-radius: 8px; background: var(--surface); color: var(--ink); box-shadow: 0 1px 4px rgba(0, 0, 0, .3); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.bus-marker { position: relative; width: 0; height: 0; pointer-events: none; perspective: 420px; perspective-origin: 0 0; }
+.bus3d { --l: 42px; --w: 16px; --h: 25px; --body: #e2231a; --glass: #16324a; position: absolute; left: 0; top: 0; width: 0; height: 0; transform-style: preserve-3d; transform: translateY(-8px) rotateX(56deg) rotateZ(var(--heading, 0deg)); transition: transform .9s var(--ease-out); }
+.bus3d.minibus { --l: 30px; --w: 15px; --h: 15px; }
+.bus3d i { position: absolute; display: block; box-sizing: border-box; }
+.bus3d .shadow { left: calc(var(--w) / -2 - 5px); top: calc(var(--l) / -2 - 5px); width: calc(var(--w) + 10px); height: calc(var(--l) + 10px); border-radius: 9px; background: rgba(0, 0, 0, .42); filter: blur(4px); }
+.bus3d .top { left: calc(var(--w) / -2); top: calc(var(--l) / -2); width: var(--w); height: var(--l); border-radius: 3px; transform: translateZ(var(--h)); background: linear-gradient(90deg, rgba(255, 255, 255, .2), rgba(255, 255, 255, .52) 50%, rgba(255, 255, 255, .2)), var(--body); }
+.bus3d .front, .bus3d .back { left: calc(var(--w) / -2); top: calc(var(--h) / -2); width: var(--w); height: var(--h); }
+.bus3d .left, .bus3d .right { left: calc(var(--l) / -2); top: calc(var(--h) / -2); width: var(--l); height: var(--h); }
+/* Every side stands up with its top edge on the road, so its gradients run from the road upwards. */
+.bus3d .front { transform: translateY(calc(var(--l) / -2)) translateZ(calc(var(--h) / 2)) rotateX(90deg); background: linear-gradient(to bottom, #20242a 0 9%, var(--body) 9% 30%, var(--glass) 30% 50%, var(--body) 50% 58%, #9fd3ee 58% 90%, var(--body) 90%); }
+.bus3d .back { transform: translateY(calc(var(--l) / 2)) translateZ(calc(var(--h) / 2)) rotateZ(180deg) rotateX(90deg); background: linear-gradient(to bottom, #20242a 0 9%, #ff453a 9% 16%, var(--body) 16% 58%, var(--glass) 58% 86%, var(--body) 86%); }
+.bus3d .right { transform: translateX(calc(var(--w) / 2)) translateZ(calc(var(--h) / 2)) rotateZ(90deg) rotateX(90deg); }
+.bus3d .left { transform: translateX(calc(var(--w) / -2)) translateZ(calc(var(--h) / 2)) rotateZ(-90deg) rotateX(90deg); }
+.bus3d .left, .bus3d .right { background: radial-gradient(circle at 22% 7%, #111 0 3.2px, transparent 3.6px), radial-gradient(circle at 78% 7%, #111 0 3.2px, transparent 3.6px), repeating-linear-gradient(90deg, transparent 0 6px, var(--body) 6px 7.5px), linear-gradient(to bottom, var(--body) 0 26%, var(--glass) 26% 46%, var(--body) 46% 56%, var(--glass) 56% 86%, var(--body) 86%); }
+.bus3d.minibus .front { background: linear-gradient(to bottom, #20242a 0 12%, var(--body) 12% 42%, #9fd3ee 42% 86%, #f4f4f0 86%); }
+.bus3d.minibus .back { background: linear-gradient(to bottom, #20242a 0 12%, #ff453a 12% 22%, var(--body) 22% 46%, var(--glass) 46% 84%, #f4f4f0 84%); }
+.bus3d.minibus .left, .bus3d.minibus .right { background: radial-gradient(circle at 20% 10%, #111 0 2.8px, transparent 3.2px), radial-gradient(circle at 80% 10%, #111 0 2.8px, transparent 3.2px), repeating-linear-gradient(90deg, transparent 0 6px, #f4f4f0 6px 7.5px), linear-gradient(to bottom, var(--body) 0 40%, var(--glass) 40% 84%, #f4f4f0 84%); }
+.bus3d.minibus .top { background: #f4f4f0; }
+.bus-note { position: absolute; left: 0; top: 22px; transform: translateX(-50%); padding: 2px 7px; border-radius: 8px; background: var(--surface); color: var(--ink); box-shadow: 0 1px 4px rgba(0, 0, 0, .3); font-size: 11px; font-weight: 600; white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .bus3d { transition: none; } }
 .leaflet-marker-icon.bus-holder { transition: transform 3s linear; }
 .g-anchor { width: 0; height: 0; }
 .g-stop { display: flex; align-items: center; gap: 4px; width: max-content; transform: translate(-6px, -50%); }
