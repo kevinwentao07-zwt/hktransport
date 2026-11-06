@@ -575,6 +575,7 @@ private struct JourneyMap: View {
         let name: String
         let location: StopLocation
         let color: Color
+        let isUpcoming: Bool
     }
 
     private struct Boarding: Identifiable {
@@ -582,6 +583,18 @@ private struct JourneyMap: View {
         let route: String
         let op: Operator
         let location: StopLocation
+        let isUpcoming: Bool
+    }
+
+    /// Legs the rider hasn't reached yet are drawn this faint while navigating.
+    private static let upcomingOpacity = 0.4
+
+    /// The whole trip, or while navigating only what is still ahead of the rider.
+    private var segments: [JourneyMapPath.Segment] {
+        guard let path else { return [] }
+        guard navigation.journeyID != nil, path == navigation.path else { return path.segments }
+        let here = navigation.fix.map { StopLocation(lat: $0.coordinate.latitude, lng: $0.coordinate.longitude) }
+        return path.ahead(of: navigation.progress, at: here)
     }
 
     var body: some View {
@@ -641,12 +654,13 @@ private struct JourneyMap: View {
                 }
                 .annotationTitles(.hidden)
             }
-            ForEach(path?.segments ?? []) { segment in
+            ForEach(segments) { segment in
+                let opacity = segment.isUpcoming ? Self.upcomingOpacity : 1
                 // A white casing keeps every line readable on light and dark maps.
                 MapPolyline(coordinates: segment.points.map(\.coordinate))
-                    .stroke(.white, style: StrokeStyle(lineWidth: 7, lineCap: .round, lineJoin: .round))
+                    .stroke(Color.white.opacity(opacity), style: StrokeStyle(lineWidth: 7, lineCap: .round, lineJoin: .round))
                 MapPolyline(coordinates: segment.points.map(\.coordinate))
-                    .stroke(color(segment.mode), style: stroke(segment.mode))
+                    .stroke(color(segment.mode).opacity(opacity), style: stroke(segment.mode))
             }
             ForEach(rideStops) { stop in
                 // MapKit hides names that would collide and brings them back on zooming in.
@@ -654,6 +668,7 @@ private struct JourneyMap: View {
                     Circle().fill(.white)
                         .frame(width: 7, height: 7)
                         .overlay(Circle().stroke(stop.color, lineWidth: 2))
+                        .opacity(stop.isUpcoming ? 0.55 : 1)
                 }
                 .annotationTitles(.automatic)
             }
@@ -668,6 +683,7 @@ private struct JourneyMap: View {
                         .foregroundStyle(boarding.op == .ctb ? Color.black : Color.white)
                         .background(boarding.op.lineColor(boarding.route), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(.white, lineWidth: 1))
+                        .opacity(boarding.isUpcoming ? 0.6 : 1)
                 }
                 .annotationTitles(.hidden)
             }
@@ -728,20 +744,20 @@ private struct JourneyMap: View {
     }
 
     private var rideStops: [RideStop] {
-        (path?.segments ?? []).flatMap { segment -> [RideStop] in
+        segments.flatMap { segment -> [RideStop] in
             guard segment.mode != .walk else { return [] }
-            return zip(segment.stopIDs, segment.points).enumerated().map { index, stop in
+            return segment.stops.enumerated().map { index, stop in
                 RideStop(id: "\(segment.id)-\(index)",
-                         name: RoutePlannerModel.stopName(stop.0, db: model.db, language: model.language),
-                         location: stop.1, color: color(segment.mode))
+                         name: RoutePlannerModel.stopName(stop.id, db: model.db, language: model.language),
+                         location: stop.location, color: color(segment.mode), isUpcoming: segment.isUpcoming)
             }
         }
     }
 
     private var boardings: [Boarding] {
-        (path?.segments ?? []).compactMap { segment -> Boarding? in
+        segments.compactMap { segment -> Boarding? in
             guard case .ride(let route, let op) = segment.mode, let first = segment.points.first else { return nil }
-            return Boarding(id: segment.id, route: route, op: op, location: first)
+            return Boarding(id: segment.id, route: route, op: op, location: first, isUpcoming: segment.isUpcoming)
         }
     }
 }

@@ -191,7 +191,7 @@ svg.icon.solid { fill: currentColor; }
 .g-dot { width: 12px; height: 12px; flex: none; box-sizing: border-box; border-radius: 50%; background: #fff; border: 2.5px solid; }
 .g-pick { width: 14px; height: 14px; margin: -7px 0 0 -7px; box-sizing: border-box; border-radius: 50%; border: 2px solid #fff; cursor: pointer; }
 .g-pick.rail { width: 20px; height: 20px; margin: -10px 0 0 -10px; }
-#map.entering .g-dot { animation: pop-in .5s var(--pop) both; animation-delay: calc(var(--i, 0) * 45ms + 250ms); }
+#map.entering .popping .g-dot { animation: pop-in .5s var(--pop) both; animation-delay: calc(var(--i, 0) * 45ms + 250ms); }
 /* Google's logo and terms must stay visible, so they ride above the sheet. */
 .gm-style a[href*="maps.google"] { display: inline-block !important; }
 .gm-style a[href*="maps.google"], .gm-style .gm-style-cc { transform: translateY(calc(-1 * var(--panel-h) - 8px - env(safe-area-inset-bottom))); transition: transform .5s var(--ease-out); }
