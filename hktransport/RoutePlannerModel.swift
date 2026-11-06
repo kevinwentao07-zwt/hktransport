@@ -172,7 +172,6 @@ final class RoutePlannerModel: ObservableObject {
     @Published private(set) var preference: TripPreference = .fastest
     @Published private(set) var journeys: [Journey] = []
     @Published private(set) var explanation: String?
-    @Published private(set) var isExplaining = false
     /// Set when the AI was configured but could not be used for this plan.
     @Published private(set) var aiNotice: String?
     @Published private(set) var usedAI = false
@@ -420,21 +419,16 @@ final class RoutePlannerModel: ObservableObject {
         // 1. Understand the request.
         phase = .understanding
         var intent: TripIntent?
-        var isPicked = false
-        if case .place = request { isPicked = true }
-        if let ai, !isPicked {
+        // Only the chat box needs the AI: the search box holds a place, and the planner does the rest.
+        if let ai, case .chat = request {
             do {
-                if case .chat = request {
-                    switch try await ai.parseChat(request) {
-                    case .trip(let trip):
-                        intent = trip
-                    case .discover(let wish):
-                        guard !Task.isCancelled else { return }
-                        await startDiscovery(wish, db: db, language: language, currentLocation: currentLocation, ai: ai)
-                        return
-                    }
-                } else {
-                    intent = try await ai.parseIntent(request)
+                switch try await ai.parseChat(request) {
+                case .trip(let trip):
+                    intent = trip
+                case .discover(let wish):
+                    guard !Task.isCancelled else { return }
+                    await startDiscovery(wish, db: db, language: language, currentLocation: currentLocation, ai: ai)
+                    return
                 }
                 usedAI = true
             } catch {
@@ -449,13 +443,9 @@ final class RoutePlannerModel: ObservableObject {
             return
         }
         if intent == nil { intent = request.offlineIntent }
-        guard var intent else {
+        guard let intent else {
             phase = .failed(t("請輸入目的地，例如「由旺角去理大」。", "Enter a destination, e.g. \"Mong Kok to PolyU\"."))
             return
-        }
-        if case .search(let origin, _, _) = request, origin == nil {
-            // An empty start box always means here, whatever the AI inferred.
-            intent.origin = nil
         }
         if case .chat = request {
             originText = intent.origin ?? ""
@@ -547,17 +537,8 @@ final class RoutePlannerModel: ObservableObject {
         journeys = retimed.sorted { self.preference.score($0) < self.preference.score($1) }
         phase = .done
 
-        // 5. Optional one-line recommendation.
-        guard let ai, aiNotice == nil else { return }
-        isExplaining = true
-        defer { isExplaining = false }
-        let summary = DeepSeekClient.summary(of: Array(journeys.prefix(3)), preference: self.preference, now: Date(),
-                                             language: language) {
-            Self.stopName($0, db: db, language: language)
-        }
-        let reply = try? await ai.explain(summary, language: language)
-        guard !Task.isCancelled else { return }
-        explanation = reply
+        // 5. Why the first option is on top.
+        explanation = Journey.advice(journeys, language: language, now: Date())
     }
 
     /// "第一間點去": the AI names a shop on screen, which is already located.

@@ -155,17 +155,10 @@ Reply with one JSON object and nothing else:
 - Speak to the person directly as 你, or not at all. Never call them 車手, 乘客 or a rider.
 ${lang === 'zh' ? 'Write reasons in Traditional Chinese as used in Hong Kong.' : 'Write reasons in English.'}`;
 
-export const explainPrompt = (lang) => `You help a rider in Hong Kong choose between public transport options computed by a route planner.
-In one or two short sentences, recommend the best option for the rider's preference and say why.
-Use only the facts given. Do not invent routes, stops, times or fares.
-When an option's first departure is marked live, you may mention that it is based on real-time arrivals.
-${lang === 'zh' ? 'Write in Traditional Chinese as used in Hong Kong.' : 'Write in English.'} No Markdown, no lists.`;
-
 /** Every job the AI does. The server is sent a name from this list, never a prompt. */
 export const PROMPTS = {
   intent: INTENT_PROMPT, chat: CHAT_PROMPT,
   rank_zh: rankPrompt('zh'), rank_en: rankPrompt('en'),
-  explain_zh: explainPrompt('zh'), explain_en: explainPrompt('en'),
 };
 
 function jsonObject(reply) {
@@ -254,6 +247,5 @@ function assistant(complete) {
       return reply;
     },
     rank: async (wish, suggestions, lang) => applyRanking(await complete(`rank_${lang}`, rankMessage(wish, suggestions)), suggestions),
-    explain: (summary, lang) => complete(`explain_${lang}`, summary),
   };
 }

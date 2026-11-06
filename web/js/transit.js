@@ -264,6 +264,40 @@ export function score(journey, preference) {
   return minutes + changes * 2;
 }
 
+const SAME_WALK_METERS = 100;
+
+/**
+ * Why the first option is on top, from its own numbers. `t` picks the language, and
+ * `lineOf` names a ride. Only a real-time departure is mentioned as one.
+ */
+export function planAdvice(journeys, t, lineOf, now) {
+  const [best, next] = journeys;
+  if (!best) return null;
+  const minutes = Math.round(totalMinutes(best)), changes = transfers(best), walk = Math.round(walkingMeters(best));
+  const lines = [t(
+    `建議第一個方案：全程 ${minutes} 分鐘，${changes ? `轉 ${changes} 次車` : '直達'}，步行 ${walk} 米。`,
+    `Best option: ${minutes} min, ${changes ? `${changes} change${changes > 1 ? 's' : ''}` : 'direct'}, ${walk} m on foot.`,
+  )];
+  const first = rides(best)[0];
+  if (first?.liveDeparture && !first.isProjected) {
+    const wait = Math.max(0, Math.floor((first.liveDeparture - now) / 60_000)), line = lineOf(first);
+    lines.push(wait ? t(`${line} ${wait} 分鐘後開出。`, `${line} leaves in ${wait} min.`) : t(`${line} 即將開出。`, `${line} is leaving now.`));
+  }
+  if (next) {
+    const faster = Math.round(totalMinutes(next)) - minutes, fewer = transfers(next) - changes, less = Math.round(walkingMeters(next)) - walk;
+    const differences = [
+      faster > 0 && t(`快 ${faster} 分鐘`, `${faster} min faster`),
+      faster < 0 && t(`慢 ${-faster} 分鐘`, `${-faster} min slower`),
+      fewer > 0 && t(`少轉 ${fewer} 次車`, `${fewer} fewer change${fewer > 1 ? 's' : ''}`),
+      fewer < 0 && t(`多轉 ${-fewer} 次車`, `${-fewer} more change${fewer < -1 ? 's' : ''}`),
+      less >= SAME_WALK_METERS && t(`少行 ${less} 米`, `${less} m less walking`),
+      less <= -SAME_WALK_METERS && t(`多行 ${-less} 米`, `${-less} m more walking`),
+    ].filter(Boolean);
+    if (differences.length) lines.push(t(`比第二個方案${differences.join('、')}。`, `Against the next option: ${differences.join(', ')}.`));
+  }
+  return lines.join(t('', ' '));
+}
+
 export function rank(journeys, preference, limit) {
   // One option per first vehicle: "EAL then walk" and "EAL then ISL" are the same decision.
   const seen = new Set();
@@ -518,7 +552,7 @@ function pointOnStretch(line, index, location) {
   return { index, location: point, meters: meters(point, location), heading: (Math.atan2(east, north) * 180) / Math.PI };
 }
 
-const MOST_METERS_OFF_LINE = 300, EVEN_PROGRESS_METERS = 60;
+const MOST_METERS_OFF_LINE = 300, EVEN_PROGRESS_METERS = 60, LEAST_STOPS_ON_LINE = 0.8;
 
 /**
  * Finds the best place on the line for every stop at once, always moving forward. Stops are only metres
@@ -571,7 +605,9 @@ export function routeTrack(line, stops) {
     reached = Math.max(reached, along[stretch] + meters(line[stretch], pass.location));
     passes[index] = { location: pass.location, at: reached };
   });
-  return passes.filter(Boolean).length >= 2 ? { line, along, passes } : null;
+  // A line missing much of the route is the wrong one: straight between the stops at least shows it all.
+  const placed = passes.filter(Boolean).length;
+  return placed >= 2 && placed >= known.length * LEAST_STOPS_ON_LINE ? { line, along, passes, stops } : null;
 }
 
 /** How far along the line a fractional stop number is, between the stops that were placed. */
@@ -611,6 +647,13 @@ export function placeOnTrack(track, position) {
 export function trackBetween(track, from, to) {
   const start = stretchAt(track, distanceAt(track, from)), end = stretchAt(track, distanceAt(track, to));
   return [placeOnTrack(track, from).location, ...track.line.slice(start + 1, end + 1), placeOnTrack(track, to).location];
+}
+
+/** The road between two stops, with any stop the line stops short of joined on straight, so none is left off. */
+export function roadBetween(track, from, to) {
+  const placed = track.passes.flatMap((pass, index) => (pass ? [index] : []));
+  const spare = (start, end) => track.stops.slice(start, end).filter(validLocation);
+  return [...spare(from, placed[0]), ...trackBetween(track, from, to), ...spare(placed.at(-1) + 1, to + 1)];
 }
 
 const SECONDS_PER_STOP = 90;

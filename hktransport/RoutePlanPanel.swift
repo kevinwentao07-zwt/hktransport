@@ -317,18 +317,15 @@ struct RoutePlanPanel: View {
 
     @ViewBuilder
     private var aiReply: some View {
-        if planner.lastChat != nil || planner.explanation != nil || planner.isExplaining {
+        if planner.lastChat != nil || planner.explanation != nil {
             VStack(alignment: .leading, spacing: 3) {
                 if let message = planner.lastChat {
                     Text(message).foregroundStyle(.secondary).lineLimit(1)
                 }
                 if let explanation = planner.explanation {
-                    Label(explanation, systemImage: "sparkles")
-                        .foregroundStyle(.yellow)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else if planner.isExplaining {
-                    Label(model.t("AI 整理建議中…", "AI is summarising…"), systemImage: "sparkles")
+                    Text(explanation)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .font(.system(size: 12))

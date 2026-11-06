@@ -16,7 +16,7 @@ final class RouteShapes: ObservableObject {
     func load(_ routeKey: String, route: Route, op: Operator, stopList: [String: Stop]) {
         let key = Self.key(routeKey, op)
         guard op != .mtr, op != .lightRail, let gtfsId = route.gtfsId, asked.insert(key).inserted,
-              let url = URL(string: "https://hkbus.github.io/route-waypoints/\(gtfsId)-\((route.bound[op.rawValue] ?? "O").prefix(1)).json")
+              let url = URL(string: "https://hkbus.github.io/route-waypoints/\(gtfsId)-\((route.bound["kmb"] ?? route.bound[op.rawValue] ?? "O").prefix(1)).json")
         else { return }
         let stops = (route.stops[op.rawValue] ?? []).map { stopList[$0]?.location }
         Task {

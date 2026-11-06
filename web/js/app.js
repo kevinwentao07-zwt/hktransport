@@ -1,6 +1,6 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
 import { meters,
-  OP_COLORS, OP_LABELS, MODES, buildStopIndex, exactSite, instruction, journeyID, journeyPath, RETURN_COLOR, circularTurn, lineColor, lineName, matchingSites,
+  OP_COLORS, OP_LABELS, MODES, buildStopIndex, planAdvice, exactSite, instruction, journeyID, journeyPath, RETURN_COLOR, circularTurn, roadBetween, lineColor, lineName, matchingSites,
   nameText, normalizeDB, partialSite, placeOnTrack, primaryMode, progressAt, retime, rides, routeTrack, score, searchRoutes, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
@@ -47,7 +47,7 @@ const history = {
 const state = {
   lang: store.get('lang', 'zh'), script: store.get('script', 'hant'), tab: 'plan', db: null, dbError: null, index: null,
   origin: '', destination: '', chat: '', preference: store.get('preference', 'fastest'), phase: 'idle', error: null,
-  from: null, to: null, journeys: [], expanded: null, explanation: null, explaining: false, aiNotice: null, lastChat: null,
+  from: null, to: null, journeys: [], expanded: null, explanation: null, aiNotice: null, lastChat: null,
   discovery: null,
   stopQuery: '', stopPlace: null, stops: [], stopMode: 'all', stopRadius: 500, stopBusy: false, stopError: null, stopOpen: null,
   routeQuery: '', routeKey: null, saved: store.get('saved', []),
@@ -795,8 +795,13 @@ async function loadDB() {
 // MARK: Planning
 
 let planRun = 0;
+const SAME_PLACE_METERS = 30;
+
+/** Places picked from a list, by name, as a search by name could land on another branch. */
+const pickedPlaces = new Map();
 
 async function resolvePlace(text) {
+  if (pickedPlaces.has(text)) return pickedPlaces.get(text);
   const site = exactSite(text, siteIndex());
   if (site) return { name: nameText(site.name, state.lang), location: site.location };
   // Google finds places while its free allowance lasts; the free sources take over after that.
@@ -815,7 +820,7 @@ async function here() {
 }
 
 function resetPlan() {
-  Object.assign(state, { focus: null, journeys: [], expanded: null, explanation: null, explaining: false, aiNotice: null, from: null, to: null, error: null });
+  Object.assign(state, { focus: null, journeys: [], expanded: null, explanation: null, aiNotice: null, from: null, to: null, error: null });
 }
 
 function showRouteView() {
@@ -870,21 +875,19 @@ async function runPlan(request) {
   const run = ++planRun, ai = client(), stale = () => run !== planRun;
   stopNavigation();
   resetPlan();
+  renderBottomStatus();
   setPhase('understanding');
   let intent = null;
 
   if (request.kind === 'place') {
     intent = { origin: normalizedOrigin(state.origin), destination: request.place.name, preference: state.preference };
-  } else if (ai) {
+  } else if (request.kind === 'chat' && ai) {
+    // Only the chat box needs the AI: the search box holds a place, and the planner does the rest.
     try {
-      if (request.kind === 'chat') {
-        const reply = await ai.chat(chatMessage(request.text, request.current, request.context));
-        if (stale()) return;
-        if (reply.wish) return startDiscovery({ ...reply.wish, asked: request.asked, question: request.context.mayAsk ? reply.wish.question : null }, run);
-        intent = reply.trip;
-      } else {
-        intent = await ai.intent(searchMessage(normalizedOrigin(state.origin), state.destination.trim(), state.preference));
-      }
+      const reply = await ai.chat(chatMessage(request.text, request.current, request.context));
+      if (stale()) return;
+      if (reply.wish) return startDiscovery({ ...reply.wish, asked: request.asked, question: request.context.mayAsk ? reply.wish.question : null }, run);
+      intent = reply.trip;
     } catch (error) {
       state.aiNotice = googleShops()
         ? t('AI 額度已用完或暫時未能使用，已直接用 Google 搜尋。', 'AI is used up or unavailable, so this went straight to Google.')
@@ -901,8 +904,6 @@ async function runPlan(request) {
   }
   intent ??= currentTrip();
   if (!intent) return setPhase('failed', t('請輸入目的地，例如「由旺角去理大」。', 'Enter a destination, e.g. "Mong Kok to PolyU".'));
-  // An empty start box always means here, whatever the AI inferred.
-  if (request.kind === 'search' && !normalizedOrigin(state.origin)) intent.origin = null;
   if (request.kind === 'chat') {
     state.origin = intent.origin ?? '';
     state.destination = intent.destination;
@@ -923,8 +924,15 @@ async function runPlan(request) {
   if (!end) return setPhase('failed', t(`找不到目的地「${intent.destination}」。`, `Couldn't find "${intent.destination}".`));
   state.from = start;
   state.to = end;
+  // A search can land somewhere other than the words typed, so the boxes say where it went.
+  if (request.kind === 'search') {
+    if (intent.origin) state.origin = start.name;
+    state.destination = end.name;
+    syncPlaceInputs();
+  }
   mapView.fit([start.location, end.location]);
   if (!inHongKong(start.location)) return setPhase('failed', t('起點不在香港範圍內。', 'The start is outside Hong Kong.'));
+  if (meters(start.location, end.location) < SAME_PLACE_METERS) return setPhase('failed', t('出發地和目的地是同一個地方。', 'The start and destination are the same place.'));
 
   setPhase('planning');
   const departure = Date.now();
@@ -941,37 +949,12 @@ async function runPlan(request) {
   state.journeys = live.sort((a, b) => score(a, state.preference) - score(b, state.preference));
   setPhase('done');
 
-  if (!ai || state.aiNotice) return;
-  state.explaining = true;
-  renderBottomStatus();
-  try {
-    const reply = await ai.explain(summary(state.journeys.slice(0, 3)), state.lang);
-    if (!stale()) state.explanation = reply;
-  } catch { /* The options are still on screen. */ }
-  if (stale()) return;
-  state.explaining = false;
-  renderBottomStatus();
+  showAdvice();
 }
 
-/** A compact, coordinate-free description of the options for the AI. */
-function summary(journeys) {
-  const now = Date.now();
-  const lines = [`Rider preference: ${state.preference}`];
-  journeys.forEach((journey, index) => {
-    const parts = [`Option ${index + 1}: ${Math.round(totalMinutes(journey))} min total, ${transfers(journey)} transfer(s), ${Math.round(walkingMeters(journey))} m walking.`];
-    for (const leg of journey.legs) {
-      if (leg.type === 'walk') {
-        parts.push(`Walk ${Math.round(leg.minutes)} min to ${leg.to ? name(leg.to) : 'destination'}.`);
-      } else {
-        const wait = leg.liveDeparture
-          ? `${leg.isProjected ? 'projected from the live headway' : 'live'}: departs in ${Math.max(0, Math.round((leg.liveDeparture - now) / 60_000))} min`
-          : `estimate, no live data: wait about ${Math.round(leg.waitMinutes)} min`;
-        parts.push(`${OP_LABELS[leg.op]} ${lineName(leg.op, leg.route, state.lang)} from ${name(leg.boardStopID)} to ${name(leg.alightStopID)}, ${leg.alightPosition - leg.boardPosition} stops (${wait}).`);
-      }
-    }
-    lines.push(parts.join(' '));
-  });
-  return lines.join('\n');
+function showAdvice() {
+  state.explanation = planAdvice(state.journeys, t, (ride) => lineName(ride.op, ride.route, state.lang), Date.now());
+  renderBottomStatus();
 }
 
 // MARK: Finding places
@@ -1125,22 +1108,26 @@ function selectedPath() {
 
 const VEHICLE_REFRESH = 30_000, SAME_ARRIVAL_MS = 90_000;
 let shownVehicles = [], gliding = false, lastGlide = 0, lastBusID = 0;
-let vehicleRide = null, vehicleList = [], vehicleKey = '', vehicleArrivals = [], vehicleFetched = 0, vehicleFetching = false;
+let vehicleRide = null, vehicleList = [], vehicleKey = '', vehicleArrivals = [], vehicleFetched = 0, vehicleFetching = '';
+const arrivalsSeen = new Map();
 
-/** The first bus or minibus ride of the route on screen. */
+/**
+ * The route whose buses are on the map. On a planned trip that is always the bus the rider is waiting
+ * for: tapping a stop only shows that stop's arrivals, and the bus and its road stay as they were.
+ */
 function rideOnScreen() {
-  if (state.focus) {
-    const focus = state.focus, route = state.db?.routes[focus.routeKey];
-    if (!route || ['mtr', 'lightRail'].includes(focus.op)) return null;
-    return { routeKey: focus.routeKey, route: route.route, op: focus.op, boardPosition: focus.position };
+  if (state.tab === 'plan') {
+    const journey = state.journeys.find((j) => journeyID(j) === (state.nav?.id ?? state.expanded));
+    return journey && rides(journey).find((ride) => !['mtr', 'lightRail'].includes(ride.op));
   }
-  if (state.tab !== 'plan') return null;
-  const journey = state.journeys.find((j) => journeyID(j) === (state.nav?.id ?? state.expanded));
-  return journey && rides(journey).find((ride) => !['mtr', 'lightRail'].includes(ride.op));
+  const focus = state.focus, route = focus && state.db?.routes[focus.routeKey];
+  if (!route || ['mtr', 'lightRail'].includes(focus.op)) return null;
+  return { routeKey: focus.routeKey, route: route.route, op: focus.op, boardPosition: focus.position };
 }
 
 /** Asks for arrivals along the whole route, now and then, and places every bus between times. */
 function moveVehicles() {
+  if (document.hidden) return; // Nobody is looking, so ask the operators for nothing.
   showArrivalTag();
   const ride = rideOnScreen(), route = ride && state.db.routes[ride.routeKey];
   if (!route) {
@@ -1154,23 +1141,25 @@ function moveVehicles() {
   if (key !== vehicleKey) {
     vehicleKey = key;
     vehicleList = [];
-    vehicleArrivals = [];
-    vehicleFetched = 0;
+    // Coming back to a route shows its buses at once, as the times are still good.
+    ({ arrivals: vehicleArrivals, at: vehicleFetched } = arrivalsSeen.get(key) ?? { arrivals: [], at: 0 });
   }
   vehicleRide = ride;
-  if (!vehicleFetching && Date.now() - vehicleFetched > VEHICLE_REFRESH) {
-    vehicleFetching = true;
+  if (vehicleFetching !== key && Date.now() - vehicleFetched > VEHICLE_REFRESH) {
+    vehicleFetching = key;
     routeArrivals(route, ride.op, state.db, state.lang).then((arrivals) => {
+      arrivalsSeen.set(key, { arrivals, at: Date.now() });
       if (key === vehicleKey) vehicleArrivals = arrivals;
     }).catch(() => {}).finally(() => {
-      vehicleFetching = false;
+      if (vehicleFetching === key) vehicleFetching = '';
+      if (key !== vehicleKey) return;
       vehicleFetched = Date.now();
       moveVehicles();
     });
   }
   const track = trackOf(route, ride.op);
   const previous = vehicleList;
-  const shownTime = state.focus ? chosenStopArrival() : ride.liveDeparture;
+  const shownTime = state.tab === 'plan' ? ride.liveDeparture : chosenStopArrival();
   vehicleList = vehiclesOnRoute(vehicleArrivals, vehicleRide, state.db, Date.now()).map((vehicle) => {
     // On the real road when that has arrived, by how far along the route it is.
     const placed = track ? { ...vehicle, ...placeOnTrack(track, vehicle.position) } : vehicle;
@@ -1180,7 +1169,7 @@ function moveVehicles() {
   });
   if (previous !== vehicleList) glideVehicles();
   const coming = vehicleList.find((vehicle) => vehicle.isNext);
-  if (state.focus || state.tab !== 'plan') return mapView.approach(null);
+  if (state.tab !== 'plan') return mapView.approach(null);
   const ids = route.stops[ride.op], stop = stopOnRoad(route, ride.op, ride.boardPosition);
   const ahead = coming ? ids.slice(Math.ceil(coming.position), ride.boardPosition).flatMap((id, index) => {
     const location = stopOnRoad(route, ride.op, Math.ceil(coming.position) + index);
@@ -1345,7 +1334,7 @@ function routeDetail(route, op, back) {
     h('button', { class: 'back', onclick: back }, icon('back', 17), t('返回', 'Back')),
     h('div', { class: 'row' }, badge(op, route.route), h('span', { class: 'bold' }, `${nameText(route.orig, state.lang)} → ${nameText(route.dest, state.lang)}`)),
     id && arrivalCard(id),
-    !id && h('div', { class: 'tiny muted' }, t('在地圖或下面點選站點，查看來車時間。', 'Tap a stop on the map or below to see arrivals.')),
+    !id && h('div', { class: 'tiny muted' }, t('點選站點查看來車時間，左右滑動可設為出發地或目的地。', 'Tap a stop for arrivals, or swipe it to start or end a trip there.')),
     turn != null && h('div', { class: 'leg-key tiny' },
       h('span', {}, legDot(out), t(`去程：往${name(route.stops[op][turn])}`, `Out: to ${name(route.stops[op][turn])}`)),
       h('span', {}, legDot(RETURN_COLOR), t('回程：返回起點', 'Back: to the start'))),
@@ -1439,7 +1428,7 @@ function withRoads(path) {
       if (!hasRealLine(segment)) return segment;
       const track = trackOf(state.db.routes[segment.routeKey], segment.op);
       if (!track || !segment.positions) return segment;
-      return { ...segment, line: trackBetween(track, segment.positions[0], segment.positions.at(-1)), marks: segment.positions.map((position) => track.passes[position]?.location) };
+      return { ...segment, line: roadBetween(track, segment.positions[0], segment.positions.at(-1)), marks: segment.positions.map((position) => track.passes[position]?.location) };
     }).map(withLegs),
   };
 }
@@ -1561,6 +1550,8 @@ function chatPrompt() {
 
 function search() {
   if (!state.db || !state.destination.trim()) return;
+  stopSuggesting();
+  renderPlaceHistory(null);
   const origin = normalizedOrigin(state.origin);
   if (origin) history.add('origin', origin);
   if (!isCurrentLocation(state.destination)) history.add('destination', state.destination);
@@ -1652,35 +1643,60 @@ function stopSuggestions() {
   }))];
 }
 
-let suggestTimer = null, googlePlaces = [];
+let suggestTimer = null, suggestRun = 0, googlePlaces = [];
+
+/** Drops the suggestions still on their way, so none lands on top of a search already made. */
+function stopSuggesting() {
+  clearTimeout(suggestTimer);
+  suggestRun += 1;
+}
+
+const showSuggestions = (field) => (state.routeView ? renderPlaceHistory(field) : renderSheet());
 
 /** Stops answer at once. Google waits for a pause in the typing, to keep within its allowance. */
-function suggestPlaces() {
-  clearTimeout(suggestTimer);
-  const text = state.destination.trim();
+function suggestPlaces(field = 'destination') {
+  stopSuggesting();
+  const run = suggestRun, text = state[field].trim();
   if (text.length < 2) googlePlaces = [];
-  renderSheet();
+  showSuggestions(field);
   getFix();
   if (text.length < 2) return;
   suggestTimer = setTimeout(async () => {
     const near = state.fix && inHongKong(state.fix) ? state.fix : null;
     const found = await googleSuggest(text, near, state.lang);
-    if (text !== state.destination.trim() || state.routeView) return;
+    if (run !== suggestRun) return;
     googlePlaces = found;
-    renderSheet();
+    showSuggestions(field);
   }, 400);
 }
 
-function placeSuggestions() {
+/** From the home search box a suggestion plans the trip at once. */
+const planToItem = (item) => (item.site ? planTo(item.site) : planToSuggestion(item));
+
+/** From a box on the route page it fills that box, and the trip plans once it has a destination. */
+async function fillPlace(field, item) {
+  const location = item.site?.location ?? await googlePlaceLocation(item.id);
+  if (location) pickedPlaces.set(item.name, { name: item.name, location });
+  state[field] = item.name;
+  googlePlaces = [];
+  syncPlaceInputs();
+  renderPlaceHistory(null);
+  if (!state.destination.trim()) return $('destination-input')?.focus();
+  document.activeElement?.blur();
+  sheet.snap('half');
+  return search();
+}
+
+function placeSuggestions(field = 'destination', choose = planToItem) {
   const near = state.fix && inHongKong(state.fix) ? state.fix : null;
-  const stops = matchingSites(state.destination, siteIndex(), near, siteText).map(({ site, distance }) => ({ site, name: nameText(site.name, state.lang), meters: distance ?? undefined }));
+  const stops = matchingSites(state[field], siteIndex(), near, siteText).map(({ site, distance }) => ({ site, name: nameText(site.name, state.lang), meters: distance ?? undefined }));
   const items = mergeSuggestions(stops, googlePlaces);
   if (!items.length) return h('div', { class: 'small muted', style: 'padding:6px 4px' }, t('繼續輸入，或按搜尋。', 'Keep typing, or press search.'));
   return h('div', { class: 'list' }, items.map((item) => h('button', {
     class: 'item', onmousedown: (event) => event.preventDefault(),
     onclick: () => {
-      clearTimeout(suggestTimer);
-      return item.site ? planTo(item.site) : planToSuggestion(item);
+      stopSuggesting();
+      return choose(item);
     },
   },
     h('i', { class: 'dot', style: item.site ? 'color:#fff;background:var(--accent)' : '' }, icon(item.site ? 'bus' : 'pin', 16)),
@@ -1750,7 +1766,8 @@ function planTo(site) {
 
 function planToPlace(place) {
   state.tab = 'plan';
-  state.origin = '';
+  // A start the rider picked is waiting for this destination.
+  if (!pickedPlaces.has(state.origin)) state.origin = '';
   state.destination = place.name;
   state.discovery = null;
   state.routeView = true;
@@ -1839,6 +1856,7 @@ function visitRow(visit) {
 function renderPlaceHistory(field) {
   const slot = $('place-history');
   if (!slot) return;
+  if (field && state[field].trim() && state.db) return clear(slot, placeSuggestions(field, (item) => fillPlace(field, item)));
   clear(slot, field && historyBar(field, (text) => {
     state[field] = text;
     syncPlaceInputs();
@@ -1872,8 +1890,15 @@ function renderPlanTop() {
   const place = (field, placeholder, trailing) => h('label', { class: 'place' },
     h('input', {
       id: `${field}-input`, value: state[field], placeholder, enterkeyhint: 'search', autocomplete: 'off',
-      oninput: (event) => { state[field] = event.target.value; },
-      onfocus: () => renderPlaceHistory(field),
+      oninput: (event) => {
+        state[field] = event.target.value;
+        sheet.snap('full');
+        suggestPlaces(field);
+      },
+      onfocus: () => {
+        googlePlaces = [];
+        renderPlaceHistory(field);
+      },
       onblur: () => setTimeout(() => { if (!document.activeElement?.id?.endsWith('-input')) renderPlaceHistory(null); }, 150),
       onkeydown: (event) => { if (event.key === 'Enter') search(); },
     }), trailing);
@@ -2046,6 +2071,7 @@ function planSheet() {
       state.preference = preference;
       state.journeys = [...state.journeys].sort((a, b) => score(a, preference) - score(b, preference));
       renderSheet();
+      showAdvice();
     }));
   }
   if (state.discovery?.stage === 'choosing') {
@@ -2076,8 +2102,7 @@ function renderBottomStatus() {
       h('div', { class: 'tiny muted' }, t('也可以在下方直接輸入', 'Or type your answer below')));
   }
   clear(slot,
-    state.explanation && h('div', { class: 'reply' }, icon('spark', 15), h('span', {}, state.explanation)),
-    state.explaining && !state.explanation && h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('AI 整理建議中…', 'AI is summarising…')),
+    state.explanation && h('div', { class: 'reply' }, h('span', {}, state.explanation)),
     state.aiNotice && h('div', { class: 'tiny muted' }, state.aiNotice),
     area);
   renderChatControls();
@@ -2250,10 +2275,107 @@ function routesSheet() {
 }
 
 function stopRow(route, seq, id, op, dot) {
-  return h('div', { class: `card stop-row${state.focus?.position === seq ? ' chosen' : ''}` },
+  return swipeable(h('div', { class: `card stop-row${state.focus?.position === seq ? ' chosen' : ''}` },
     h('div', { class: 'row' },
       h('button', { class: 'tap grow small', onclick: () => chooseFocusStop(seq) }, dot, `${seq + 1}. ${name(id)}`),
-      starButton(route.key, seq, op)));
+      starButton(route.key, seq, op))), (side) => addStopToTrip(id, side));
+}
+
+const SWIPE_STARTS = 10, SWIPE_OPENS = 44, SWIPE_OPEN_AT = 124;
+let closeOpenSwipe = null;
+
+/** A card dragged sideways uncovers a button: swiping right 'start', swiping left 'end'. Only a tap on it counts. */
+function swipeable(card, chosen) {
+  let startX = 0, startY = 0, opened = 0, moved = 0, isDown = false, isSwiping = false, swallowClick = false;
+  const moveTo = (offset) => {
+    opened = offset;
+    card.style.transform = offset ? `translateX(${offset}px)` : '';
+    row.classList.toggle('open', !!offset);
+  };
+  const close = () => {
+    moveTo(0);
+    if (closeOpenSwipe === close) closeOpenSwipe = null;
+  };
+  const action = (side, text) => h('button', {
+    class: `swipe-action ${side}`,
+    onclick: () => {
+      close();
+      chosen(side);
+    },
+  }, text);
+  const row = h('div', { class: 'swipe' }, action('start', t('設為出發地', 'Start here')), action('end', t('設為目的地', 'Go here')), card);
+  card.addEventListener('pointerdown', (event) => {
+    if (closeOpenSwipe && closeOpenSwipe !== close) closeOpenSwipe();
+    if (event.button !== 0) return;
+    [startX, startY, moved, isDown, swallowClick] = [event.clientX, event.clientY, opened, true, false];
+  });
+  card.addEventListener('pointermove', (event) => {
+    if (!isDown) return;
+    const across = event.clientX - startX, along = event.clientY - startY;
+    if (!isSwiping) {
+      if (Math.max(Math.abs(across), Math.abs(along)) <= SWIPE_STARTS) return;
+      if (Math.abs(along) > Math.abs(across)) {
+        isDown = false;
+        return;
+      }
+      isSwiping = true;
+      card.setPointerCapture(event.pointerId);
+      row.classList.add('swiping');
+    }
+    moved = Math.max(-SWIPE_OPEN_AT * 1.2, Math.min(SWIPE_OPEN_AT * 1.2, opened + across));
+    card.style.transform = `translateX(${moved}px)`;
+    if (moved) row.dataset.side = moved > 0 ? 'start' : 'end';
+  });
+  const release = () => {
+    const wasSwiping = isSwiping;
+    isDown = isSwiping = false;
+    row.classList.remove('swiping');
+    return wasSwiping;
+  };
+  card.addEventListener('pointerup', () => {
+    if (!release()) {
+      // A tap on a card that is open only shuts it.
+      swallowClick = !!opened;
+      if (opened) close();
+      return;
+    }
+    swallowClick = true;
+    if (Math.abs(moved) < SWIPE_OPENS) return close();
+    moveTo(Math.sign(moved) * SWIPE_OPEN_AT);
+    closeOpenSwipe = close;
+  });
+  card.addEventListener('pointercancel', () => {
+    release();
+    moveTo(opened);
+  });
+  card.addEventListener('click', (event) => {
+    if (!swallowClick) return;
+    swallowClick = false;
+    event.stopPropagation();
+    event.preventDefault();
+  }, true);
+  return row;
+}
+
+function showToast(text) {
+  document.querySelector('.toast')?.remove();
+  const toast = h('div', { class: 'toast', role: 'status' }, text);
+  $('app').append(toast);
+  setTimeout(() => toast.remove(), 2600);
+}
+
+/** The start waits for a destination, so the rider can look through other routes for one. */
+function addStopToTrip(id, side) {
+  const stop = name(id);
+  pickedPlaces.set(stop, { name: stop, location: state.db.stops[id].location });
+  if (side === 'start') {
+    state.origin = stop;
+    return showToast(t(`出發地：${stop}。再選一個站設為目的地。`, `Starting from ${stop}. Now pick a stop to go to.`));
+  }
+  state.destination = stop;
+  setTab('plan');
+  syncPlaceInputs();
+  return search();
 }
 
 // MARK: Saved tab

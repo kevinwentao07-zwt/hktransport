@@ -85,7 +85,8 @@ export function mergeSuggestions(stops, places, limit = 10) {
 }
 
 const shapes = new Map();
-const shapeKey = (route, op) => (route?.gtfsId ? `${route.gtfsId}-${(route.bound?.[op] ?? 'O')[0]}` : null);
+// On joint routes Citybus numbers the directions the other way round; the published lines go by KMB's.
+const shapeKey = (route, op) => (route?.gtfsId ? `${route.gtfsId}-${(route.bound?.kmb ?? route.bound?.[op] ?? 'O')[0]}` : null);
 
 /** A route's real line, once it has arrived. */
 export const knownShape = (route, op) => shapes.get(shapeKey(route, op))?.points ?? null;

@@ -748,24 +748,20 @@ final class RoutePlannerTests: XCTestCase {
     }
 
     @MainActor
-    func testSearchBarIsAnalysedByTheAI() async throws {
+    func testSearchBarPlansWithoutTheAI() async throws {
         FakeDeepSeek.start(intent: #"{"origin":"站一","destination":"站二","preference":"fastest"}"#)
         defer { FakeDeepSeek.stop() }
         let db = try Self.fixture()
         let planner = RoutePlannerModel()
-        planner.destinationText = "二站"
+        planner.destinationText = "站二"
         planner.search(db: db, language: .zh, currentLocation: { Self.here },
                        ai: DeepSeekClient())
         await waitUntil { planner.explanation != nil || planner.isFailed }
 
         XCTAssertEqual(planner.journeys.first?.rides.first?.route, "XYL")
-        XCTAssertEqual(planner.explanation, FakeDeepSeek.advice)
-        // The AI wanted a start, but an empty box means the current location.
+        XCTAssertTrue(planner.explanation?.hasPrefix("建議第一個方案") == true)
         XCTAssertEqual(planner.origin?.name, "我的位置")
-        let sent = FakeDeepSeek.bodies.joined()
-        XCTAssertTrue(sent.contains("Start: current location"))
-        XCTAssertFalse(sent.contains("22.25"), "coordinates must not reach the AI")
-        XCTAssertFalse(sent.contains("114.25"), "coordinates must not reach the AI")
+        XCTAssertTrue(FakeDeepSeek.bodies.isEmpty, "the search bar must not reach the AI")
     }
 
     @MainActor
@@ -783,7 +779,7 @@ final class RoutePlannerTests: XCTestCase {
         XCTAssertEqual(planner.preference, .fewerTransfers)
         XCTAssertEqual(planner.chatText, "")
         XCTAssertEqual(planner.lastChat, "由一站去二站唔想轉車")
-        XCTAssertEqual(planner.explanation, FakeDeepSeek.advice)
+        XCTAssertTrue(planner.explanation?.hasPrefix("建議第一個方案") == true)
     }
 
     @MainActor
@@ -792,9 +788,8 @@ final class RoutePlannerTests: XCTestCase {
         defer { FakeDeepSeek.stop() }
         let db = try Self.fixture()
         let planner = RoutePlannerModel()
-        planner.originText = "站一"
-        planner.destinationText = "站二"
-        planner.search(db: db, language: .zh, currentLocation: { nil }, ai: DeepSeekClient())
+        planner.chatText = "由站一去站二"
+        planner.sendChat(db: db, language: .zh, currentLocation: { nil }, ai: DeepSeekClient())
         await waitUntil { planner.phase == .done || planner.isFailed }
 
         XCTAssertEqual(planner.journeys.first?.rides.first?.route, "XYL")
@@ -836,14 +831,13 @@ final class RoutePlannerTests: XCTestCase {
         XCTAssertNil(DeepSeekClient.decodeIntent("Sorry, I can't help with that."))
     }
 
-    func testSummaryContainsNoCoordinates() throws {
+    func testAdviceComesFromThePlansOwnNumbers() throws {
         let (planner, db) = try planner()
         let departure = Self.hongKong(hour: 12)
         let journeys = planner.plan(from: location("A", in: db), to: location("F", in: db), departure: departure)
-        let summary = DeepSeekClient.summary(of: journeys, preference: .fastest, now: departure) { $0 }
-        XCTAssertTrue(summary.contains("KMB·LWB 1 from A to C"))
-        XCTAssertFalse(summary.contains("22.3"))
-        XCTAssertFalse(summary.contains("114.1"))
+        let advice = try XCTUnwrap(Journey.advice(journeys, language: .en, now: departure))
+        XCTAssertTrue(advice.hasPrefix("Best option: \(Int(journeys[0].totalMinutes.rounded())) min"))
+        XCTAssertNil(Journey.advice([], language: .en, now: departure))
     }
 }
 

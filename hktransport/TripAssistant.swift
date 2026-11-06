@@ -332,41 +332,37 @@ struct DeepSeekClient: Sendable {
         return TripIntent(origin: TripIntentParser.normalizedOrigin(object["origin"] as? String),
                           destination: destination, preference: preference)
     }
+}
 
-    // MARK: Explanation
+extension Journey {
+    private static let sameWalkMeters = 100
 
-    func explain(_ summary: String, language: Lang) async throws -> String {
-        try await complete(task: language == .zh ? "explain_zh" : "explain_en", message: summary).forScript
-    }
-
-    /// A compact, coordinate-free description of the options for the AI.
-    /// Only route numbers, stop names and minutes leave the device.
-    static func summary(of journeys: [Journey], preference: TripPreference, now: Date, language: Lang = .en,
-                        stopName: (String) -> String) -> String {
-        var lines = ["Rider preference: \(preference.rawValue)"]
-        for (index, journey) in journeys.enumerated() {
-            let arrival = Int((journey.arrival.timeIntervalSince(now) / 60).rounded())
-            var parts = ["Option \(index + 1): \(Int(journey.totalMinutes.rounded())) min total, arrives in \(arrival) min, " +
-                         "\(journey.transfers) transfer(s), \(Int(journey.walkingMeters)) m walking."]
-            for leg in journey.legs {
-                switch leg {
-                case .walk(_, let minutes, let to):
-                    parts.append("Walk \(Int(minutes.rounded())) min to \(to.map(stopName) ?? "destination").")
-                case .ride(let ride):
-                    let wait: String
-                    if let live = ride.liveDeparture {
-                        let minutes = max(0, Int((live.timeIntervalSince(now) / 60).rounded()))
-                        wait = "\(ride.isProjected ? "projected from the live headway" : "live"): departs in \(minutes) min"
-                    } else {
-                        wait = "estimate, no live data: wait about \(Int(ride.waitMinutes.rounded())) min"
-                    }
-                    parts.append("\(ride.op.label) \(ride.op.lineName(ride.route).text(language)) from \(stopName(ride.boardStopID)) to " +
-                                 "\(stopName(ride.alightStopID)), \(ride.stopCount) stops, " +
-                                 "\(Int(ride.rideMinutes.rounded())) min on board (\(wait)).")
-                }
-            }
-            lines.append(parts.joined(separator: " "))
+    /// Why the first option is on top, from its own numbers. Only a real-time departure is mentioned as one.
+    static func advice(_ journeys: [Journey], language: Lang, now: Date) -> String? {
+        guard let best = journeys.first else { return nil }
+        func t(_ zh: String, _ en: String) -> String { language.pick(zh, en) }
+        let minutes = Int(best.totalMinutes.rounded()), changes = best.transfers, walk = Int(best.walkingMeters.rounded())
+        var lines = [t("建議第一個方案：全程 \(minutes) 分鐘，\(changes > 0 ? "轉 \(changes) 次車" : "直達")，步行 \(walk) 米。",
+                       "Best option: \(minutes) min, \(changes > 0 ? "\(changes) change\(changes > 1 ? "s" : "")" : "direct"), \(walk) m on foot.")]
+        if let first = best.rides.first, let live = first.liveDeparture, !first.isProjected {
+            let wait = max(0, Int(live.timeIntervalSince(now) / 60)), line = first.op.lineName(first.route).text(language)
+            lines.append(wait > 0 ? t("\(line) \(wait) 分鐘後開出。", "\(line) leaves in \(wait) min.") : t("\(line) 即將開出。", "\(line) is leaving now."))
         }
-        return lines.joined(separator: "\n")
+        if journeys.count > 1 {
+            let next = journeys[1]
+            let faster = Int(next.totalMinutes.rounded()) - minutes, fewer = next.transfers - changes
+            let less = Int(next.walkingMeters.rounded()) - walk
+            var differences: [String] = []
+            if faster > 0 { differences.append(t("快 \(faster) 分鐘", "\(faster) min faster")) }
+            if faster < 0 { differences.append(t("慢 \(-faster) 分鐘", "\(-faster) min slower")) }
+            if fewer > 0 { differences.append(t("少轉 \(fewer) 次車", "\(fewer) fewer change\(fewer > 1 ? "s" : "")")) }
+            if fewer < 0 { differences.append(t("多轉 \(-fewer) 次車", "\(-fewer) more change\(fewer < -1 ? "s" : "")")) }
+            if less >= sameWalkMeters { differences.append(t("少行 \(less) 米", "\(less) m less walking")) }
+            if less <= -sameWalkMeters { differences.append(t("多行 \(-less) 米", "\(-less) m more walking")) }
+            if !differences.isEmpty {
+                lines.append(t("比第二個方案\(differences.joined(separator: "、"))。", "Against the next option: \(differences.joined(separator: ", "))."))
+            }
+        }
+        return lines.joined(separator: t("", " ")).forScript
     }
 }

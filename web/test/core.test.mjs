@@ -287,6 +287,19 @@ test('KMB positions follow the stops, not the sequence, when a stop is missing f
   const order = E.kmbPositions(['a', 'b', 'x', 'c', 'a'], ['a', 'b', 'c', 'a']);
   assert.deepEqual([...order], [[1, 0], [2, 1], [4, 2], [5, 3]]);
 });
+test('the advice on a plan comes from its own numbers', () => {
+  const t = (zh, en) => en, line = (ride) => ride.route, min = 60_000;
+  const ride = (route, liveDeparture = null, isProjected = false) => ({ type: 'ride', op: 'kmb', route, transferMinutes: 0, rideMinutes: 10, waitMinutes: 2, liveDeparture, isProjected });
+  const walk = (meters) => ({ type: 'walk', minutes: meters / 80, meters });
+  const quick = { legs: [walk(80), ride('1A', 3 * min)] }, slow = { legs: [walk(480), ride('2'), ride('6')] };
+  const advice = T.planAdvice([quick, slow], t, line, 0);
+  assert.match(advice, /^Best option: \d+ min, direct, 80 m on foot\. 1A leaves in 3 min\. /);
+  assert.match(advice, /\d+ min faster, 1 fewer change, 400 m less walking\.$/);
+  // A time worked out from the headway is no live departure, and with one option there is no comparing.
+  assert.equal(T.planAdvice([{ legs: [ride('1A', 3 * min, true)] }], t, line, 0).includes('leaves'), false);
+  assert.equal(T.planAdvice([quick], t, line, 0).includes('Against'), false);
+  assert.equal(T.planAdvice([], t, line, 0), null);
+});
 test('a route is followed by progress along it, even over the same road twice', () => {
   const at = (lat, lng) => ({ lat, lng });
   // Out along a road and back along the same road: a circular route.
@@ -303,6 +316,12 @@ test('a route is followed by progress along it, even over the same road twice', 
   close(road[0].lat, 22.31, 0.0001);
   assert.ok(road.length > 3, 'keeps the bends between the stops');
   assert.equal(T.routeTrack(null, stops), null);
+  // The wrong direction's line reaches few of the stops, so it is not used. A stop past the end is joined on.
+  const away = at(23, 115);
+  assert.equal(T.routeTrack(line, [stops[0], stops[1], away, away, away]), null);
+  const short = T.routeTrack(line, [...stops, ...stops.slice(-1), ...stops.slice(-1), ...stops.slice(-1), away]);
+  assert.deepEqual(T.roadBetween(short, 0, short.passes.length - 1).at(-1), away);
+  assert.equal(T.roadBetween(short, 0, 1).includes(away), false);
   assert.equal(T.routeTrack(line, [at(23, 115), at(23.1, 115)]), null);
   const gap = T.routeTrack(line, [stops[0], null, stops[2]]);
   close(T.placeOnTrack(gap, 1).location.lat, 22.31, 0.0002); // A stop it can't place is passed through.
@@ -316,6 +335,14 @@ test('stop suggestions run from near to far', () => {
   assert.deepEqual(T.matchingSites('旺角', index, null).map((m) => m.site.name.zh), ['旺角東站', '旺角站']);
   assert.deepEqual(T.matchingSites('  ', index, near), []);
   assert.equal(T.matchingSites('站', index, near, undefined, 1).length, 1);
+});
+test('joint routes take the line of KMB\'s direction, whichever operator is on screen', async () => {
+  const asked = [];
+  globalThis.fetch = async (url) => { asked.push(url); return { ok: false }; };
+  await P.loadShape({ gtfsId: 1497, bound: { ctb: 'O', kmb: 'I' } }, 'ctb');
+  await P.loadShape({ gtfsId: 25, bound: { ctb: 'O' } }, 'ctb');
+  assert.match(asked[0], /1497-I\.json$/);
+  assert.match(asked[1], /25-O\.json$/);
 });
 test('stops and places mix from near to far, once each', () => {
   const merged = P.mergeSuggestions([{ name: '旺角站', meters: 300 }, { name: '朗豪坊', meters: 90 }], [{ name: '朗豪坊', meters: 80 }, { name: '遠方' }, { name: '始創中心', meters: 150 }]);
@@ -360,10 +387,10 @@ test('the shared AI sends a task name and the text, never a prompt or a key', as
     sent.push({ url, headers: options.headers, body: JSON.parse(options.body) });
     return { ok: true, status: 200, json: async () => ({ reply: 'Take the first.' }) };
   };
-  await A.sharedAI().explain('Two options', 'en');
+  await A.sharedAI().rank({ want: 'tea' }, [], 'en');
   assert.equal(sent[0].url, 'api/ai');
   assert.deepEqual(Object.keys(sent[0].body), ['task', 'message']);
-  assert.equal(sent[0].body.task, 'explain_en');
+  assert.equal(sent[0].body.task, 'rank_en');
   assert.ok(A.PROMPTS[sent[0].body.task]);
   assert.equal(sent[0].headers.Authorization, undefined);
   globalThis.fetch = async () => ({ ok: false, status: 429, json: async () => ({ error: '太頻繁' }) });

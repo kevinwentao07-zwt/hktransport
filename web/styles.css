@@ -234,6 +234,15 @@ svg.icon.solid { fill: currentColor; }
 @media (prefers-reduced-motion: reduce) { .bus3d { transition: none; } .bus-marker { animation: none; } }
 .card > div:empty { display: none; }
 .stop-row { padding: 8px 12px; }
+.swipe { position: relative; }
+.swipe > .card { position: relative; touch-action: pan-y; transition: transform .28s var(--ease-out); }
+.swipe.swiping > .card { transition: none; }
+.swipe-action { position: absolute; top: 0; bottom: 0; width: 116px; display: none; place-items: center; border-radius: 20px; color: #fff; font-size: 13px; font-weight: 600; }
+.swipe-action.start { left: 0; background: var(--accent); }
+.swipe-action.end { right: 0; background: #ff3b30; }
+.swipe:is(.swiping, .open)[data-side="start"] .swipe-action.start, .swipe:is(.swiping, .open)[data-side="end"] .swipe-action.end { display: grid; }
+#place-history .list { max-height: 52vh; overflow-y: auto; }
+.toast { position: fixed; left: 50%; bottom: 96px; z-index: 50; transform: translateX(-50%); width: max-content; max-width: calc(100vw - 32px); padding: 9px 14px; border-radius: 14px; background: var(--surface); color: var(--ink); box-shadow: 0 2px 10px rgba(0, 0, 0, .35); font-size: 13px; }
 /* Shops on Google's free embedded map, covering the other map whole. */
 #embed-map { position: absolute; inset: 0; z-index: 1; background: var(--bg, #e4e6e4); }
 #embed-map iframe { display: block; width: 100%; border: 0; }
