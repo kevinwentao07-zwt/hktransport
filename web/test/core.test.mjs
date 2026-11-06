@@ -180,7 +180,6 @@ test('AI replies', () => {
   assert.equal(A.decodeChat('{"kind":"discover","want":"咖啡","query":"安靜 咖啡店"}').wish.query, '安靜 咖啡店');
   assert.equal(A.decodeChat('{"kind":"discover","want":"咖啡"}').wish.query, '咖啡');
   assert.equal(A.parseWish('我想吃螺狮粉').query, '螺狮粉');
-  assert.throws(() => A.parseCompletion({ choices: [{ finish_reason: 'length', message: { content: '' } }] }, 200), /ran out of tokens/);
   assert.match(A.searchMessage(null, '理大', 'fastest'), /Start: current location/);
 });
 
@@ -221,23 +220,6 @@ test('area words', () => {
   assert.equal(P.cleanArea('朗豪坊附近'), '朗豪坊');
   assert.equal(P.cleanArea('附近'), '附近');
   assert.ok(P.isNearby('附近') && !P.isNearby('旺角'));
-});
-
-test('AI requests keep thinking off, send no coordinates and report failures', async () => {
-  const sent = [];
-  globalThis.fetch = async (url, options) => {
-    sent.push({ url, body: JSON.parse(options.body), auth: options.headers.Authorization });
-    return { status: 200, json: async () => ({ choices: [{ message: { content: '建議選第一個' } }] }) };
-  };
-  assert.equal(await A.deepSeek('test-key').explain('Area: 油尖旺區', 'zh'), '建議選第一個');
-  assert.equal(sent[0].url, 'https://api.deepseek.com/chat/completions');
-  assert.deepEqual(sent[0].body.thinking, { type: 'disabled' });
-  assert.equal(sent[0].body.max_tokens, 4000);
-  assert.equal(sent[0].auth, 'Bearer test-key');
-  assert.match(sent[0].body.messages[1].content, /Area: 油尖旺區/);
-  assert.doesNotMatch(JSON.stringify(sent[0].body.messages[1]), /22\.\d|114\.\d/);
-  globalThis.fetch = async () => ({ status: 401, json: async () => ({ error: { message: 'bad key' } }) });
-  await assert.rejects(A.deepSeek('x').intent('y'), /bad key/);
 });
 
 test('the AI sees the conversation and what is on screen', () => {

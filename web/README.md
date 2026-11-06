@@ -8,7 +8,7 @@ search from Google on your own server and otherwise the Government and OpenStree
 from DeepSeek. To find shops, the AI works out what to search for, Google finds them with their details,
 and the AI ranks them and says why.
 On your own server, `server/ai_proxy.py` holds the DeepSeek key and every visitor can use the AI.
-Without it, as on GitHub Pages, riders add their own key in Settings.
+Without it, as on GitHub Pages, the page uses its free map and search, with no AI.
 
 | File | Purpose |
 | --- | --- |

@@ -1,4 +1,4 @@
-// DeepSeek client and the rule parser used without a key. A port of TripAssistant.swift.
+// The AI, reached through this site's server, and the rule parser used without it.
 const FEWER = ['唔想轉車', '不想轉車', '唔轉車', '不轉車', '少轉車', '少啲轉車', '直達', 'fewer transfers', 'no transfers', 'no transfer', 'direct'];
 const LESS_WALK = ['唔想行', '少行路', '少啲行', '少行', '不想走路', '少走路', 'less walking', 'walk less'];
 const FILLER = ['點樣去', '點去', '怎麼去', '怎樣去', '如何去', '嘅路線', '的路線', '搭咩車', '坐咩車', '坐什麼車', '坐甚麼車', '最快', '快啲', '請問', '我想', '我要', 'fastest', 'quickest', 'how do i get there', 'how to get there', 'please'];
@@ -224,29 +224,6 @@ export function applyRanking(reply, suggestions) {
     ranked.push({ ...suggestions[index], reason: clean(item.reason) || suggestions[index].reason });
   }
   return [...ranked, ...suggestions.filter((_, index) => !used.has(index))];
-}
-
-export function parseCompletion(json, status) {
-  if (status !== 200) throw new Error(`DeepSeek: ${json?.error?.message ?? `HTTP ${status}`}`);
-  const choice = json?.choices?.[0], content = clean(choice?.message?.content);
-  if (!content) throw new Error(choice?.finish_reason === 'length' ? 'DeepSeek ran out of tokens before answering' : 'DeepSeek returned an empty answer');
-  return content;
-}
-
-/** Thinking stays off: it made no difference to the answers and took ten times as long. */
-export function deepSeek(apiKey, model = 'deepseek-flash') {
-  return assistant(async (task, user) => {
-    const response = await fetch('https://api.deepseek.com/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model, temperature: 0.2, max_tokens: 4000, stream: false, thinking: { type: 'disabled' },
-        messages: [{ role: 'system', content: PROMPTS[task] }, { role: 'user', content: user }],
-      }),
-      signal: AbortSignal.timeout(60_000),
-    });
-    return parseCompletion(await response.json().catch(() => null), response.status);
-  });
 }
 
 /** The AI this site's server provides, which holds the key. */

@@ -5,7 +5,7 @@ import { meters,
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache } from './eta.js?v=dev';
-import { chatMessage, deepSeek, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
+import { chatMessage, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
 import { HONG_KONG, cleanArea, googleSearch, googleWalk, inHongKong, insideArea, isNearby, knownWalk, lookupPlace, mergeShops, photonSearch, withinArea } from './places.js?v=dev';
 
 // MARK: Storage
@@ -45,7 +45,7 @@ const history = {
 
 const state = {
   lang: store.get('lang', 'zh'), tab: 'plan', db: null, dbError: null, index: null,
-  origin: '', destination: '', chat: '', preference: 'fastest', phase: 'idle', error: null,
+  origin: '', destination: '', chat: '', preference: store.get('preference', 'fastest'), phase: 'idle', error: null,
   from: null, to: null, journeys: [], expanded: null, explanation: null, explaining: false, aiNotice: null, lastChat: null,
   discovery: null,
   stopQuery: '', stopPlace: null, stops: [], stopMode: 'all', stopRadius: 500, stopBusy: false, stopError: null, stopOpen: null,
@@ -54,11 +54,7 @@ const state = {
 };
 const t = (zh, en) => (state.lang === 'zh' ? zh : en);
 const name = (id) => stopName(id, state.db, state.lang);
-const client = () => {
-  const key = store.get('apiKey', '');
-  if (key) return deepSeek(key, store.get('model', '') || undefined);
-  return state.sharedAI ? sharedAI() : null;
-};
+const client = () => (state.sharedAI ? sharedAI() : null);
 const siteIndex = () => (state.index ??= buildStopIndex(state.db));
 
 // MARK: DOM helpers
@@ -1389,22 +1385,23 @@ function renderBottomStatus() {
   renderChatControls();
 }
 
+const speechLabels = () => ({ 'zh-HK': t('粵語', 'Cantonese'), 'zh-CN': t('普通話', 'Mandarin'), 'en-US': 'English' });
+
 function renderPlanBottom() {
-  const hasKey = !!client();
-  const speechLabels = { 'zh-HK': t('粵語', 'Cantonese'), 'zh-CN': t('普通話', 'Mandarin'), 'en-US': 'English' };
+  const hasAI = !!client(), labels = speechLabels();
   const speechButton = Recognition && h('button', {
     class: 'lang', onclick: (event) => {
-      const order = Object.keys(speechLabels);
+      const order = Object.keys(labels);
       state.speechLang = order[(order.indexOf(state.speechLang) + 1) % order.length];
       store.set('speechLang', state.speechLang);
-      event.target.textContent = speechLabels[state.speechLang];
+      event.target.textContent = labels[state.speechLang];
     },
-  }, speechLabels[state.speechLang]);
+  }, labels[state.speechLang]);
   clear($('bottom'),
     h('div', { id: 'ai-status', style: 'display:flex;flex-direction:column;gap:4px' }),
     h('div', { id: 'chat-history' }),
     h('div', { class: 'field' },
-      h('span', { class: hasKey ? 'ai' : 'muted' }, icon('spark', 18)),
+      h('span', { class: hasAI ? 'ai' : 'muted' }, icon('spark', 18)),
       h('input', {
         id: 'chat-input', value: state.chat, placeholder: chatPrompt(), enterkeyhint: 'send', autocomplete: 'off',
         oninput: (event) => { state.chat = event.target.value; },
@@ -1415,7 +1412,7 @@ function renderPlanBottom() {
       speechButton,
       Recognition && h('button', { id: 'mic', class: 'icon-button', 'aria-label': t('語音輸入', 'Voice input'), onclick: toggleSpeech }, icon('mic', 20)),
       h('button', { class: 'go', 'aria-label': t('傳送', 'Send'), onclick: sendChat }, icon('send', 19))),
-    !hasKey && h('button', { class: 'tiny muted', style: 'text-align:left;padding:0 6px', onclick: () => setTab('settings') }, t('未連接 AI，現時使用基本解析。到設定加入 key', 'AI not connected, using basic parsing. Add a key in Settings')));
+    !hasAI && h('div', { class: 'tiny muted', style: 'padding:0 6px' }, t('AI 未連接，現時使用基本解析。', 'AI isn\'t connected, using basic parsing.')));
   renderBottomStatus();
 }
 
@@ -1562,36 +1559,71 @@ function savedSheet() {
 
 // MARK: Settings tab
 
+const settingGroup = (title, ...rows) => h('section', { class: 'settings' }, h('h2', {}, title), h('div', { class: 'card' }, rows));
+const setting = (label, control) => h('div', { class: 'setting' }, h('span', {}, label), control);
+const aboutItem = (title, ...body) => h('details', { class: 'about' }, h('summary', {}, title), h('div', { class: 'small muted' }, body));
+
+/** A button that asks once more before it clears anything. */
+function clearButton(label, count, clearAll) {
+  const button = h('button', { class: 'danger', disabled: !count }, label);
+  let asked = false;
+  button.addEventListener('click', () => {
+    if (!asked) {
+      asked = true;
+      button.textContent = t('再按一次確認', 'Tap again to confirm');
+      setTimeout(() => {
+        asked = false;
+        if (button.isConnected) button.textContent = label;
+      }, 3000);
+      return;
+    }
+    clearAll();
+    renderTab();
+  });
+  return button;
+}
+
 function settingsSheet() {
-  const keyInput = h('input', { type: 'password', placeholder: store.get('apiKey', '') ? t('已設定，輸入新 key 以取代', 'Saved. Type a new key to replace it') : t('貼上 DeepSeek API key', 'Paste a DeepSeek API key'), autocomplete: 'off' });
+  const searches = Object.values(store.get('history', {})).flat().length;
   return [
-    h('div', { class: 'card' },
-      h('div', { class: 'row' }, h('span', { class: 'grow' }, t('語言', 'Language')),
-        segments([['zh', '繁體中文'], ['en', 'English']], state.lang, (lang) => {
-          state.lang = lang;
-          store.set('lang', lang);
-          document.documentElement.lang = lang === 'zh' ? 'zh-Hant' : 'en';
-          mapView.setLanguage();
-          renderTab();
-        }))),
-    h('div', { class: 'card' },
-      h('div', { class: 'bold' }, t('AI 路線助手（DeepSeek）', 'AI assistant (DeepSeek)')),
-      state.sharedAI && h('div', { class: 'small muted' }, t('本站已提供 AI，不用設定就能使用。想用自己的額度才需要填寫 key。', 'AI is included with this site, with nothing to set up. Add a key only to use your own quota.')),
-      h('label', { class: 'field plain' }, keyInput),
-      h('div', { class: 'row' },
-        h('button', { class: 'primary', onclick: () => { if (keyInput.value.trim()) { store.set('apiKey', keyInput.value.trim()); renderTab(); } } }, t('儲存', 'Save')),
-        store.get('apiKey', '') && h('button', { class: 'link', onclick: () => { store.set('apiKey', ''); renderTab(); } }, t('移除', 'Remove'))),
-      h('div', { class: 'tiny muted' }, t('你自己的 key 只保存在這部裝置的瀏覽器內，並由瀏覽器直接傳送給 DeepSeek，不經任何其他伺服器。不要在共用裝置上儲存。', 'Your own key stays in this browser and goes straight to DeepSeek, through no other server. Don\'t save it on a shared device.'))),
-    h('div', { class: 'card' },
-      h('div', { class: 'bold' }, t('私隱', 'Privacy')),
-      h('div', { class: 'small muted' }, t(
-        '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會經本站伺服器傳送給 Google，或在額度用完時傳送給 OpenStreetMap 的 Photon 服務，用來搜尋你身邊 5 公里內的地點。AI 請求及店舖搜尋經本站伺服器轉送給 DeepSeek 及 Google，伺服器不會保存內容。傳送給 DeepSeek 的只有你輸入的文字、地區、站名及路線號碼，不包括座標；Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
-        'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go through this site\'s server to Google, or to OpenStreetMap\'s Photon service once the allowance is used up, to search within 5 km of you. AI requests and shop searches pass through this site\'s server to DeepSeek and Google, and the server keeps none of it. DeepSeek only receives your text, the district, stop names and route numbers, never coordinates. Google Maps loads straight into your browser under Google\'s privacy policy.'))),
-    h('div', { class: 'card' },
-      h('div', { class: 'bold' }, t('安裝到手機', 'Install on your phone')),
-      h('div', { class: 'small muted' }, t('iPhone：在 Safari 按分享，再選「加入主畫面」。Android：在 Chrome 選單按「安裝應用程式」。', 'iPhone: in Safari, tap Share, then Add to Home Screen. Android: in the Chrome menu, tap Install app.'))),
-    h('div', { class: 'tiny muted' }, t('路線資料來自 hkbus.app；地圖來自 Google、OpenFreeMap 及 OpenStreetMap；地點搜尋來自政府地理資訊及 OpenStreetMap。', 'Route data from hkbus.app; maps from Google, OpenFreeMap and OpenStreetMap; place search from Government GIS and OpenStreetMap.')),
-    h('a', { class: 'tiny link', href: 'https://github.com/kevinwentao07-zwt/hktransport', target: '_blank', rel: 'noopener' }, t('GitHub 原始碼（GPL-3.0）', 'Source on GitHub (GPL-3.0)')),
+    settingGroup(t('一般', 'General'),
+      setting(t('語言', 'Language'), segments([['zh', '繁體中文'], ['en', 'English']], state.lang, (lang) => {
+        state.lang = lang;
+        store.set('lang', lang);
+        document.documentElement.lang = lang === 'zh' ? 'zh-Hant' : 'en';
+        mapView.setLanguage();
+        renderTab();
+      })),
+      Recognition && setting(t('語音輸入', 'Voice input'), segments(Object.entries(speechLabels()), state.speechLang, (language) => {
+        state.speechLang = language;
+        store.set('speechLang', language);
+        renderTab();
+      })),
+      setting(t('預設路線', 'Default route'), segments([['fastest', t('最快', 'Fastest')], ['fewerTransfers', t('少轉車', 'Fewer changes')], ['lessWalking', t('少行路', 'Less walking')]], state.preference, (preference) => {
+        state.preference = preference;
+        store.set('preference', preference);
+        renderTab();
+      }))),
+    settingGroup(t('AI 助手', 'AI assistant'),
+      h('div', { class: 'setting inline' }, h('span', {}, t('狀態', 'Status')),
+        h('span', { class: state.sharedAI ? 'ok' : 'muted' }, state.sharedAI ? t('已連接', 'Connected') : t('未連接', 'Not connected'))),
+      h('div', { class: 'tiny muted' }, t('每人每日有使用上限，用完後會直接用 Google 搜尋，不影響查路線。', 'Everyone has a daily limit. After it, searches go straight to Google, and routes still work.'))),
+    settingGroup(t('我的資料', 'My data'),
+      h('div', { class: 'setting inline' }, h('span', {}, t(`搜尋記錄（${searches}）`, `Search history (${searches})`)),
+        clearButton(t('清除', 'Clear'), searches, () => store.set('history', {}))),
+      h('div', { class: 'setting inline' }, h('span', {}, t(`收藏（${state.saved.length}）`, `Saved (${state.saved.length})`)),
+        clearButton(t('清除', 'Clear'), state.saved.length, () => {
+          state.saved = [];
+          store.set('saved', []);
+        })),
+      h('div', { class: 'tiny muted' }, t('這些資料只保存在這部裝置。', 'These stay on this device.'))),
+    settingGroup(t('關於', 'About'),
+      aboutItem(t('安裝到手機', 'Install on your phone'), t('iPhone：在 Safari 按分享，再選「加入主畫面」。Android：在 Chrome 選單按「安裝應用程式」。', 'iPhone: in Safari, tap Share, then Add to Home Screen. Android: in the Chrome menu, tap Install app.')),
+      aboutItem(t('私隱', 'Privacy'), t(
+        '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會經本站伺服器傳送給 Google，或在額度用完時傳送給 OpenStreetMap 的 Photon 服務，用來搜尋你身邊 5 公里內的地點。AI 請求及店舖搜尋經本站伺服器轉送給 DeepSeek 及 Google，伺服器不會保存內容。傳送給 DeepSeek 的只有你輸入的文字、地區、站名、路線號碼及店舖資料，不包括座標；Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
+        'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go through this site\'s server to Google, or to OpenStreetMap\'s Photon service once the allowance is used up, to search within 5 km of you. AI requests and shop searches pass through this site\'s server to DeepSeek and Google, and the server keeps none of it. DeepSeek only receives your text, the district, stop names, route numbers and shop details, never coordinates. Google Maps loads straight into your browser under Google\'s privacy policy.')),
+      aboutItem(t('資料來源', 'Data sources'), t('路線資料來自 hkbus.app；到站時間來自各營辦商；地圖及店舖來自 Google；額度用完後改用 OpenFreeMap、OpenStreetMap 及政府地理資訊。', 'Route data from hkbus.app; arrivals from the operators; maps and shops from Google; after the allowance, OpenFreeMap, OpenStreetMap and Government GIS.')),
+      h('a', { class: 'small link', href: 'https://github.com/kevinwentao07-zwt/hktransport', target: '_blank', rel: 'noopener' }, t('GitHub 原始碼（GPL-3.0）', 'Source on GitHub (GPL-3.0)'))),
   ];
 }
 
@@ -1796,6 +1828,8 @@ new ResizeObserver(() => mapView.resize()).observe($('map'));
 new ResizeObserver(() => sheet.measure()).observe($('top'));
 new ResizeObserver(() => sheet.measure()).observe($('bottom'));
 sheet.attach();
+// Keys were once saved here, and nothing needs them now.
+try { for (const old of ['hkt.apiKey', 'hkt.model']) localStorage.removeItem(old); } catch { /* Private mode. */ }
 
 mapView.init();
 renderTab();
