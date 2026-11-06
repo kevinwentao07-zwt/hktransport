@@ -1116,7 +1116,7 @@ function moveVehicles() {
       vehicleFetching = false;
       vehicleFetched = Date.now();
       moveVehicles();
-      if (isFirst && vehicleList.length) (state.tab === 'plan' ? fitPlanMap : fitFocus)();
+      if (isFirst && vehicleList.length && state.tab === 'plan') fitPlanMap();
     });
   }
   const shape = knownShape(route, ride.op);
@@ -1187,19 +1187,16 @@ function focusRoute(routeKey, op, position = null) {
   fitFocus();
 }
 
-const MOST_METERS_TO_FRAME_BUS = 3000, METERS_AROUND_STOP = 200;
+const METERS_AROUND_STOP = 120;
 
-/** A whole route fills the map; with a stop chosen, the map comes in on it and the bus on its way. */
+/** A whole route fills the map; with a stop chosen, the map comes right in on it. */
 function fitFocus() {
   if (!state.focus) return;
   const { routeKey, op, position } = state.focus, ids = state.db.routes[routeKey].stops[op];
   if (position == null) return mapView.fit(ids.map((id) => state.db.stops[id]?.location).filter(Boolean), 16, true);
   const stop = state.db.stops[ids[position]]?.location;
   if (!stop) return;
-  const points = [offset(stop, METERS_AROUND_STOP, -1), offset(stop, METERS_AROUND_STOP, 1)];
-  const coming = vehicleList.find((vehicle) => vehicle.isNext);
-  if (coming && meters(coming.location, stop) <= MOST_METERS_TO_FRAME_BUS) points.push(coming.location);
-  mapView.fit(points, 16.5, true);
+  mapView.fit([offset(stop, METERS_AROUND_STOP, -1), offset(stop, METERS_AROUND_STOP, 1)], 16.5, true);
 }
 
 function clearFocus() {
