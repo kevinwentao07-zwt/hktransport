@@ -22,6 +22,7 @@ export function lineName(op, route, lang) {
   return line ? line[lang === 'zh' ? 1 : 0] : route;
 }
 export const lineColor = (op, route) => (op === 'mtr' && MTR_LINES[route]?.[2]) || OP_COLORS[op] || '#888';
+export const RETURN_COLOR = '#7c4dff'; // Stands apart from every operator's colour.
 export const nameText = (name, lang) => (lang === 'zh' ? name?.zh : name?.en) || name?.zh || name?.en || '';
 
 // MARK: Tuning
@@ -631,6 +632,24 @@ function placeOnStops(stops, position, db) {
  * next bus comes sooner than the stop before it, a bus is between the two.
  * `arrivals` is [{position, times}], and `boardPosition` is where the rider gets on.
  */
+const LOOP_CLOSES_WITHIN = 300;
+
+/**
+ * Where a circular route turns for home: the position of the stop it is signed for,
+ * or else of its farthest stop. Null for a route that does not come back to its start.
+ */
+export function circularTurn(route, op, db) {
+  const ids = route.stops[op] ?? [], places = ids.map((id) => db.stops[id]?.location);
+  if (ids.length < 4 || op === 'mtr' || op === 'lightRail' || !places[0] || !places.at(-1)) return null;
+  if (meters(places[0], places.at(-1)) > LOOP_CLOSES_WITHIN) return null;
+  const away = places.map((place) => (place ? meters(places[0], place) : 0));
+  const farthest = away.indexOf(Math.max(...away));
+  const signed = cleanStopName(route.dest?.zh ?? '').replace(/\s*[(（]循環線[)）]\s*/, '').trim();
+  const named = signed && signed !== cleanStopName(route.orig?.zh ?? '').trim()
+    ? ids.flatMap((id, position) => (position && position < ids.length - 1 && db.stops[id]?.name?.zh?.includes(signed) ? [position] : [])) : [];
+  return named.sort((a, b) => Math.abs(a - farthest) - Math.abs(b - farthest))[0] ?? farthest;
+}
+
 function secondsPerStop(route, stops) {
   return route.journeyMinutes ? (route.journeyMinutes * 60) / (stops.length - 1) : SECONDS_PER_STOP;
 }

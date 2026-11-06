@@ -223,6 +223,15 @@ test('Simplified Chinese', () => {
   assert.equal(toSimplified('著名'), '著名');
   assert.equal(toSimplified('中環'), '中环');
 });
+test('a circular route turns at the stop it is signed for, or else its farthest', () => {
+  const stop = (lat, zh) => ({ location: { lat, lng: 114.10 }, name: { zh } });
+  const stops = { a: stop(22.30, '總站'), b: stop(22.31, '三門仔'), c: stop(22.32, '路口'), d: stop(22.31, '村'), e: stop(22.30, '總站') };
+  const loop = { stops: { kmb: ['a', 'b', 'c', 'd', 'e'] }, orig: { zh: '總站' }, dest: { zh: '總站' } };
+  const db = { stops };
+  assert.equal(T.circularTurn(loop, 'kmb', db), 2);
+  assert.equal(T.circularTurn({ ...loop, dest: { zh: '三門仔(循環線)' } }, 'kmb', db), 1);
+  assert.equal(T.circularTurn({ ...loop, stops: { kmb: ['a', 'b', 'c', 'd'] } }, 'kmb', db), null);
+});
 test('buses are found along the whole route from its arrivals', () => {
   const stop = (lat) => ({ location: { lat, lng: 114.10 } });
   const db = {

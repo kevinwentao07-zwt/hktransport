@@ -1,6 +1,6 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
 import { meters,
-  OP_COLORS, OP_LABELS, MODES, buildStopIndex, exactSite, instruction, journeyID, journeyPath, lineColor, lineName, matchingSites,
+  OP_COLORS, OP_LABELS, MODES, buildStopIndex, exactSite, instruction, journeyID, journeyPath, RETURN_COLOR, circularTurn, lineColor, lineName, matchingSites,
   nameText, normalizeDB, partialSite, placeOnTrack, primaryMode, progressAt, retime, rides, routeTrack, score, searchRoutes, vehicleDueIn, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
@@ -389,14 +389,15 @@ const leafletMap = (() => {
         const line = (segment.line ?? segment.points).map(point);
         L.polyline(line, { color: '#fff', weight: 8, opacity: 0.95 }).addTo(content);
         const isWalk = segment.mode === 'walk';
-        const stroke = L.polyline(line, {
-          color: isWalk ? '#2f7bf6' : lineColor(segment.op, segment.route), weight: isWalk ? 4 : 5, dashArray: isWalk ? '1 9' : null,
-          className: isWalk ? '' : 'route-line',
-        }).addTo(content);
-        // One unit long, so the line can be drawn on by animating its dash.
-        if (!isWalk) stroke.getElement()?.setAttribute('pathLength', 1);
+        for (const leg of segment.legs ?? [{ road: segment.line ?? segment.points, color: isWalk ? '#2f7bf6' : lineColor(segment.op, segment.route) }]) {
+          const stroke = L.polyline(leg.road.map(point), {
+            color: leg.color, weight: isWalk ? 4 : leg.weight ?? 5, dashArray: isWalk ? '1 9' : null, className: isWalk ? '' : 'route-line',
+          }).addTo(content);
+          // One unit long, so the line can be drawn on by animating its dash.
+          if (!isWalk) stroke.getElement()?.setAttribute('pathLength', 1);
+        }
         segment.stopIDs.forEach((id, index) => {
-          const dot = L.circleMarker(point(segment.marks?.[index] ?? segment.points[index]), { radius: 4, color: lineColor(segment.op, segment.route), fillColor: '#fff', fillOpacity: 1, weight: 2, className: 'stop-dot' })
+          const dot = L.circleMarker(point(segment.marks?.[index] ?? segment.points[index]), { radius: 4, color: segment.dots?.[index] ?? lineColor(segment.op, segment.route), fillColor: '#fff', fillOpacity: 1, weight: 2, className: 'stop-dot' })
             .bindTooltip(name(id), { permanent: true, direction: 'right', offset: [6, 0], className: 'stop-label' }).addTo(content);
           dot.getElement()?.style.setProperty('--i', Math.min(index, 14));
           if (choose) dot.on('click', () => choose(segment, index));
@@ -622,13 +623,13 @@ const googleMap = (() => {
           });
         } else {
           line(road, { strokeColor: '#fff', strokeWeight: 8, strokeOpacity: 0.95, zIndex: 1 });
-          line(road, { strokeColor: color, strokeWeight: 5, strokeOpacity: 1, zIndex: 2 });
+          (segment.legs ?? [{ road, color, weight: 5 }]).forEach((leg, index) => line(leg.road, { strokeColor: leg.color, strokeWeight: leg.weight, strokeOpacity: 1, zIndex: 2 + index }));
         }
         segment.stopIDs.forEach((id, index) => {
           const stop = div('g-stop');
           stop.style.setProperty('--i', Math.min(index, 14));
           const dot = div('g-dot');
-          dot.style.borderColor = color;
+          dot.style.borderColor = segment.dots?.[index] ?? color;
           stop.append(dot, div('stop-label', name(id)));
           mark(segment.marks?.[index] ?? segment.points[index], stop, { zIndex: 100, click: choose && (() => choose(segment, index)) });
         });
@@ -1290,12 +1291,17 @@ function showPlanStop() {
 /** One route's stops, with the chosen stop's arrivals at the top. */
 function routeDetail(route, op, back) {
   const position = state.focus?.position, id = position == null ? null : route.stops[op][position];
+  const turn = circularTurn(route, op, state.db), out = lineColor(op, route.route);
+  const legDot = (color) => h('i', { class: 'leg-dot', style: `background:${color}` });
   return [
     h('button', { class: 'back', onclick: back }, icon('back', 17), t('返回', 'Back')),
     h('div', { class: 'row' }, badge(op, route.route), h('span', { class: 'bold' }, `${nameText(route.orig, state.lang)} → ${nameText(route.dest, state.lang)}`)),
     id && arrivalCard(id),
     !id && h('div', { class: 'tiny muted' }, t('在地圖或下面點選站點，查看來車時間。', 'Tap a stop on the map or below to see arrivals.')),
-    route.stops[op].map((stop, seq) => stopRow(route, seq, stop, op)),
+    turn != null && h('div', { class: 'leg-key tiny' },
+      h('span', {}, legDot(out), t(`去程：往${name(route.stops[op][turn])}`, `Out: to ${name(route.stops[op][turn])}`)),
+      h('span', {}, legDot(RETURN_COLOR), t('回程：返回起點', 'Back: to the start'))),
+    route.stops[op].map((stop, seq) => stopRow(route, seq, stop, op, turn != null && legDot(seq > turn ? RETURN_COLOR : out))),
   ];
 }
 
@@ -1362,6 +1368,20 @@ function stopOnRoad(route, op, position) {
 }
 
 /** The path with real walking and bus lines in place of straight ones, where they have arrived. */
+/** A circular route's way out and way back, each in its own colour. */
+function withLegs(segment) {
+  const route = segment.mode === 'ride' && state.db.routes[segment.routeKey];
+  const turn = route && segment.positions ? circularTurn(route, segment.op, state.db) : null;
+  if (turn == null) return segment;
+  const { positions, points, op } = segment, first = positions[0], last = positions.at(-1), out = lineColor(op, segment.route);
+  const track = trackOf(route, op);
+  const leg = (from, to, color, weight = 5) => ({ color, weight, road: track ? trackBetween(track, from, to) : points.filter((_, index) => positions[index] >= from && positions[index] <= to) });
+  const legs = last <= turn ? [leg(first, last, out)] : first >= turn ? [leg(first, last, RETURN_COLOR)]
+    // Most go back along some of the same road, so the way back runs inside the way out.
+    : [leg(first, turn, out, 7), leg(turn, last, RETURN_COLOR, 3)];
+  return { ...segment, legs, dots: positions.map((position) => (position > turn ? RETURN_COLOR : out)) };
+}
+
 function withRoads(path) {
   return path && {
     ...path,
@@ -1372,7 +1392,7 @@ function withRoads(path) {
       const track = trackOf(state.db.routes[segment.routeKey], segment.op);
       if (!track || !segment.positions) return segment;
       return { ...segment, line: trackBetween(track, segment.positions[0], segment.positions.at(-1)), marks: segment.positions.map((position) => track.passes[position]?.location) };
-    }),
+    }).map(withLegs),
   };
 }
 
@@ -2167,10 +2187,10 @@ function routesSheet() {
       h('div', { class: 'tiny muted' }, `${route.operators.map((op) => OP_LABELS[op]).join(' · ')}${route.serviceType === '1' ? '' : t(' · 特別班', ' · Special')}`)))));
 }
 
-function stopRow(route, seq, id, op) {
+function stopRow(route, seq, id, op, dot) {
   return h('div', { class: `card stop-row${state.focus?.position === seq ? ' chosen' : ''}` },
     h('div', { class: 'row' },
-      h('button', { class: 'tap grow small', onclick: () => chooseFocusStop(seq) }, `${seq + 1}. ${name(id)}`),
+      h('button', { class: 'tap grow small', onclick: () => chooseFocusStop(seq) }, dot, `${seq + 1}. ${name(id)}`),
       starButton(route.key, seq, op)));
 }
 

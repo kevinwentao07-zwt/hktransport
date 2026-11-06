@@ -233,6 +233,8 @@ svg.icon.solid { fill: currentColor; }
 @media (prefers-reduced-motion: reduce) { .bus3d { transition: none; } .bus-marker { animation: none; } }
 .card > div:empty { display: none; }
 .stop-row { padding: 8px 12px; }
+.leg-dot { display: inline-block; width: 9px; height: 9px; margin-right: 6px; border-radius: 50%; }
+.leg-key { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 #plan-stop:empty { display: none; }
 .stop-row.chosen { box-shadow: var(--rim), inset 0 0 0 1.5px var(--accent); }
 .g-stop { cursor: pointer; }
