@@ -1,9 +1,34 @@
 // Finding places: the Government's location search for landmarks and buildings,
-// and Photon (OpenStreetMap) for shops. Nothing here needs an API key.
+// and Photon (OpenStreetMap) for shops, neither of which needs a key. Google goes through the
+// site's server, which holds the key and its limits.
 import { meters } from './transit.js?v=dev';
 
 const HK_BBOX = '113.82,22.13,114.45,22.58';
 export const inHongKong = (l) => l.lat >= 22.13 && l.lat <= 22.58 && l.lng >= 113.82 && l.lng <= 114.45;
+
+export const HONG_KONG = { lat: 22.35, lng: 114.15 };
+
+const googleAnswers = new Map();
+
+/** Places from Google, or null at the limit. A repeat in the same visit costs nothing. */
+export async function googleSearch(query, center, radius, lang) {
+  const key = [query, center.lat, center.lng, radius, lang].join('|');
+  if (googleAnswers.has(key)) return googleAnswers.get(key);
+  try {
+    const response = await fetch('api/places', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, lat: center.lat, lng: center.lng, radius, lang }),
+      signal: AbortSignal.timeout(16_000),
+    });
+    if (!response.ok) return null;
+    const places = (await response.json()).places.filter((place) => inHongKong(place.location));
+    googleAnswers.set(key, places);
+    return places;
+  } catch {
+    return null;
+  }
+}
 
 /** Hong Kong 1980 Grid to WGS84: inverse transverse Mercator, then the published datum shift. */
 export function hk80ToWgs84(easting, northing) {
