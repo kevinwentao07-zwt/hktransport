@@ -1,0 +1,74 @@
+# Publishes the web app to the server whenever main changes, as "Deploy web.command" does by hand.
+# Needs these repository secrets (Settings → Secrets and variables → Actions):
+#   DEPLOY_HOST         user@host, as in .env.deploy
+#   DEPLOY_SSH_KEY      the private key that DEPLOY_KEY points to, pasted in full
+#   DEPLOY_KNOWN_HOSTS  the server's line from ~/.ssh/known_hosts, so CI talks only to that server
+#   DEPLOY_DOMAIN       the site's address, for the log only
+name: Deploy web
+
+on:
+  push:
+    branches: [main]
+    paths: ['web/**', 'server/**', '.github/workflows/deploy-web.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-web
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Test
+        run: node --test web/test/core.test.mjs
+
+      - name: Set up SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Publish
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_DOMAIN: ${{ secrets.DEPLOY_DOMAIN }}
+        run: |
+          set -euo pipefail
+          stage="$(mktemp -d)"
+          rsync -a --exclude test --exclude README.md --exclude .nojekyll --exclude .DS_Store web/ "$stage/"
+
+          # A new address per release, so returning visitors can't mix new pages with cached files.
+          stamp="$(date +%s)"
+          find "$stage" -type f \( -name '*.html' -o -name '*.js' \) -not -path '*/vendor/*' \
+              -exec sed -i "s/v=dev/v=$stamp/g" {} +
+
+          # The AI proxy goes first, so a new page never calls an old proxy. It stays out of the web root.
+          ai_stage="$(mktemp -d)"
+          cp server/ai_proxy.py server/hktransport-ai.service "$ai_stage/"
+          node --input-type=module -e 'const { PROMPTS } = await import(process.argv[1]); console.log(JSON.stringify(PROMPTS));' \
+              "$PWD/web/js/ai.js" > "$ai_stage/prompts.json"
+          remote="ssh -i $HOME/.ssh/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes"
+          tar -C "$ai_stage" -cf - . | $remote "$DEPLOY_HOST" 'set -e
+              release="$(mktemp -d)"; trap "rm -rf $release" EXIT
+              tar -xf - -C "$release"
+              sudo install -d -m 755 /opt/hktransport-ai
+              sudo install -m 644 "$release/ai_proxy.py" "$release/prompts.json" /opt/hktransport-ai/
+              sudo install -m 644 "$release/hktransport-ai.service" /etc/systemd/system/
+              sudo systemctl daemon-reload
+              sudo systemctl enable -q hktransport-ai
+              sudo systemctl restart hktransport-ai'
+
+          rsync -az --delete -e "$remote" "$stage/" "$DEPLOY_HOST:/var/www/hktransport/"
+          echo "Published $stamp to https://$DEPLOY_DOMAIN/"
