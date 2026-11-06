@@ -233,6 +233,11 @@ svg.icon.solid { fill: currentColor; }
 @media (prefers-reduced-motion: reduce) { .bus3d { transition: none; } .bus-marker { animation: none; } }
 .card > div:empty { display: none; }
 .stop-row { padding: 8px 12px; }
+/* Shops on Google's free embedded map, covering the other map whole. */
+#embed-map { position: absolute; inset: 0; z-index: 1; background: var(--bg, #e4e6e4); }
+#embed-map iframe { display: block; width: 100%; border: 0; }
+#app.embedding #locate { display: none; }
+@media (min-width: 820px) { #embed-map iframe { position: absolute; left: 440px; width: calc(100% - 440px); height: 100% !important; } }
 .leg-dot { display: inline-block; width: 9px; height: 9px; margin-right: 6px; border-radius: 50%; }
 .leg-key { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 #plan-stop:empty { display: none; }

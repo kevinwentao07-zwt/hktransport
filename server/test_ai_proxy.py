@@ -9,6 +9,7 @@ import unittest
 import urllib.error
 from pathlib import Path
 from shutil import copy
+from unittest.mock import patch
 
 SECRET = 'sk-test-secret'
 folder = tempfile.mkdtemp()
@@ -172,6 +173,15 @@ class ProxyTests(unittest.TestCase):
         self.assertNotIn(SECRET, text)
         self.assertNotIn('places-key', text)
         self.assertEqual(json.loads(self.get_status())['mapKey'], None)
+
+    def test_shops_outlast_the_map_on_the_embed_key(self):
+        with patch.dict(os.environ, {'GOOGLE_EMBED_KEY': 'embed-key'}):
+            ai_proxy.budget = budget(map=(0, 10, 10))
+            body = json.loads(self.get_status())
+            self.assertEqual((body['mapKey'], body['embedKey'], body['places']), (None, 'embed-key', True))
+            self.assertNotIn('embedKey', json.loads(self.get_status('none')))
+            with patch.dict(os.environ, {'GOOGLE_PLACES_KEY': ''}):
+                self.assertNotIn('embedKey', json.loads(self.get_status()))
 
     def test_only_the_page_spends_map_loads(self):
         ai_proxy.budget = budget(map=(1, 10, 10))

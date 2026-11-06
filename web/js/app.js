@@ -679,8 +679,14 @@ function frameMap() {
   else showHomeMap();
 }
 
+// Shops keep Google's data after the map loads run out, shown on its free embedded map.
+let spareEmbedKey = null;
+const embedShops = () => !state.google && !!state.embedKey;
+const googleShops = () => state.google || !!state.embedKey;
+
 function useFreeMap() {
   state.google = false;
+  state.embedKey = spareEmbedKey;
   const wasGoogle = mapView === googleMap;
   if (wasGoogle) {
     googleMap.destroy();
@@ -743,6 +749,7 @@ async function checkServer() {
     if (response.ok) shared = await response.json();
   } catch { /* The page works without it. */ }
   state.sharedAI = shared?.available === true;
+  spareEmbedKey = shared?.embedKey ?? null;
   if (state.sharedAI) renderTab();
   if (shared?.mapKey) useGoogleMap(shared);
   else useFreeMap();
@@ -849,6 +856,7 @@ function setPhase(phase, error = null) {
   state.phase = phase;
   state.error = error;
   renderSheet();
+  showEmbed();
 }
 
 function currentTrip() {
@@ -877,7 +885,7 @@ async function runPlan(request) {
         intent = await ai.intent(searchMessage(normalizedOrigin(state.origin), state.destination.trim(), state.preference));
       }
     } catch (error) {
-      state.aiNotice = state.google
+      state.aiNotice = googleShops()
         ? t('AI 額度已用完或暫時未能使用，已直接用 Google 搜尋。', 'AI is used up or unavailable, so this went straight to Google.')
         : t('AI 暫時未能使用，已改用基本解析：', 'AI unavailable, used basic parsing: ') + error.message;
     }
@@ -886,7 +894,7 @@ async function runPlan(request) {
   if (!intent && request.kind === 'chat') {
     // Without the AI, an answer to "where?" can only be a place.
     if (request.asked) return discover({ ...request.wish, area: request.text, question: null }, run);
-    const wish = parseWish(request.text) ?? (state.google && !request.current ? parseSearch(request.text) : null);
+    const wish = parseWish(request.text) ?? (googleShops() && !request.current ? parseSearch(request.text) : null);
     if (wish) return startDiscovery(wish, run);
     intent = parseFollowUp(request.text, request.current);
   }
@@ -1013,7 +1021,7 @@ async function discover(wish, run = ++planRun) {
 
   // Each Google search brings a full page for the price of one.
   let suggestions = [], isRanked = false;
-  if (state.google) {
+  if (googleShops()) {
     // Chinese and English names reach different shops, and Google's own order is by relevance.
     const search = (query) => googleSearch(searchArea.isAroundRider ? query : `${query} ${searchArea.name}`, searchArea.center, searchArea.radius, state.lang, true);
     const [chinese, english] = await Promise.all([search(wish.query), wish.queryEn ? search(wish.queryEn) : null]);
@@ -1041,13 +1049,53 @@ async function discover(wish, run = ++planRun) {
     suggestions = [...found.values()].sort((a, b) => a.meters - b.meters).slice(0, MOST_SHOPS).map((place) => ({ place }));
     if (!suggestions.length) return giveUp(t(`${searchArea.name}找不到${wish.want}，請換一個範圍。`, `Couldn't find ${wish.want} around ${searchArea.name}. Try another area.`));
   }
-  state.discovery = { stage: 'choosing', wish, areaName: searchArea.name, suggestions, isRanked };
+  state.discovery = { stage: 'choosing', wish, areaName: searchArea.name, center: searchArea.center, suggestions, isRanked };
   remember('App', `Showed ${wish.want} around ${searchArea.name}: ${suggestions.map(({ place }) => place.name).join(', ')}`);
   stagger();
   setPhase('idle');
   renderBottomStatus();
   sheet.snap('half');
-  mapView.fit(suggestions.map((suggestion) => suggestion.place.location));
+  if (showsEmbed()) showEmbed();
+  else mapView.fit(suggestions.map((suggestion) => suggestion.place.location));
+}
+
+const showsEmbed = () => embedShops() && state.tab === 'plan' && state.discovery?.stage === 'choosing' && !state.journeys.length
+  && state.phase === 'idle' && state.discovery.suggestions.some((suggestion) => suggestion.isGoogle);
+
+function showEmbed() {
+  const on = showsEmbed(), box = $('embed-map'), frame = box.firstElementChild;
+  box.hidden = !on;
+  $('app').classList.toggle('embedding', on);
+  if (!on) return;
+  frame.style.height = `${Math.max(160, window.innerHeight - sheet.targetHeight())}px`;
+  const { wish, center, shown } = state.discovery;
+  const language = state.lang === 'en' ? 'en' : state.script === 'hans' ? 'zh-CN' : 'zh-HK';
+  const common = `key=${encodeURIComponent(state.embedKey)}&language=${language}&region=HK`;
+  const url = shown ? `https://www.google.com/maps/embed/v1/place?${common}&q=place_id:${encodeURIComponent(shown)}`
+    : `https://www.google.com/maps/embed/v1/search?${common}&q=${encodeURIComponent(wish.query)}&center=${center.lat},${center.lng}&zoom=14`;
+  if (frame.src !== url) frame.src = url;
+}
+
+function showOnEmbed(suggestion) {
+  state.discovery.shown = suggestion.place.id;
+  sheet.snap('half');
+  showEmbed();
+}
+
+const FREE_PLACE_WITHIN = 500;
+
+/** Google's places stay off other maps, so the route goes to the same shop as the free sources know it. */
+async function planToShop({ place }) {
+  const discovery = state.discovery;
+  const found = (await lookupPlace(place.name)) ?? (place.address ? await lookupPlace(place.address) : null);
+  if (state.discovery !== discovery) return;
+  if (!found || meters(found.location, place.location) > FREE_PLACE_WITHIN) {
+    discovery.notice = t(`免費地圖找不到「${place.name}」，請用「在 Google 地圖查看」導航。`, `The free map can't find ${place.name}. Use View on Google Maps for directions.`);
+    return renderSheet();
+  }
+  state.destination = found.name;
+  syncPlaceInputs();
+  runPlan({ kind: 'place', place: { name: found.name, location: found.location } });
 }
 
 function choosePlace(suggestion) {
@@ -1905,16 +1953,18 @@ function shopFacts(place) {
   return facts.length > 0 && h('div', { class: 'shop-facts tiny' }, facts);
 }
 
-function shopLinks(place) {
+function shopLinks(place, suggestion) {
   const links = [
+    embedShops() && suggestion.isGoogle && h('a', { href: '#', onclick: (event) => { event.preventDefault(); event.stopPropagation(); planToShop(suggestion); } }, t('規劃路線', 'Plan a route')),
     place.phone && h('a', { href: `tel:${place.phone.replace(/\s/g, '')}`, onclick: (event) => event.stopPropagation() }, place.phone),
     place.mapsUrl && h('a', { href: place.mapsUrl, target: '_blank', rel: 'noopener', onclick: (event) => event.stopPropagation() }, t('在 Google 地圖查看', 'View on Google Maps')),
   ].filter(Boolean);
   return links.length > 0 && h('div', { class: 'shop-links tiny' }, links);
 }
 
-function suggestionList({ wish, areaName, suggestions, isRanked }) {
+function suggestionList({ wish, areaName, suggestions, isRanked, notice }) {
   return [
+    notice && h('div', { class: 'notice' }, notice),
     h('div', { class: 'row' }, h('span', { class: 'title grow' }, wish.anywhere ? t(`「${wish.want}」的結果`, `Results for "${wish.want}"`) : t(`${areaName}的${wish.want}`, `${wish.want} around ${areaName}`)),
       h('button', { class: 'link', onclick: () => { state.discovery = { stage: 'asking', wish: { ...wish, area: null, question: null, options: [] } }; renderSheet(); drawMap(); renderBottomStatus(); } }, t('換範圍', 'Change area'))),
     h('div', { class: 'tiny muted' }, suggestions.some((suggestion) => suggestion.isGoogle)
@@ -1922,7 +1972,7 @@ function suggestionList({ wish, areaName, suggestions, isRanked }) {
         : t('資料及排序來自 Google 地圖。出發前請確認仍在營業。', 'Details and order from Google Maps. Check it is open before you go.'))
       : t('地點來自地圖搜尋，沒有菜單資料，未必有售，出發前請先確認。', 'Places come from a map search, which has no menus. Check before you go.')),
     suggestions.map((suggestion, index) => h('div', {
-      class: 'card tap', role: 'button', tabindex: 0, onclick: () => choosePlace(suggestion),
+      class: 'card tap', role: 'button', tabindex: 0, onclick: () => (embedShops() && suggestion.isGoogle ? showOnEmbed(suggestion) : choosePlace(suggestion)),
       onkeydown: (event) => { if (event.key === 'Enter') choosePlace(suggestion); },
     },
       h('div', { class: 'row', style: 'align-items:flex-start' }, h('span', { class: 'num' }, index + 1),
@@ -1931,7 +1981,7 @@ function suggestionList({ wish, areaName, suggestions, isRanked }) {
           shopFacts(suggestion.place),
           suggestion.place.address && h('div', { class: 'tiny muted ellipsis' }, suggestion.place.address),
           suggestion.reason && h('div', { class: 'small ai', style: 'margin-top:3px' }, suggestion.reason),
-          shopLinks(suggestion.place))))),
+          shopLinks(suggestion.place, suggestion))))),
   ];
 }
 
@@ -1961,7 +2011,7 @@ function homeSheet() {
 
 const PHASES = {
   understanding: () => (client() ? t('AI 正在分析你的要求…', 'AI is analysing your request…') : t('理解要求…', 'Reading your request…')),
-  findingPlaces: () => (state.google ? t('正在 Google 地圖搜尋…', 'Searching Google Maps…') : t('正在搜尋地點…', 'Searching for places…')),
+  findingPlaces: () => (googleShops() ? t('正在 Google 地圖搜尋…', 'Searching Google Maps…') : t('正在搜尋地點…', 'Searching for places…')),
   locating: () => t('正在尋找起點及目的地…', 'Finding places…'),
   planning: () => t('正在計算路線…', 'Planning routes…'),
   checkingLive: () => t('正在核對實時到站時間…', 'Checking live arrivals…'),
@@ -2411,6 +2461,7 @@ function markScene(scene) {
 }
 
 function drawMap() {
+  showEmbed();
   markScene(`${state.tab}|${state.expanded ?? ''}|${state.nav?.id ?? ''}|${state.to?.name ?? ''}|${state.discovery?.stage ?? ''}|${state.stopPlace?.name ?? ''}`);
   mapView.clear();
   const here = state.nav?.here ?? state.fix;
@@ -2441,7 +2492,7 @@ function drawMap() {
     loadRoads(path).then((arrived) => { if (arrived) drawMap(); });
   }
   const choosing = state.discovery?.stage === 'choosing' && !state.journeys.length && state.phase === 'idle';
-  if (choosing) mapView.numbered(state.discovery.suggestions, choosePlace);
+  if (choosing && !showsEmbed()) mapView.numbered(state.discovery.suggestions, choosePlace);
   mapView.ends(state.from, state.to);
   showChosenStop();
   moveVehicles();

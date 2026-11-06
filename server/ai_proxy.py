@@ -186,6 +186,10 @@ def map_key():
     return os.environ.get('GOOGLE_MAP_KEY', '').strip()
 
 
+def embed_key():
+    return os.environ.get('GOOGLE_EMBED_KEY', '').strip()
+
+
 def places_key():
     return os.environ.get('GOOGLE_PLACES_KEY', '').strip()
 
@@ -333,8 +337,13 @@ class Handler(BaseHTTPRequestHandler):
         body = {'available': bool(api_key()), 'mapKey': None, 'places': False}
         # Handing out the key is what starts a billed map load, so this is where it is counted.
         # Only the page itself asks this way, and Google locks the key to this site.
-        if map_key() and self.headers.get('Sec-Fetch-Site') == 'same-origin' and budget.spend('map', self.visitor()):
+        is_page = self.headers.get('Sec-Fetch-Site') == 'same-origin'
+        if map_key() and is_page and budget.spend('map', self.visitor()):
             body.update(mapKey=map_key(), places=bool(places_key()))
+        # Embedded maps are free and unlimited, so shops stay on a Google map once the loads run out.
+        # This key opens nothing else, which keeps it from being a way around the limit above.
+        if embed_key() and places_key() and is_page:
+            body.update(embedKey=embed_key(), places=True)
         self.send(200, body)
 
     def read_json(self):

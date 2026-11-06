@@ -8,6 +8,7 @@ ExecStart=/usr/bin/python3 -I /opt/hktransport-ai/ai_proxy.py
 EnvironmentFile=-/etc/hktransport/ai.env
 EnvironmentFile=-/etc/hktransport/google.env
 EnvironmentFile=-/etc/hktransport/routes.env
+EnvironmentFile=-/etc/hktransport/embed.env
 DynamicUser=yes
 StateDirectory=hktransport-ai
 Restart=on-failure
