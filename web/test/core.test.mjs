@@ -177,7 +177,9 @@ test('AI replies', () => {
   assert.equal(asking.question, '想食咩菜？');
   assert.deepEqual(asking.options, ['日本菜', '火鍋']);
   assert.equal(A.decodeChat('{"kind":"discover","want":" "}'), null);
-  assert.deepEqual(A.decodePlaces('{"places":[{"name":"譚仔","nameEn":"TamJai","reason":"r"},{"reason":"x"}]}'), [{ name: '譚仔', nameEn: 'TamJai', reason: 'r' }]);
+  assert.equal(A.decodeChat('{"kind":"discover","want":"咖啡","query":"安靜 咖啡店"}').wish.query, '安靜 咖啡店');
+  assert.equal(A.decodeChat('{"kind":"discover","want":"咖啡"}').wish.query, '咖啡');
+  assert.equal(A.parseWish('我想吃螺狮粉').query, '螺狮粉');
   assert.throws(() => A.parseCompletion({ choices: [{ finish_reason: 'length', message: { content: '' } }] }, 200), /ran out of tokens/);
   assert.match(A.searchMessage(null, '理大', 'fastest'), /Start: current location/);
 });
@@ -186,24 +188,6 @@ test('HK grid converts to WGS84', () => {
   const langham = P.hk80ToWgs84(835408, 819931); // 朗豪坊
   close(langham.lat, 22.3177, 0.0008);
   close(langham.lng, 114.1684, 0.0008);
-});
-test('only the shop the AI named counts', () => {
-  const tamjai = { name: '譚仔雲南米線', nameEn: 'TamJai Yunnan Mixian' };
-  assert.equal(P.isSamePlace('Tamjai Yunnan Mixian', tamjai), true);
-  assert.equal(P.isSamePlace('譚仔雲南米線 (旺角)', tamjai), true);
-  assert.equal(P.isSamePlace("Joe's Billiards & Bar", tamjai), false);
-  assert.equal(P.isSamePlace('Tsui Wah Restaurant', { name: '翠華餐廳', nameEn: 'Tsui Wah' }), true);
-  assert.equal(P.isSamePlace('Yau Kee Noodles', { name: '老友記粉麵', nameEn: 'Lo Yau Kee Noodles' }), false);
-});
-test('shops the map cannot find are never shown; nearest branch wins; own district only', async () => {
-  const center = { lat: 22.27, lng: 114.25 }, area = { center, radius: 3000, district: '油尖旺區' };
-  const shop = (name, lat, district = '油尖旺區 Yau Tsim Mong District') => ({ name, location: { lat, lng: 114.25 }, district });
-  const verified = await P.verifyPlaces([
-    { name: '幻想店', nameEn: 'Dream Shop', reason: 'x' }, { name: '真店', nameEn: 'Real Noodle', reason: '真的' },
-  ], area, async (term) => (term === 'Real Noodle' ? [shop('Real Noodle', 22.28), shop('Real Noodle', 22.272), shop('Real Noodle', 22.271, '九龍城區')] : [shop("Joe's Billiards", 22.2701)]));
-  assert.equal(verified.length, 1);
-  assert.equal(verified[0].place.location.lat, 22.272);
-  assert.equal(verified[0].reason, '真的');
 });
 test('area words', () => {
   assert.equal(P.cleanArea('朗豪坊附近'), '朗豪坊');
@@ -215,10 +199,9 @@ test('AI requests keep thinking off, send no coordinates and report failures', a
   const sent = [];
   globalThis.fetch = async (url, options) => {
     sent.push({ url, body: JSON.parse(options.body), auth: options.headers.Authorization });
-    return { status: 200, json: async () => ({ choices: [{ message: { content: '{"places":[{"name":"真店","nameEn":"Real","reason":"好"}]}' } }] }) };
+    return { status: 200, json: async () => ({ choices: [{ message: { content: '建議選第一個' } }] }) };
   };
-  const places = await A.deepSeek('test-key').suggest('螺螄粉', '油尖旺區', null, 'zh');
-  assert.deepEqual(places, [{ name: '真店', nameEn: 'Real', reason: '好' }]);
+  assert.equal(await A.deepSeek('test-key').explain('Area: 油尖旺區', 'zh'), '建議選第一個');
   assert.equal(sent[0].url, 'https://api.deepseek.com/chat/completions');
   assert.deepEqual(sent[0].body.thinking, { type: 'disabled' });
   assert.equal(sent[0].body.max_tokens, 4000);
@@ -250,12 +233,12 @@ test('the shared AI sends a task name and the text, never a prompt or a key', as
   const sent = [];
   globalThis.fetch = async (url, options) => {
     sent.push({ url, headers: options.headers, body: JSON.parse(options.body) });
-    return { ok: true, status: 200, json: async () => ({ reply: '{"places":[{"name":"真店"}]}' }) };
+    return { ok: true, status: 200, json: async () => ({ reply: 'Take the first.' }) };
   };
-  await A.sharedAI().suggest('螺螄粉', '旺角', null, 'en');
+  await A.sharedAI().explain('Two options', 'en');
   assert.equal(sent[0].url, 'api/ai');
   assert.deepEqual(Object.keys(sent[0].body), ['task', 'message']);
-  assert.equal(sent[0].body.task, 'suggest_en');
+  assert.equal(sent[0].body.task, 'explain_en');
   assert.ok(A.PROMPTS[sent[0].body.task]);
   assert.equal(sent[0].headers.Authorization, undefined);
   globalThis.fetch = async () => ({ ok: false, status: 429, json: async () => ({ error: '太頻繁' }) });

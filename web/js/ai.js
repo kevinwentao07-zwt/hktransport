@@ -55,7 +55,7 @@ export function parseWish(text) {
   if (!prefix) return null;
   const want = strip(working.slice(prefix.length));
   if (!want) return null;
-  return { want, searchTerms: [want], area: null, extra: null, question: null, options: [] };
+  return { want, query: want, searchTerms: [want], area: null, extra: null, question: null, options: [] };
 }
 
 export function searchMessage(origin, destination, preference) {
@@ -84,8 +84,12 @@ Rules:
   walk less, otherwise fastest.
 - Never suggest routes, times or fares.`;
 
-const DISCOVER_RULES = `{"kind": "discover", "want": string, "searchTerms": [string], "area": string or null, "extra": string or null, "question": string or null, "options": [string]}
+const DISCOVER_RULES = `{"kind": "discover", "want": string, "query": string, "searchTerms": [string], "area": string or null, "extra": string or null, "question": string or null, "options": [string]}
+- You only pick out what matters. Google Maps finds the places, so never name or recommend a shop.
 - want is a short phrase in Traditional Chinese with typos fixed, e.g. 我想吃螺狮粉 -> 螺螄粉.
+- query is what to type into Google Maps for this kind of place: only the useful words from the whole
+  conversation, without filler such as 我想 and without the area, e.g. 想飲咖啡要靜啲 -> 安靜 咖啡店,
+  食拉麵要平啲 -> 平價 拉麵.
 - searchTerms are up to four map search terms, most specific first: the item itself, then short shop
   types in Chinese and English that would sell it, e.g. ["螺螄粉", "米線", "mixian", "noodles"].
 - area is one district or landmark the rider named, without words such as 附近, e.g. 朗豪坊附近 -> 朗豪坊.
@@ -111,19 +115,6 @@ Reply with one JSON object and nothing else, keeping what is already known unles
 ${DISCOVER_RULES}
 - The message says when you may not ask anything more. Then question must be null.`;
 
-export const suggestPrompt = (lang) => `You recommend real shops in Hong Kong from your own knowledge.
-Reply with one JSON object and nothing else:
-{"places": [{"name": string, "nameEn": string, "reason": string}]}
-- Name 6 to 8 specific shops in or near the given area, best first. Every name is checked on a map
-  afterwards and the ones not found are dropped, so give your best candidates rather than holding back.
-- Start with specialists and places people go to for exactly this. Chains are fine.
-- If few shops offer exactly this, fill the list with the closest alternatives, such as a 米線 or
-  雲南 restaurant for someone who wants 螺螄粉, and say so in the reason.
-- name is the shop's Chinese name and nameEn its English name, as on its sign, without the branch.
-- Never make a shop up, and never give a generic description in place of a shop's name.
-- Each reason is one short sentence on why it fits. No invented ratings, prices or opening hours.
-${lang === 'zh' ? 'Write reasons in Traditional Chinese as used in Hong Kong.' : 'Write reasons in English.'}`;
-
 export const explainPrompt = (lang) => `You help a rider in Hong Kong choose between public transport options computed by a route planner.
 In one or two short sentences, recommend the best option for the rider's preference and say why.
 Use only the facts given. Do not invent routes, stops, times or fares.
@@ -133,7 +124,6 @@ ${lang === 'zh' ? 'Write in Traditional Chinese as used in Hong Kong.' : 'Write 
 /** Every job the AI does. The server is sent a name from this list, never a prompt. */
 export const PROMPTS = {
   intent: INTENT_PROMPT, chat: CHAT_PROMPT, refine: REFINE_PROMPT,
-  suggest_zh: suggestPrompt('zh'), suggest_en: suggestPrompt('en'),
   explain_zh: explainPrompt('zh'), explain_en: explainPrompt('en'),
 };
 
@@ -168,28 +158,19 @@ function decodeWish(object) {
   if (!want) return null;
   const terms = strings(object.searchTerms), question = clean(object.question) || null;
   return {
-    want, searchTerms: terms.length ? terms.slice(0, 4) : [want], area: clean(object.area) || null,
+    want, query: clean(object.query) || want, searchTerms: terms.length ? terms.slice(0, 4) : [want], area: clean(object.area) || null,
     extra: clean(object.extra) || null, question, options: question ? strings(object.options).slice(0, 4) : [],
   };
 }
 
 /** What the AI is told about a search it is narrowing down. */
 export function refineMessage(wish, answer, mayAsk) {
-  const lines = [`Looking for: ${wish.want}`, `Search terms: ${wish.searchTerms.join(', ')}`];
+  const lines = [`Looking for: ${wish.want}`, `Google query: ${wish.query}`, `Search terms: ${wish.searchTerms.join(', ')}`];
   if (wish.area) lines.push(`Area: ${wish.area}`);
   if (wish.extra) lines.push(`Also wants: ${wish.extra}`);
   lines.push(`You asked: ${wish.question ?? 'Where should I look?'}`, `Rider says: ${answer}`);
   if (!mayAsk) lines.push('You may not ask anything more.');
   return lines.join('\n');
-}
-
-export function decodePlaces(reply) {
-  const places = jsonObject(reply)?.places;
-  if (!Array.isArray(places)) return [];
-  return places.flatMap((place) => {
-    const name = clean(place?.name) || clean(place?.nameEn);
-    return name ? [{ name, nameEn: clean(place.nameEn) || null, reason: clean(place.reason) || null }] : [];
-  });
 }
 
 export function parseCompletion(json, status) {
@@ -246,11 +227,6 @@ function assistant(complete) {
       const refined = decodeWish(jsonObject(await complete('refine', refineMessage(wish, answer, mayAsk))));
       if (!refined) throw new Error('DeepSeek reply was not valid search JSON');
       return refined;
-    },
-    async suggest(want, area, extra, lang) {
-      const lines = [`Looking for: ${want}`, `Area: ${area}`];
-      if (extra) lines.push(`Also wants: ${extra}`);
-      return decodePlaces(await complete(`suggest_${lang}`, lines.join('\n')));
     },
     explain: (summary, lang) => complete(`explain_${lang}`, summary),
   };

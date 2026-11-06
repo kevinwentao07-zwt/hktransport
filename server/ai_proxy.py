@@ -110,7 +110,7 @@ in_flight = threading.BoundedSemaphore(int(os.environ.get('AI_CONCURRENT', '16')
 # Free each month: 10,000 map loads and 5,000 searches. These stop well short of both.
 budget = Budget(
     Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'usage.json',
-    {'map': (300, 9000, 15), 'places': (150, 4500, 15)},
+    {'map': (300, 9000, 15), 'places': (150, 4500, 30)},
 )
 
 
