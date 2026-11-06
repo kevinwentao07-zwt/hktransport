@@ -208,6 +208,15 @@ test('shops keep Google order, alternate between searches and appear once', () =
   assert.equal(P.mergeShops([shop('a'), shop('b')], [shop('c')], 2).length, 2);
   assert.equal(A.decodeChat('{"kind":"discover","want":"拉麵","query":"拉麵","queryEn":"ramen"}').wish.queryEn, 'ramen');
 });
+test('without the AI, searches go to Google and trips stay trips', () => {
+  const wish = A.parseSearch('旺角有冇平啲嘅拉麵');
+  assert.equal(wish.query, '旺角有冇平啲嘅拉麵');
+  assert.equal(wish.anywhere, true);
+  assert.equal(A.parseSearch('由旺角去理大'), null);
+  assert.equal(A.parseSearch('去機場'), null);
+  assert.equal(A.parseSearch('少行路'), null);
+  assert.equal(A.parseSearch('  '), null);
+});
 test('area words', () => {
   assert.equal(P.cleanArea('朗豪坊附近'), '朗豪坊');
   assert.equal(P.cleanArea('附近'), '附近');

@@ -58,6 +58,13 @@ export function parseWish(text) {
   return { want, query: want, queryEn: null, searchTerms: [want], area: null, extra: null, question: null, options: [] };
 }
 
+/** Without the AI, whatever isn't plainly a trip goes to Google as typed, across Hong Kong. */
+export function parseSearch(text) {
+  const want = strip(text);
+  if (!want || has(want, [...FEWER, ...LESS_WALK]) || /[去到往至由從从→]|->|\b(to|from)\b/i.test(want)) return null;
+  return { want, query: want, queryEn: null, searchTerms: [want], area: null, extra: null, question: null, options: [], anywhere: true };
+}
+
 export function searchMessage(origin, destination, preference) {
   return `Search form\nStart: ${origin ?? 'current location'}\nDestination: ${destination}\nPreference: ${preference}`;
 }
