@@ -206,7 +206,8 @@ svg.icon.solid { fill: currentColor; }
 .shop-facts .shut { color: #ff453a; font-weight: 600; }
 .shop-links { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 5px; }
 .shop-links a { color: #2f7bf6; text-decoration: none; }
-.bus-marker { position: relative; width: 0; height: 0; pointer-events: none; perspective: 420px; perspective-origin: 0 0; }
+.bus-marker { position: relative; width: 0; height: 0; pointer-events: none; perspective: 420px; perspective-origin: 0 0; animation: bus-in .45s ease-out both; }
+@keyframes bus-in { from { opacity: 0; } }
 .bus3d { --l: 42px; --w: 16px; --h: 25px; --body: #e2231a; --glass: #16324a; position: absolute; left: 0; top: 0; width: 0; height: 0; transform-style: preserve-3d; transform: translateY(-8px) rotateX(56deg) rotateZ(var(--heading, 0deg)); transition: transform .9s var(--ease-out); }
 .bus3d.minibus { --l: 30px; --w: 15px; --h: 15px; }
 .bus3d i { position: absolute; display: block; box-sizing: border-box; }
@@ -224,11 +225,11 @@ svg.icon.solid { fill: currentColor; }
 .bus3d.minibus .back { background: linear-gradient(to bottom, #20242a 0 12%, #ff453a 12% 22%, var(--body) 22% 46%, var(--glass) 46% 84%, #f4f4f0 84%); }
 .bus3d.minibus .left, .bus3d.minibus .right { background: radial-gradient(circle at 20% 10%, #111 0 2.8px, transparent 3.2px), radial-gradient(circle at 80% 10%, #111 0 2.8px, transparent 3.2px), repeating-linear-gradient(90deg, transparent 0 6px, #f4f4f0 6px 7.5px), linear-gradient(to bottom, var(--body) 0 40%, var(--glass) 40% 84%, #f4f4f0 84%); }
 .bus3d.minibus .top { background: #f4f4f0; }
-.bus-marker.other { opacity: .82; }
+.bus-marker.other .bus3d, .bus-marker.other .bus-note { opacity: .82; }
 .bus-marker.other .bus3d { --l: 32px; --w: 13px; --h: 19px; }
 .bus-marker.other .bus3d.minibus { --l: 24px; --w: 12px; --h: 12px; }
 .bus-note { position: absolute; left: 0; top: 22px; transform: translateX(-50%); padding: 2px 7px; border-radius: 8px; background: var(--surface); color: var(--ink); box-shadow: 0 1px 4px rgba(0, 0, 0, .3); font-size: 11px; font-weight: 600; white-space: nowrap; }
-@media (prefers-reduced-motion: reduce) { .bus3d { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .bus3d { transition: none; } .bus-marker { animation: none; } }
 .card > div:empty { display: none; }
 .stop-row { padding: 8px 12px; }
 .stop-row.chosen { box-shadow: var(--rim), inset 0 0 0 1.5px var(--accent); }

@@ -235,11 +235,12 @@ function dressBus(element, vehicle) {
   bus.classList.toggle('minibus', vehicle.isMinibus);
   bus.style.setProperty('--body', vehicle.color);
   bus.style.setProperty('--heading', `${vehicle.heading}deg`);
-  note.textContent = !vehicle.isNext ? t('剛開出', 'Just left') : vehicle.minutes ? t(`推算 ${vehicle.minutes} 分鐘到站`, `About ${vehicle.minutes} min away`) : t('即將到站', 'Arriving');
+  const prefix = vehicle.isLive ? '' : t('推算 ', 'About ');
+  note.textContent = !vehicle.isNext ? t('剛開出', 'Just left') : vehicle.minutes ? t(`${prefix}${vehicle.minutes} 分鐘到站`, `${prefix}${vehicle.minutes} min away`) : t('即將到站', 'Arriving');
 }
 
 const leafletMap = (() => {
-  let map, content, base, buses = [], tag = null, chosen = null, approach = null, approachStops = [], approachKey = '', lastFit = '', flying = false;
+  let map, content, base, buses = new Map(), tag = null, chosen = null, approach = null, approachStops = [], approachKey = '', lastFit = '', flying = false;
   const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
   const style = () => `https://tiles.openfreemap.org/styles/${darkMode.matches ? 'dark' : 'liberty'}`;
   /** The maps label everything in both languages; show just the one being read. */
@@ -290,7 +291,7 @@ const leafletMap = (() => {
     resize() { map?.invalidateSize(); },
     clear() {
       content?.clearLayers();
-      buses = [];
+      buses = new Map();
       tag = null;
       chosen = null;
       approach = null;
@@ -338,16 +339,21 @@ const leafletMap = (() => {
       approachStops = stops.map((stop) => L.marker(point(stop.location), { icon: L.divIcon({ html: upcomingStop(stop.name), className: '', iconSize: [0, 0] }), interactive: false }).addTo(content));
     },
     vehicles(list) {
-      while (buses.length > list.length) buses.pop().marker.remove();
-      list.forEach((vehicle, index) => {
-        if (!buses[index]) {
-          const element = busMarker();
-          const marker = L.marker(point(vehicle.location), { icon: L.divIcon({ html: element, className: 'bus-holder', iconSize: [0, 0] }), interactive: false, zIndexOffset: vehicle.isNext ? 900 : 800 }).addTo(content);
-          buses[index] = { marker, element };
+      for (const [id, bus] of buses) {
+        if (!list.some((vehicle) => vehicle.id === id)) {
+          bus.marker.remove();
+          buses.delete(id);
         }
-        buses[index].marker.setLatLng(point(vehicle.location));
-        dressBus(buses[index].element, vehicle);
-      });
+      }
+      for (const vehicle of list) {
+        if (!buses.has(vehicle.id)) {
+          const element = busMarker();
+          buses.set(vehicle.id, { element, marker: L.marker(point(vehicle.location), { icon: L.divIcon({ html: element, className: 'bus-holder', iconSize: [0, 0] }), interactive: false, zIndexOffset: 900 }).addTo(content) });
+        }
+        const bus = buses.get(vehicle.id);
+        bus.marker.setLatLng(point(vehicle.location));
+        dressBus(bus.element, vehicle);
+      }
     },
     fit(points, maxZoom = 16) {
       if (!points.length) return;
@@ -427,7 +433,7 @@ const leafletMap = (() => {
 
 /** The same map on Google's tiles, used while the server has allowance left. */
 const googleMap = (() => {
-  let map, Marker, buses = [], tag = null, chosen = null, glide = 0, hasFramed = false, approach = null, approachStops = [], approachKey = '', items = [];
+  let map, Marker, buses = new Map(), tag = null, chosen = null, glide = 0, hasFramed = false, approach = null, approachStops = [], approachKey = '', items = [];
   const padding = () => {
     const wide = window.matchMedia('(min-width: 820px)').matches;
     return { top: wide ? 30 : 50, left: wide ? 440 : 24, right: wide ? 30 : 24, bottom: wide ? 30 : sheet.targetHeight() + 32 };
@@ -503,7 +509,7 @@ const googleMap = (() => {
         else item.map = null;
       }
       items = [];
-      buses = [];
+      buses = new Map();
       tag = null;
       chosen = null;
       approach = null;
@@ -559,19 +565,22 @@ const googleMap = (() => {
       approachStops = stops.map((stop) => mark(stop.location, upcomingStop(stop.name), { zIndex: 60 }));
     },
     vehicles(list) {
-      while (buses.length > list.length) {
-        const { marker } = buses.pop();
-        marker.map = null;
-        items = items.filter((item) => item !== marker);
-      }
-      list.forEach((vehicle, index) => {
-        if (!buses[index]) {
-          const element = busMarker();
-          buses[index] = { marker: mark(vehicle.location, element, { zIndex: vehicle.isNext ? 900 : 800 }), element };
+      for (const [id, bus] of buses) {
+        if (!list.some((vehicle) => vehicle.id === id)) {
+          bus.marker.map = null;
+          items = items.filter((item) => item !== bus.marker);
+          buses.delete(id);
         }
-        buses[index].marker.position = vehicle.location;
-        dressBus(buses[index].element, vehicle);
-      });
+      }
+      for (const vehicle of list) {
+        if (!buses.has(vehicle.id)) {
+          const element = busMarker();
+          buses.set(vehicle.id, { element, marker: mark(vehicle.location, element, { zIndex: 900 }) });
+        }
+        const bus = buses.get(vehicle.id);
+        bus.marker.position = vehicle.location;
+        dressBus(bus.element, vehicle);
+      }
     },
     fit(points, maxZoom = 16, isSnug = false) {
       if (!points.length) return;
@@ -1065,7 +1074,7 @@ function selectedPath() {
 }
 
 const VEHICLE_REFRESH = 30_000;
-let shownVehicles = [], gliding = false, lastGlide = 0;
+let shownVehicles = [], gliding = false, lastGlide = 0, lastBusID = 0;
 let vehicleRide = null, vehicleList = [], vehicleKey = '', vehicleArrivals = [], vehicleFetched = 0, vehicleFetching = false;
 
 /** The first bus or minibus ride of the route on screen. */
@@ -1115,7 +1124,10 @@ function moveVehicles() {
   vehicleList = vehiclesOnRoute(vehicleArrivals, vehicleRide, state.db, Date.now()).map((vehicle) => {
     // On the real road when that has arrived, facing the way it runs.
     const onRoad = shape && pointOnLine(shape, vehicle.location);
-    return onRoad && onRoad.meters < 500 ? { ...vehicle, location: onRoad.location, heading: onRoad.heading } : vehicle;
+    const placed = onRoad && onRoad.meters < 500 ? { ...vehicle, location: onRoad.location, heading: onRoad.heading } : vehicle;
+    // The coming bus shows the stop's own arrival time, not a guess from where it is.
+    const arrival = vehicle.isNext ? (state.tab === 'plan' ? ride.liveDeparture : chosenStopArrival()) : null;
+    return arrival ? { ...placed, minutes: minutesUntil(arrival), isLive: true } : placed;
   });
   if (previous !== vehicleList) glideVehicles();
   const coming = vehicleList.find((vehicle) => vehicle.isNext);
@@ -1128,33 +1140,43 @@ function moveVehicles() {
   mapView.approach(coming && stop ? clipLine(shape, [coming.location, stop]) ?? [coming.location, stop] : null, coming?.color, ahead);
 }
 
-let tagKey = '', tagETA = null, tagFetched = 0;
+let tagKey = '', tagArrivals, tagFetched = 0, tagShown = '';
 
-/** On the chosen stop: how long until the next bus, from its own arrivals. */
+/** When the next bus reaches the chosen stop. The stop, the sheet and the bus all read this one time. */
+const chosenStopArrival = () => tagArrivals?.find(stillDue)?.date ?? null;
+
+/** On the chosen stop and in the sheet: how long until the next bus. */
 function showArrivalTag() {
   const focus = state.tab === 'plan' ? null : state.focus, route = focus && state.db?.routes[focus.routeKey];
   if (!route || focus.position == null) {
     tagKey = '';
+    tagArrivals = undefined;
     return mapView.tag(null);
   }
   const key = `${focus.routeKey}|${focus.op}|${focus.position}`;
   if (key !== tagKey) {
     tagKey = key;
-    tagETA = undefined;
+    tagArrivals = undefined;
     tagFetched = 0;
+    tagShown = '';
   }
   if (Date.now() - tagFetched > VEHICLE_REFRESH) {
     tagFetched = Date.now();
-    fetchETA(route, focus.position, state.db, state.lang, focus.op).then((etas) => {
-      if (key !== tagKey) return;
-      tagETA = etas.map((eta) => eta.date).filter((date) => date != null && date > Date.now()).sort((a, b) => a - b)[0] ?? null;
-    }).catch(() => { if (key === tagKey) tagETA = null; });
+    fetchETA(route, focus.position, state.db, state.lang, focus.op)
+      .then((etas) => { if (key === tagKey) tagArrivals = etas; })
+      .catch(() => { if (key === tagKey) tagArrivals = []; })
+      .finally(() => { if (key === tagKey) showArrivalTag(); });
   }
-  const minutes = tagETA ? Math.max(0, Math.floor((tagETA - Date.now()) / 60_000)) : null;
-  const text = tagETA === undefined ? t('查詢中…', 'Checking…') : tagETA === null ? t('暫無到站資料', 'No arrivals')
-    : minutes <= 1 ? t('即將到站', 'Arriving') : t(`還有 ${minutes} 分鐘`, `${minutes} min`);
+  const next = chosenStopArrival(), minutes = next && minutesUntil(next);
+  const text = tagArrivals === undefined ? t('查詢中…', 'Checking…') : !next ? t('暫無到站資料', 'No arrivals')
+    : !minutes ? t('即將到站', 'Arriving') : t(`還有 ${minutes} 分鐘`, `${minutes} min`);
   const place = state.db.stops[route.stops[focus.op][focus.position]]?.location;
   mapView.tag(place && snapToLine(knownShape(route, focus.op), place), text);
+  const card = $('focus-arrivals'), shown = `${key}|${text}|${tagArrivals?.length}`;
+  if (card && tagArrivals && (shown !== tagShown || !card.querySelector('.eta-box, .muted'))) {
+    tagShown = shown;
+    fillArrivals(card, tagArrivals);
+  }
 }
 
 /** Shows a whole route on the map, and with a stop chosen, the buses either side of it. */
@@ -1216,7 +1238,8 @@ function routeDetail(route, op, back) {
   return [
     h('button', { class: 'back', onclick: back }, icon('back', 17), t('返回', 'Back')),
     h('div', { class: 'row' }, badge(op, route.route), h('span', { class: 'bold' }, `${nameText(route.orig, state.lang)} → ${nameText(route.dest, state.lang)}`)),
-    id && h('div', { class: 'card open' }, h('div', { class: 'bold' }, name(id)), etaWidget(route, position, op)),
+    id && h('div', { class: 'card open' }, h('div', { class: 'bold' }, name(id)),
+      h('div', { class: 'eta-grid', id: 'focus-arrivals' }, h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('查詢中…', 'Loading…')))),
     !id && h('div', { class: 'tiny muted' }, t('在地圖或下面點選站點，查看來車時間。', 'Tap a stop on the map or below to see arrivals.')),
     route.stops[op].map((stop, seq) => stopRow(route, seq, stop, op)),
   ];
@@ -1224,12 +1247,16 @@ function routeDetail(route, op, back) {
 
 setInterval(moveVehicles, 1000);
 
-const CLOSE_ENOUGH = 0.004; // About 400 m: further than this is a different bus.
+const CLOSE_ENOUGH = 0.003; // About 300 m: further than this is a different bus.
 
 /** Keeps each bus sliding toward where it should be, between the once-a-second sums. */
 function glideVehicles() {
+  // A bus keeps its marker while it is the same bus, so a different one never appears to jump there.
+  const taken = new Set();
   shownVehicles = vehicleList.map((vehicle) => {
-    const same = shownVehicles.find(({ location }) => Math.hypot(location.lat - vehicle.location.lat, location.lng - vehicle.location.lng) < CLOSE_ENOUGH);
+    const same = shownVehicles.find(({ id, location }) => !taken.has(id) && Math.hypot(location.lat - vehicle.location.lat, location.lng - vehicle.location.lng) < CLOSE_ENOUGH);
+    vehicle.id = same?.id ?? ++lastBusID;
+    taken.add(vehicle.id);
     return { ...vehicle, location: same?.location ?? vehicle.location };
   });
   if (calm.matches) {
@@ -1595,22 +1622,28 @@ function planTo(site) {
 
 // MARK: Arrival widgets
 
+const minutesUntil = (date) => Math.max(0, Math.floor((date - Date.now()) / 60_000));
+const stillDue = (eta) => eta.date != null && eta.date >= Date.now() - 60_000;
+
+function fillArrivals(root, etas) {
+  const timed = etas.filter(stillDue).slice(0, 2);
+  if (!timed.length) {
+    const remark = etas.find((eta) => nameText(eta.remark, state.lang));
+    return clear(root, h('div', { class: 'small muted' }, remark ? nameText(remark.remark, state.lang) : t('暫無到站資料', 'No arrivals right now')));
+  }
+  return clear(root, timed.map((eta, index) => {
+    const minutes = minutesUntil(eta.date);
+    return h('div', { class: 'eta-box' },
+      h('div', { class: 'tiny muted' }, index ? t('第二班', 'Then') : t('下一班', 'Next')),
+      h('div', { class: 'when' }, minutes ? t(`${minutes} 分鐘`, `${minutes} min`) : t('即到', 'Now')),
+      h('div', { class: 'tiny muted ellipsis' }, nameText(eta.remark, state.lang) || clock(eta.date)));
+  }));
+}
+
 function etaWidget(route, seq, op) {
   const root = h('div', { class: 'eta-grid' }, h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('查詢中…', 'Loading…')));
-  fetchETA(route, seq, state.db, state.lang, op).then((etas) => {
-    const now = Date.now(), timed = etas.filter((eta) => eta.date != null && eta.date >= now - 60_000).slice(0, 2);
-    if (!timed.length) {
-      const remark = etas.find((eta) => nameText(eta.remark, state.lang));
-      return clear(root, h('div', { class: 'small muted' }, remark ? nameText(remark.remark, state.lang) : t('暫無到站資料', 'No arrivals right now')));
-    }
-    clear(root, timed.map((eta, index) => {
-      const minutes = Math.max(0, Math.floor((eta.date - now) / 60_000));
-      return h('div', { class: 'eta-box' },
-        h('div', { class: 'tiny muted' }, index ? t('第二班', 'Then') : t('下一班', 'Next')),
-        h('div', { class: 'when' }, minutes ? t(`${minutes} 分鐘`, `${minutes} min`) : t('即到', 'Now')),
-        h('div', { class: 'tiny muted ellipsis' }, nameText(eta.remark, state.lang) || clock(eta.date)));
-    }));
-  }).catch(() => clear(root, h('div', { class: 'notice' }, t('未能取得到站時間', "Couldn't get arrivals"))));
+  fetchETA(route, seq, state.db, state.lang, op).then((etas) => fillArrivals(root, etas))
+    .catch(() => clear(root, h('div', { class: 'notice' }, t('未能取得到站時間', "Couldn't get arrivals"))));
   return root;
 }
 
