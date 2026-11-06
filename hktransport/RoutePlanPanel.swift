@@ -9,6 +9,7 @@ struct RoutePlanPanel: View {
     @ObservedObject var location: BusLocationModel
     @ObservedObject private var navigation = NavigationTracker.shared
     @StateObject private var speech = SpeechInputModel()
+    @StateObject private var suggester = PlaceSuggester()
     @AppStorage("hktransport.speechLanguage") private var speechChoice = ""
     @FocusState private var focus: Field?
     @State private var expanded: String?
@@ -18,6 +19,14 @@ struct RoutePlanPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             searchBar
+                .zIndex(2)
+                .overlay(alignment: .topLeading) {
+                    if focus == .destination {
+                        SuggestionList(items: suggester.items, pick: pick)
+                            .frame(width: 520)
+                            .offset(x: 330, y: 42)
+                    }
+                }
             placeHistory
             statusRow
             if let origin = planner.origin, let destination = planner.destination {
@@ -65,7 +74,7 @@ struct RoutePlanPanel: View {
 
                 JourneyMap(model: model, navigation: navigation, location: location, origin: planner.origin,
                            destination: planner.destination, path: navigation.path ?? selectedPath,
-                           suggestions: planner.visibleSuggestions ?? [])
+                           ride: selectedRide, suggestions: planner.visibleSuggestions ?? [])
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             aiReply
@@ -88,6 +97,13 @@ struct RoutePlanPanel: View {
                 navigation.stop()
             }
         }
+        .onChange(of: planner.destinationText) {
+            suggester.update(focus == .destination ? planner.destinationText : "", index: model.db?.allStopIndex,
+                             around: location.location, language: model.language)
+        }
+        .onChange(of: focus) {
+            if focus != .destination { suggester.clear() }
+        }
         .onChange(of: speech.transcript) {
             if speech.isListening { planner.chatText = speech.transcript }
         }
@@ -101,6 +117,21 @@ struct RoutePlanPanel: View {
     /// Live re-timing replaces journeys but keeps their ids, so the map stays put.
     private var selectedPath: JourneyMapPath? {
         planner.journeys.first { $0.id == expanded }.flatMap(path)
+    }
+
+    /// The bus the rider boards first, for showing where it is. Rail has no such estimate.
+    private var selectedRide: PlannedRide? {
+        planner.journeys.first { $0.id == expanded }?.legs.lazy.compactMap { leg -> PlannedRide? in
+            if case .ride(let ride) = leg, ride.op != .mtr, ride.op != .lightRail { return ride }
+            return nil
+        }.first
+    }
+
+    private func pick(_ item: PlaceSuggester.Item) {
+        planner.destinationText = item.title
+        suggester.clear()
+        focus = nil
+        search()
     }
 
     private func path(for journey: Journey) -> JourneyMapPath? {
@@ -201,14 +232,13 @@ struct RoutePlanPanel: View {
 
     // MARK: AI box
 
-    /// "Where should I look?" with one button per area.
+    /// Whatever the AI chose to ask, with answers to tap.
     @ViewBuilder
     private var areaQuestion: some View {
-        if case .asking(let request) = planner.discovery {
+        if case .asking(let request) = planner.discovery, let question = request.question {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Label(model.t("想找\(request.want)，要在哪裡找？", "Where should I look for \(request.want)?"),
-                          systemImage: "sparkles")
+                    Label(question.forScript, systemImage: "sparkles")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.yellow)
                     Spacer()
@@ -221,16 +251,15 @@ struct RoutePlanPanel: View {
                     .accessibilityLabel(model.t("取消", "Cancel"))
                 }
                 HStack(spacing: 6) {
-                    ForEach(request.areaChoices, id: \.self) { area in
-                        Button(area == DiscoveryRequest.nearby ? model.t("附近（本區）", "Nearby (this district)") : area) { chooseArea(area) }
-                            .disabled(planner.isBusy)
+                    ForEach(request.options, id: \.self) { option in
+                        Button(option.forScript) {
+                            planner.chatText = option
+                            sendChat()
+                        }
+                        .disabled(planner.isBusy)
                     }
                     Spacer(minLength: 0)
                 }
-                Text(model.t("或在下方輸入更精確的範圍，例如：朗豪坊附近、要平啲",
-                             "Or type a more exact area below, e.g. near Langham Place"))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -238,19 +267,10 @@ struct RoutePlanPanel: View {
     private func suggestionList(_ suggestions: [PlaceSuggestion]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             if case .choosing(let request, let area, _) = planner.discovery {
-                HStack {
-                    Text(model.t("\(area)的\(request.want)：選一個地點", "\(request.want) around \(area): pick one"))
-                        .font(.system(size: 13, weight: .semibold))
-                    Spacer()
-                    Button(model.t("換範圍", "Change area")) { planner.askAreaAgain() }
-                        .buttonStyle(.link)
-                        .font(.system(size: 11))
-                }
-                Text(suggestions.first?.isNamedByAI == true
-                     ? model.t("由 AI 推薦，並已在 Apple 地圖核實地點。AI 的資料可能過時，出發前請確認仍在營業。",
-                               "Recommended by AI and found on Apple Maps. AI knowledge can be out of date, so check before you go.")
-                     : model.t("地點來自 Apple 地圖，沒有菜單資料，未必有售，出發前請先確認。",
-                               "Places come from Apple Maps, which has no menus. Check before you go."))
+                Text(model.t("\(area)的\(request.want.forScript)：\(suggestions.count) 個地點", "\(request.want) · \(area): \(suggestions.count) places"))
+                    .font(.system(size: 13, weight: .semibold))
+                Text(model.t("AI 按合適程度排序。地點來自 Apple 地圖，出發前請確認是否營業。",
+                             "Sorted by AI. Places come from Apple Maps, so check they are open before you go."))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -325,7 +345,7 @@ struct RoutePlanPanel: View {
             }
             HStack(spacing: 8) {
                 Image(systemName: "sparkles")
-                    .foregroundStyle(model.hasDeepSeekKey ? Color.yellow : .secondary)
+                    .foregroundStyle(.yellow)
                 TextField(chatPrompt, text: $planner.chatText)
                     .textFieldStyle(.plain)
                     .font(.system(size: 14))
@@ -364,21 +384,13 @@ struct RoutePlanPanel: View {
                 }
                 .font(.system(size: 11))
                 .foregroundStyle(.orange)
-            } else if !model.hasDeepSeekKey {
-                Text(model.t("未連接 AI：現時使用基本解析。在設定加入 DeepSeek API key 後，搜尋及對話都會由 AI 分析。",
-                             "AI not connected: using basic parsing. Add a DeepSeek API key in Settings to have AI analyse search and chat."))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
             }
         }
     }
 
     private var chatPrompt: String {
         if speech.isListening { return model.t("正在聆聽…", "Listening…") }
-        if case .asking = planner.discovery {
-            return model.t("輸入更精確的範圍，例如：朗豪坊附近", "Type a more exact area, e.g. near Langham Place")
-        }
-        return model.t("告訴 AI，例如：我想吃螺螄粉、去機場不想轉車", "Ask AI, e.g. I want rice noodles, or airport with no transfers")
+        return model.t("告訴 AI，例如：去吃茶餐廳", "Tell the AI, e.g. find a cha chaan teng")
     }
 
     private var speechLanguage: SpeechLanguage {
@@ -447,12 +459,11 @@ struct RoutePlanPanel: View {
             case .idle, .done:
                 EmptyView()
             case .understanding:
-                status(model.hasDeepSeekKey ? model.t("AI 正在分析你的要求…", "AI is analysing your request…")
-                                            : model.t("理解要求…", "Reading your request…"), busy: true)
+                status(model.t("AI 正在分析你的要求…", "AI is analysing your request…"), busy: true)
             case .locating:
                 status(model.t("正在尋找起點及目的地…", "Finding places…"), busy: true)
             case .findingPlaces:
-                status(model.t("AI 正在搜尋，並在地圖上核實地點…", "AI is searching and checking places on the map…"), busy: true)
+                status(model.t("正在搜尋地點，AI 排序中…", "Finding places, and AI is sorting them…"), busy: true)
             case .planning:
                 status(model.t("正在計算路線…", "Planning routes…"), busy: true)
             case .checkingLive:
@@ -527,13 +538,6 @@ struct RoutePlanPanel: View {
                        ai: model.deepSeekClient())
     }
 
-    private func chooseArea(_ area: String) {
-        guard let db = model.db else { return }
-        let location = location
-        planner.chooseArea(area, db: db, language: model.language, currentLocation: { await location.currentFix() },
-                           ai: model.deepSeekClient())
-    }
-
     private func choose(_ suggestion: PlaceSuggestion) {
         guard let db = model.db else { return }
         expanded = nil
@@ -561,21 +565,23 @@ private struct JourneyMap: View {
     let origin: ResolvedPlace?
     let destination: ResolvedPlace?
     let path: JourneyMapPath?
+    /// The first bus of the option in view.
+    let ride: PlannedRide?
     let suggestions: [PlaceSuggestion]
+    @ObservedObject private var shapes = RouteShapes.shared
+    @ObservedObject private var walks = WalkRoutes.shared
+    @StateObject private var live = LiveVehicles()
+    @State private var chosen: RouteDot?
+    @State private var mapHeading = 0.0
 
     private static let hongKong = MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 22.3400, longitude: 114.1500),
         span: MKCoordinateSpan(latitudeDelta: 0.42, longitudeDelta: 0.52)
     )
+    private static let aroundRider = 0.02
+    private static let aroundStop = 0.0032
 
     @State private var position: MapCameraPosition = .region(JourneyMap.hongKong)
-
-    private struct RideStop: Identifiable {
-        let id: String
-        let name: String
-        let location: StopLocation
-        let color: Color
-    }
 
     private struct Boarding: Identifiable {
         let id: Int
@@ -591,13 +597,90 @@ private struct JourneyMap: View {
                 .overlay(alignment: .top) {
                     if navigation.journeyID != nil { navigationBanner }
                 }
+                .overlay(alignment: .bottom) {
+                    if let chosen { stopCard(chosen) }
+                }
             Text(caption)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
         }
-        .onAppear { fit(animated: false) }
+        .onAppear {
+            loadRoads()
+            follow()
+            fit(animated: false)
+        }
+        .onDisappear { live.follow(nil, model: model) }
+        .onChange(of: path) {
+            chosen = nil
+            loadRoads()
+            follow()
+        }
+        .onChange(of: liveKey) { follow() }
         .onChange(of: fitPoints) { fit(animated: true) }
+        .onChange(of: chosen?.id) {
+            follow()
+            fit(animated: true)
+        }
+        .onChange(of: location.location) {
+            if fitPoints.isEmpty { fit(animated: true) }
+        }
         .onChange(of: navigation.fix) { fit(animated: true) }
+    }
+
+    private var liveKey: String { "\(ride?.routeKey ?? "")|\(ride?.boardPosition ?? -1)|\(ride?.liveDeparture?.timeIntervalSince1970 ?? 0)" }
+
+    private func loadRoads() {
+        guard let db = model.db else { return }
+        for segment in path?.segments ?? [] {
+            if let key = segment.routeKey, let route = db.routeList[key], case .ride(_, let op) = segment.mode {
+                shapes.load(key, route: route, op: op, stopList: db.stopList)
+            } else if segment.mode == .walk, let from = segment.points.first, let to = segment.points.last {
+                walks.load(from, to)
+            }
+        }
+    }
+
+    /// The stop picked on the map, or else where the rider gets on.
+    private func follow() {
+        if let chosen {
+            live.follow(.init(routeKey: chosen.routeKey, op: chosen.op, boardPosition: chosen.position, liveDeparture: nil, asksStop: true), model: model)
+        } else if let ride {
+            live.follow(.init(routeKey: ride.routeKey, op: ride.op, boardPosition: ride.boardPosition,
+                              liveDeparture: ride.liveDeparture, asksStop: false), model: model)
+        } else {
+            live.follow(nil, model: model)
+        }
+    }
+
+    private func stopCard(_ stop: RouteDot) -> some View {
+        let times = (live.stopArrivals ?? []).compactMap(\.date).filter { $0 > model.now }.prefix(2)
+        return HStack(spacing: 12) {
+            Text(stop.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+            Spacer(minLength: 0)
+            if live.stopArrivals == nil {
+                ProgressView().controlSize(.small)
+            } else if times.isEmpty {
+                Text(model.t("暫無到站資料", "No arrivals")).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            ForEach(Array(times), id: \.self) { time in
+                Text(model.t("\(max(0, Int(time.timeIntervalSince(model.now) / 60))) 分鐘", "\(max(0, Int(time.timeIntervalSince(model.now) / 60))) min"))
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(.white.opacity(0.12), in: Capsule())
+            }
+            Button {
+                chosen = nil
+            } label: {
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(model.t("關閉", "Close"))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(10)
     }
 
     private var navigationBanner: some View {
@@ -630,9 +713,50 @@ private struct JourneyMap: View {
         }
     }
 
+    private var lines: [RouteLine] {
+        guard let db = model.db else { return [] }
+        var lines = (path?.segments ?? []).flatMap { segment -> [RouteLine] in
+            if case .ride(_, let op) = segment.mode, let key = segment.routeKey, let route = db.routeList[key] {
+                return RouteDrawing.ride(id: "\(segment.id)", routeKey: key, route: route, op: op, positions: segment.positions,
+                                         points: segment.points, stopList: db.stopList, shapes: shapes)
+            }
+            let road = segment.points.first.flatMap { from in segment.points.last.flatMap { walks.line(from, $0) } } ?? segment.points
+            return [RouteLine(id: "\(segment.id)-casing", points: road, color: .white, width: 7, isCasing: true),
+                    RouteLine(id: "\(segment.id)-walk", points: road, color: .blue, isDotted: true)]
+        }
+        // The road the coming bus still has to cover, set apart from the trip itself.
+        if chosen == nil, let ride, let coming = live.shown.first(where: \.isNext), let track = shapes.track(ride.routeKey, ride.op) {
+            lines.append(RouteLine(id: "approach", points: track.road(from: coming.position, to: Double(ride.boardPosition)),
+                                   color: ride.op.lineColor(ride.route).opacity(0.55), width: 4))
+        }
+        return lines
+    }
+
+    private var dots: [RouteDot] {
+        guard let db = model.db else { return [] }
+        return (path?.segments ?? []).flatMap { segment -> [RouteDot] in
+            guard case .ride(_, let op) = segment.mode, let key = segment.routeKey, let route = db.routeList[key] else { return [] }
+            return RouteDrawing.dots(id: "\(segment.id)", routeKey: key, route: route, op: op, positions: segment.positions,
+                                     points: segment.points, stopIDs: segment.stopIDs, stopList: db.stopList, shapes: shapes,
+                                     language: model.language)
+        }
+    }
+
+    private var tag: (location: StopLocation, text: String)? {
+        guard let chosen else { return nil }
+        guard let arrivals = live.stopArrivals else { return (chosen.location, model.t("查詢中…", "Checking…")) }
+        guard let next = arrivals.compactMap(\.date).first(where: { $0 > model.now }) else {
+            return (chosen.location, model.t("暫無到站資料", "No arrivals"))
+        }
+        let minutes = Int(next.timeIntervalSince(model.now) / 60)
+        return (chosen.location, minutes == 0 ? model.t("即將到站", "Arriving") : model.t("還有 \(minutes) 分鐘", "\(minutes) min"))
+    }
+
+    private var busOperator: Operator? { chosen?.op ?? ride?.op }
+
     private var map: some View {
         Map(position: $position, interactionModes: .all) {
-            if let fix = navigation.fix {
+            if let fix = navigation.fix ?? location.location {
                 Annotation(model.t("我的位置", "My location"), coordinate: fix.coordinate) {
                     Circle().fill(.blue)
                         .frame(width: 16, height: 16)
@@ -641,21 +765,10 @@ private struct JourneyMap: View {
                 }
                 .annotationTitles(.hidden)
             }
-            ForEach(path?.segments ?? []) { segment in
-                // A white casing keeps every line readable on light and dark maps.
-                MapPolyline(coordinates: segment.points.map(\.coordinate))
-                    .stroke(.white, style: StrokeStyle(lineWidth: 7, lineCap: .round, lineJoin: .round))
-                MapPolyline(coordinates: segment.points.map(\.coordinate))
-                    .stroke(color(segment.mode), style: stroke(segment.mode))
-            }
-            ForEach(rideStops) { stop in
-                // MapKit hides names that would collide and brings them back on zooming in.
-                Annotation(stop.name, coordinate: stop.location.coordinate, anchor: .center) {
-                    Circle().fill(.white)
-                        .frame(width: 7, height: 7)
-                        .overlay(Circle().stroke(stop.color, lineWidth: 2))
-                }
-                .annotationTitles(.automatic)
+            RouteLayers(lines: lines, dots: dots, vehicles: busOperator == .mtr || busOperator == .lightRail ? [] : live.shown,
+                        busColor: busOperator?.color ?? .red, isMinibus: busOperator == .gmb, mapHeading: mapHeading,
+                        chosenID: chosen?.id, tag: tag, language: model.t) { dot in
+                chosen = chosen?.id == dot.id ? nil : dot
             }
             ForEach(boardings) { boarding in
                 let name = boarding.op.lineName(boarding.route).text(model.language)
@@ -686,6 +799,7 @@ private struct JourneyMap: View {
         }
         .mapStyle(.standard(pointsOfInterest: .excludingAll))
         .mapControls { MapCompass(); MapScaleView(); MapZoomStepper() }
+        .onMapCameraChange(frequency: .continuous) { mapHeading = $0.camera.heading }
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .accessibilityLabel(model.t("路線規劃 Apple 地圖", "Apple Map of the planned trip"))
     }
@@ -694,48 +808,36 @@ private struct JourneyMap: View {
         if !suggestions.isEmpty { return model.t("地圖上的數字對應左方的地點", "Numbers on the map match the list") }
         return path == nil
             ? model.t("點開路線方案，即可在地圖查看全程", "Open an option to see the whole trip on the map")
-            : model.t("路線按站點連線顯示，並非實際行車路徑 · 虛線為步行",
-                      "Lines join the stops and don't follow the exact road · Dotted lines are walks")
+            : model.t("點線上的站點查看到站時間 · 小車位置按到站時間推算 · 虛線為步行",
+                      "Click a stop on the line for arrivals · Buses are placed from arrival times · Dotted lines are walks")
     }
 
     private var fitPoints: [StopLocation] {
-        if !suggestions.isEmpty { return suggestions.map(\.place.location) }
+        if !suggestions.isEmpty { return suggestions.prefix(10).map(\.place.location) }
         return path?.allPoints ?? [origin?.location, destination?.location].compactMap { $0 }
     }
 
+    /// The trip, right in on a picked stop, or with nothing planned, where the rider is.
     private func fit(animated: Bool) {
-        var region = MKCoordinateRegion(fitting: fitPoints) ?? Self.hongKong
-        if let fix = navigation.fix {
+        var region = MKCoordinateRegion(fitting: fitPoints) ?? home
+        if let chosen {
+            region = MKCoordinateRegion(center: chosen.location.coordinate,
+                                        span: MKCoordinateSpan(latitudeDelta: Self.aroundStop, longitudeDelta: Self.aroundStop))
+        } else if let fix = navigation.fix {
             region = MKCoordinateRegion(center: fix.coordinate,
                                         span: MKCoordinateSpan(latitudeDelta: 0.014, longitudeDelta: 0.014))
         }
         if animated {
-            withAnimation(.easeInOut(duration: 0.35)) { position = .region(region) }
+            withAnimation(.easeInOut(duration: 0.5)) { position = .region(region) }
         } else {
             position = .region(region)
         }
     }
 
-    private func color(_ mode: JourneyMapPath.Mode) -> Color {
-        if case .ride(let route, let op) = mode { return op.lineColor(route) }
-        return .blue
-    }
-
-    private func stroke(_ mode: JourneyMapPath.Mode) -> StrokeStyle {
-        mode == .walk
-            ? StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round, dash: [0.1, 8])
-            : StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round)
-    }
-
-    private var rideStops: [RideStop] {
-        (path?.segments ?? []).flatMap { segment -> [RideStop] in
-            guard segment.mode != .walk else { return [] }
-            return zip(segment.stopIDs, segment.points).enumerated().map { index, stop in
-                RideStop(id: "\(segment.id)-\(index)",
-                         name: RoutePlannerModel.stopName(stop.0, db: model.db, language: model.language),
-                         location: stop.1, color: color(segment.mode))
-            }
-        }
+    private var home: MKCoordinateRegion {
+        guard let fix = location.location,
+              PlaceResolver.isInHongKong(StopLocation(lat: fix.coordinate.latitude, lng: fix.coordinate.longitude)) else { return Self.hongKong }
+        return MKCoordinateRegion(center: fix.coordinate, span: MKCoordinateSpan(latitudeDelta: Self.aroundRider, longitudeDelta: Self.aroundRider))
     }
 
     private var boardings: [Boarding] {

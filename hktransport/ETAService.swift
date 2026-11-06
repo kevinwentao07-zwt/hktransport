@@ -357,3 +357,37 @@ enum ETAService {
         value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? value
     }
 }
+
+extension ETAService {
+    private static let mostSampledStops = 8
+
+    /// Arrival times along a whole route, for working out where its buses are. KMB publishes
+    /// them all at once; the others are sampled at stops spread along the line.
+    static func routeArrivals(route: Route, op: Operator, stopList: [String: Stop], language: Lang) async throws -> [RouteArrival] {
+        let stops = route.stops[op.rawValue] ?? []
+        if op == .kmb {
+            let data = try await get("https://data.etabus.gov.hk/v1/transport/kmb/route-eta/\(path(route.route))/\(path(route.serviceType))")
+            let bound = route.bound["kmb"]
+            var byStop: [Int: [Date]] = [:]
+            for row in rows(try json(data)["data"]) {
+                guard string(row["dir"]) == bound, let seq = int(row["seq"]), let date = parseDate(string(row["eta"])) else { continue }
+                byStop[seq - 1, default: []].append(date)
+            }
+            return byStop.map { RouteArrival(position: $0.key, times: $0.value) }
+        }
+        let count = min(mostSampledStops, stops.count - 1)
+        guard count > 0 else { return [] }
+        let positions = Set((0..<count).map { Int((Double($0 * (stops.count - 2)) / Double(max(1, count - 1))).rounded()) })
+        return await withTaskGroup(of: RouteArrival?.self) { group in
+            for position in positions {
+                group.addTask {
+                    guard let etas = try? await fetch(op, route: route, seq: position, stopList: stopList, language: language) else { return nil }
+                    return RouteArrival(position: position, times: etas.compactMap(\.date))
+                }
+            }
+            var arrivals: [RouteArrival] = []
+            for await arrival in group { if let arrival { arrivals.append(arrival) } }
+            return arrivals
+        }
+    }
+}

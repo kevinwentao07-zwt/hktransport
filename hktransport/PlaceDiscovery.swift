@@ -5,20 +5,22 @@ import MapKit
 /// "I want 螺螄粉": something to find rather than a place to go to.
 struct DiscoveryRequest: Equatable, Sendable {
     var want: String
+    /// The useful words of the whole conversation, without the area.
+    var query = ""
+    var queryEn: String?
     /// Apple Maps search terms, most specific first.
     var searchTerms: [String]
-    /// Nil until the rider has said where to look.
+    /// Nil means around the rider.
     var area: String?
-    var areaOptions: [String] = []
+    var extra: String?
+    /// Whatever the AI chose to ask first, with answers to tap. Most requests have none.
+    var question: String?
+    var options: [String] = []
 
-    static let nearby = "附近"
-    private static let defaultAreas = ["旺角", "銅鑼灣", "尖沙咀", "中環"]
-
-    /// What the area buttons show: nearby first, then the suggested districts.
-    var areaChoices: [String] {
-        var seen: Set<String> = [Self.nearby]
-        let areas = (areaOptions.isEmpty ? Self.defaultAreas : areaOptions).filter { seen.insert($0).inserted }
-        return [Self.nearby] + areas.prefix(4)
+    /// Everything worth looking up, each once.
+    var allTerms: [String] {
+        var seen = Set<String>()
+        return (searchTerms + [query, queryEn ?? ""]).filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 }
 
@@ -30,35 +32,22 @@ struct PlaceCandidate: Identifiable, Equatable, Sendable {
     let location: StopLocation
     /// From the centre of the search area.
     var meters: Double = 0
-    /// One of Hong Kong's 18 districts, in the system language.
-    var district = ""
 
     var id: String { "\(name)|\(location.lat)|\(location.lng)" }
 }
 
 struct PlaceSuggestion: Identifiable, Equatable, Sendable {
     let place: PlaceCandidate
-    /// Nil without the AI.
+    /// The AI's reason, for the top few.
     var reason: String?
-    /// True when the AI named this shop itself, rather than choosing from a keyword search.
-    var isNamedByAI = false
     var id: String { place.id }
 }
 
-/// A shop the AI knows of. Nothing is shown until Apple Maps confirms it.
-struct AIPlace: Equatable, Sendable {
-    let name: String
-    var nameEn: String?
-    var reason: String?
-}
-
-/// Where to look. "Nearby" means the rider's whole district.
+/// Where to look.
 struct SearchArea: Equatable, Sendable {
     let name: String
-    let center: StopLocation
     var radius = PlaceDiscovery.areaRadius
-    /// Results must be in this district, when it is known.
-    var district: String?
+    let center: StopLocation
 }
 
 enum DiscoveryStage: Equatable, Sendable {
@@ -69,13 +58,11 @@ enum DiscoveryStage: Equatable, Sendable {
 enum PlaceDiscovery {
     /// Around a named district or landmark.
     static let areaRadius = 2_500.0
-    /// Hong Kong's districts are large, so this only rules out other sides of the city.
-    static let districtRadius = 8_000.0
-    static let maxCandidates = 12
-    static let maxSuggestions = 5
+    /// "Nearby", or no area at all.
+    static let nearbyRadius = 5_000.0
+    static let maxCandidates = 30
 
     typealias Searcher = @Sendable (_ term: String, _ center: StopLocation, _ radius: Double) async -> [PlaceCandidate]
-    typealias DistrictLookup = @Sendable (_ center: StopLocation, _ language: Lang) async -> (name: String, match: String)?
 
     private static let nearbyWords = ["附近", "呢度", "呢頭", "這裡", "這裏", "这里", "我身邊", "就近", "nearby", "near me", "around here"]
     private static let areaSuffixes = ["附近", "一帶", "一带", "周邊", "周边", "周圍", "周围", "嗰邊", "那邊", "area"]
@@ -114,65 +101,12 @@ enum PlaceDiscovery {
             var place = place
             place.meters = Geo.meters(area.center, place.location)
             return place
-        }.filter { place in
-            guard place.meters <= area.radius else { return false }
-            guard let district = area.district, !place.district.isEmpty else { return true }
-            return place.district == district
-        }.sorted { $0.meters < $1.meters }
-    }
-
-    private static func normalized(_ name: String) -> String {
-        String(name.lowercased().unicodeScalars.filter(CharacterSet.alphanumerics.contains).map(Character.init))
-    }
-
-    /// Apple Maps returns its closest guess, which can be unrelated, so a result
-    /// only counts when its name really is the shop the AI named.
-    static func isSamePlace(_ found: String, as place: AIPlace) -> Bool {
-        let found = normalized(found)
-        guard !found.isEmpty else { return false }
-        return [place.name, place.nameEn].compactMap { $0 }.map(normalized).contains { name in
-            // A prefix, not any substring: 老友記 (Lo Yau Kee) is not Yau Kee.
-            !name.isEmpty && (found.contains(name) || name.hasPrefix(found) || sharesFirstWord(found, name))
-        }
-    }
-
-    private static func sharesFirstWord(_ a: String, _ b: String) -> Bool {
-        // "tsuiwahrestaurant" and "tsuiwahcafe" are the same brand.
-        let length = 6
-        return a.count >= length && b.count >= length && a.prefix(length) == b.prefix(length)
-    }
-
-    /// Looks up each shop the AI named, keeping the nearest branch that is really there.
-    static func verify(_ places: [AIPlace], in area: SearchArea, search: Searcher) async -> [PlaceSuggestion] {
-        var seen = Set<String>()
-        var verified: [PlaceSuggestion] = []
-        for place in places where verified.count < maxSuggestions {
-            for term in [place.name, place.nameEn].compactMap({ $0 }) {
-                let found = within(area, await search(term, area.center, area.radius))
-                    .first { isSamePlace($0.name, as: place) }
-                if let found {
-                    if seen.insert(found.id).inserted {
-                        verified.append(PlaceSuggestion(place: found, reason: place.reason, isNamedByAI: true))
-                    }
-                    break
-                }
-            }
-        }
-        return verified
-    }
-
-    /// The rider's district, for showing and for comparing with Apple Maps results.
-    static func district(of center: StopLocation, language: Lang) async -> (name: String, match: String)? {
-        let location = CLLocation(latitude: center.lat, longitude: center.lng)
-        guard let match = try? await CLGeocoder().reverseGeocodeLocation(location).first?.subAdministrativeArea else { return nil }
-        let locale = Locale(identifier: language == .zh ? "zh_HK" : "en_HK")
-        let shown = try? await CLGeocoder().reverseGeocodeLocation(location, preferredLocale: locale).first?.subAdministrativeArea
-        return (shown ?? match, match)
+        }.filter { $0.meters <= area.radius }.sorted { $0.meters < $1.meters }
     }
 
     /// Used without the AI, or when it picks nothing usable.
     static func nearest(_ places: [PlaceCandidate]) -> [PlaceSuggestion] {
-        places.prefix(maxSuggestions).map { PlaceSuggestion(place: $0, reason: nil) }
+        places.map { PlaceSuggestion(place: $0, reason: nil) }
     }
 
     static func appleMaps(term: String, center: StopLocation, radius: Double) async -> [PlaceCandidate] {
@@ -199,8 +133,7 @@ enum PlaceDiscovery {
             let coordinate = item.placemark.coordinate
             let category = item.pointOfInterestCategory?.rawValue.replacingOccurrences(of: "MKPOICategory", with: "") ?? ""
             return PlaceCandidate(name: name, address: item.placemark.title ?? "", category: category,
-                                  location: StopLocation(lat: coordinate.latitude, lng: coordinate.longitude),
-                                  district: item.placemark.subAdministrativeArea ?? "")
+                                  location: StopLocation(lat: coordinate.latitude, lng: coordinate.longitude))
         }
     }
 }

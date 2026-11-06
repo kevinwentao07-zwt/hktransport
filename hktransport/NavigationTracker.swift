@@ -76,7 +76,7 @@ extension JourneyMapPath {
 
     /// One line telling the rider what to do now.
     func instruction(for progress: JourneyProgress, language: Lang, stopName: (String) -> String) -> String {
-        func t(_ zh: String, _ en: String) -> String { language == .zh ? zh : en }
+        func t(_ zh: String, _ en: String) -> String { language.pick(zh, en) }
         if progress.hasArrived { return t("已到達目的地", "You have arrived") }
         if progress.isOffRoute {
             let meters = Int(progress.metersFromRoute.rounded())

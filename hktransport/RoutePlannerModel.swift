@@ -166,7 +166,6 @@ final class RoutePlannerModel: ObservableObject {
     @Published private(set) var discovery: DiscoveryStage?
     /// Replaced in tests; real searches go to Apple Maps.
     var placeSearch: PlaceDiscovery.Searcher = { await PlaceDiscovery.appleMaps(term: $0, center: $1, radius: $2) }
-    var districtLookup: PlaceDiscovery.DistrictLookup = { await PlaceDiscovery.district(of: $0, language: $1) }
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var origin: ResolvedPlace?
     @Published private(set) var destination: ResolvedPlace?
@@ -181,6 +180,11 @@ final class RoutePlannerModel: ObservableObject {
     private var network: TransitNetwork?
     private var buildingNetwork: (id: UUID, task: Task<TransitNetwork, Never>)?
     private var planTask: Task<Void, Never>?
+    /// The last few exchanges, so a short follow-up can be read in context.
+    private var talk: [String] = []
+    private var questionsAsked = 0
+    private static let mostTalk = 8
+    private static let mostQuestions = 2
 
     var hasInput: Bool {
         !originText.isEmpty || !destinationText.isEmpty || !chatText.isEmpty || !journeys.isEmpty
@@ -211,6 +215,8 @@ final class RoutePlannerModel: ObservableObject {
         journeys = []
         explanation = nil
         aiNotice = nil
+        talk = []
+        questionsAsked = 0
     }
 
     /// Re-sorts the current options without searching again.
@@ -224,7 +230,7 @@ final class RoutePlannerModel: ObservableObject {
         let start = originText.trimmingCharacters(in: .whitespacesAndNewlines)
         let end = destinationText.trimmingCharacters(in: .whitespacesAndNewlines)
         originText = TripIntentParser.isCurrentLocation(end) ? "" : end
-        destinationText = start.isEmpty ? (language == .zh ? "我的位置" : "My location") : start
+        destinationText = start.isEmpty ? language.pick("我的位置", "My location") : start
     }
 
     /// Plans what the top search bar says.
@@ -242,29 +248,33 @@ final class RoutePlannerModel: ObservableObject {
     func sendChat(db: TransportDB, language: Lang, currentLocation: @escaping LocationSource, ai: DeepSeekClient?) {
         let text = chatText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        if case .asking(let request) = discovery {
-            // Typed or spoken, this is the answer to "where should I look?".
-            chatText = ""
-            lastChat = text
-            findPlaces(request, area: text, isTyped: true, db: db, language: language,
-                       currentLocation: currentLocation, ai: ai)
-            return
-        }
-        discovery = nil
         let end = destinationText.trimmingCharacters(in: .whitespacesAndNewlines)
         let current = end.isEmpty ? nil : TripIntent(origin: TripIntentParser.normalizedOrigin(originText),
                                                      destination: end, preference: preference)
+        let context = chatContext()
         chatText = ""
         lastChat = text
-        begin(.chat(text, current: current), db: db, language: language, currentLocation: currentLocation, ai: ai)
+        remember("Rider: \(text)")
+        begin(.chat(text, current: current, context: context), db: db, language: language, currentLocation: currentLocation, ai: ai)
     }
 
-    /// The rider pressed one of the area buttons.
-    func chooseArea(_ area: String, db: TransportDB, language: Lang, currentLocation: @escaping LocationSource,
-                    ai: DeepSeekClient?) {
-        guard case .asking(let request) = discovery else { return }
-        findPlaces(request, area: area, isTyped: false, db: db, language: language,
-                   currentLocation: currentLocation, ai: ai)
+    private func remember(_ line: String) {
+        talk = Array((talk + [line]).suffix(Self.mostTalk))
+    }
+
+    private func chatContext() -> ChatContext {
+        var context = ChatContext(talk: talk, mayAsk: questionsAsked < Self.mostQuestions)
+        switch discovery {
+        case .asking(let request):
+            context.question = request.question
+            context.search = .init(want: request.want, query: request.query, area: request.area, extra: request.extra)
+        case .choosing(let request, _, let suggestions):
+            context.search = .init(want: request.want, query: request.query, area: request.area, extra: request.extra,
+                                   shops: suggestions.prefix(10).map(\.place.name))
+        case nil:
+            break
+        }
+        return context
     }
 
     /// Plans a route to a recommended place, keeping the list to come back to.
@@ -309,118 +319,82 @@ final class RoutePlannerModel: ObservableObject {
         phase = .idle
     }
 
-    func askAreaAgain() {
-        guard case .choosing(var request, _, _) = discovery else { return }
-        request.area = nil
-        discovery = .asking(request)
-    }
-
     func cancelDiscovery() {
         planTask?.cancel()
         discovery = nil
         phase = .idle
     }
 
-    private func findPlaces(_ request: DiscoveryRequest, area: String, isTyped: Bool, db: TransportDB, language: Lang,
-                            currentLocation: @escaping LocationSource, ai: DeepSeekClient?) {
-        planTask?.cancel()
-        explanation = nil
-        journeys = []
-        origin = nil
-        destination = nil
-        phase = .findingPlaces
-        planTask = Task { [weak self] in
-            await self?.discover(request, area: area, isTyped: isTyped, db: db, language: language,
-                                 currentLocation: currentLocation, ai: ai)
-        }
-    }
-
-    private func discover(_ request: DiscoveryRequest, area: String, isTyped: Bool, db: TransportDB, language: Lang,
+    private func discover(_ request: DiscoveryRequest, db: TransportDB, language: Lang,
                           currentLocation: @escaping LocationSource, ai: DeepSeekClient?) async {
-        func t(_ zh: String, _ en: String) -> String { language == .zh ? zh : en }
-        func giveUp(_ message: String) {
-            discovery = .asking(request)
-            phase = .failed(message)
-        }
+        func t(_ zh: String, _ en: String) -> String { language.pick(zh, en) }
         phase = .findingPlaces
 
-        // 1. Where to look.
-        var place = PlaceDiscovery.cleanArea(area)
-        var extra: String?
-        if isTyped, let ai, let parsed = try? await ai.parseArea(area, want: request.want) {
-            place = parsed.area
-            extra = parsed.extra
-        }
-        guard !Task.isCancelled else { return }
+        // 1. Where to look: the place named, or 5 km around the rider.
+        let place = request.area.map(PlaceDiscovery.cleanArea) ?? ""
         let searchArea: SearchArea
         if PlaceDiscovery.isNearby(place) {
             guard let fix = await currentLocation() else {
-                giveUp(t("未能取得你的位置，請選擇一個地區或輸入範圍。", "Couldn't get your location. Pick a district or type an area."))
+                discovery = nil
+                phase = .failed(t("未能取得你的位置，請說明想在哪一區找。", "Couldn't get your location. Say which area to search."))
                 return
             }
-            // "Nearby" means the rider's own district, not a circle around them.
-            let center = StopLocation(lat: fix.coordinate.latitude, lng: fix.coordinate.longitude)
-            if let district = await districtLookup(center, language) {
-                searchArea = SearchArea(name: district.name, center: center, radius: PlaceDiscovery.districtRadius,
-                                        district: district.match)
-            } else {
-                searchArea = SearchArea(name: t("附近", "Nearby"), center: center)
-            }
+            searchArea = SearchArea(name: t("5 公里內", "Within 5 km"), radius: PlaceDiscovery.nearbyRadius,
+                                    center: StopLocation(lat: fix.coordinate.latitude, lng: fix.coordinate.longitude))
         } else {
             let network = await routingNetwork(for: db)
             guard let resolved = await PlaceResolver.resolve(place, db: db, network: network, language: language) else {
-                giveUp(t("找不到「\(place)」，請換一個範圍。", "Couldn't find \"\(place)\". Try another area."))
+                discovery = nil
+                phase = .failed(t("找不到「\(place)」，請換一個範圍。", "Couldn't find \"\(place)\". Try another area."))
                 return
             }
-            searchArea = SearchArea(name: resolved.name, center: resolved.location)
+            searchArea = SearchArea(name: resolved.name, radius: PlaceDiscovery.areaRadius, center: resolved.location)
         }
         guard !Task.isCancelled else { return }
 
-        // 2. The AI names shops, and Apple Maps confirms each one is really there.
-        var suggestions: [PlaceSuggestion] = []
+        // 2. Apple Maps finds the places, so everything shown is really there.
+        var results: [[PlaceCandidate]] = []
+        for term in request.allTerms {
+            results.append(await placeSearch(term, searchArea.center, searchArea.radius))
+        }
+        guard !Task.isCancelled else { return }
+        let places = PlaceDiscovery.merge(results, in: searchArea)
+        guard !places.isEmpty else {
+            discovery = nil
+            phase = .failed(t("\(searchArea.name)找不到\(request.want)，請換一個範圍。",
+                              "Couldn't find \(request.want) around \(searchArea.name). Try another area."))
+            return
+        }
+
+        // 3. The AI puts them in order and says why. Past its limit, nearest first.
+        var suggestions = PlaceDiscovery.nearest(places)
         if let ai {
             do {
-                let named = try await ai.suggestPlaces(want: request.want, area: searchArea.name, extra: extra, language: language)
-                guard !Task.isCancelled else { return }
-                suggestions = await PlaceDiscovery.verify(named, in: searchArea, search: placeSearch)
+                suggestions = try await ai.rank(places, for: request, language: language)
             } catch {
-                aiNotice = t("AI 暫時未能使用，已改用地圖搜尋：", "AI unavailable, searched the map instead: ") + error.localizedDescription
+                aiNotice = t("AI 暫時未能使用，已按距離排列：", "AI unavailable, sorted by distance: ") + error.localizedDescription
             }
         }
         guard !Task.isCancelled else { return }
-
-        // 3. Otherwise fall back to searching the map by shop type.
-        if suggestions.isEmpty {
-            var results: [[PlaceCandidate]] = []
-            for term in request.searchTerms {
-                results.append(await placeSearch(term, searchArea.center, searchArea.radius))
-            }
-            guard !Task.isCancelled else { return }
-            let places = PlaceDiscovery.merge(results, in: searchArea)
-            guard !places.isEmpty else {
-                giveUp(t("\(searchArea.name)找不到\(request.want)，請換一個範圍。",
-                         "Couldn't find \(request.want) around \(searchArea.name). Try another area."))
-                return
-            }
-            if let ai, aiNotice == nil {
-                suggestions = (try? await ai.recommend(places, want: request.want, extra: extra, language: language)) ?? []
-            }
-            guard !Task.isCancelled else { return }
-            if suggestions.isEmpty { suggestions = PlaceDiscovery.nearest(places) }
-        }
+        questionsAsked = 0
+        remember("You found: " + suggestions.prefix(5).map(\.place.name).joined(separator: ", "))
         discovery = .choosing(request, areaName: searchArea.name, suggestions: suggestions)
         phase = .idle
     }
 
-    /// Asks where to look, unless the rider already said.
+    /// Searches at once, unless the AI chose to ask something first.
     private func startDiscovery(_ request: DiscoveryRequest, db: TransportDB, language: Lang,
                                 currentLocation: @escaping LocationSource, ai: DeepSeekClient?) async {
-        if let area = request.area {
-            await discover(request, area: area, isTyped: false, db: db, language: language,
-                           currentLocation: currentLocation, ai: ai)
-        } else {
+        journeys = []
+        origin = nil
+        destination = nil
+        if let question = request.question, questionsAsked < Self.mostQuestions {
+            questionsAsked += 1
+            remember("You asked: \(question)")
             discovery = .asking(request)
             phase = .idle
+        } else {
+            await discover(request, db: db, language: language, currentLocation: currentLocation, ai: ai)
         }
     }
 
@@ -441,7 +415,7 @@ final class RoutePlannerModel: ObservableObject {
 
     private func run(_ request: TripRequest, db: TransportDB, language: Lang,
                      currentLocation: @escaping LocationSource, ai: DeepSeekClient?) async {
-        func t(_ zh: String, _ en: String) -> String { language == .zh ? zh : en }
+        func t(_ zh: String, _ en: String) -> String { language.pick(zh, en) }
 
         // 1. Understand the request.
         phase = .understanding
@@ -469,7 +443,8 @@ final class RoutePlannerModel: ObservableObject {
             }
         }
         guard !Task.isCancelled else { return }
-        if intent == nil, case .chat(let text, _) = request, let wish = TripIntentParser.discovery(text) {
+        if intent == nil, case .chat(let text, _, _) = request,
+           let wish = TripIntentParser.discovery(text) ?? TripIntentParser.search(text) {
             await startDiscovery(wish, db: db, language: language, currentLocation: currentLocation, ai: ai)
             return
         }
@@ -516,6 +491,8 @@ final class RoutePlannerModel: ObservableObject {
         let end: ResolvedPlace
         if case .place(let picked, _, _) = request {
             end = picked
+        } else if let shop = shownShop(named: intent.destination) {
+            end = shop
         } else if TripIntentParser.isCurrentLocation(intent.destination) {
             guard let place = await here() else {
                 phase = .failed(noLocation)
@@ -583,6 +560,13 @@ final class RoutePlannerModel: ObservableObject {
         explanation = reply
     }
 
+    /// "第一間點去": the AI names a shop on screen, which is already located.
+    private func shownShop(named name: String) -> ResolvedPlace? {
+        guard case .choosing(_, _, let suggestions) = discovery,
+              let shop = suggestions.first(where: { $0.place.name == name })?.place else { return nil }
+        return ResolvedPlace(name: shop.name, location: shop.location)
+    }
+
     private func routingNetwork(for db: TransportDB) async -> TransitNetwork {
         let id = db.busStopIndex.id
         if let network, network.sourceID == id { return network }
@@ -596,6 +580,10 @@ final class RoutePlannerModel: ObservableObject {
     }
 
     // MARK: - Text
+
+    static func stopName(_ id: String, db: TransportDB?, stopList: [String: Stop], language: Lang) -> String {
+        cleanStopName(stopList[id]?.name.text(language) ?? id)
+    }
 
     static func stopName(_ id: String, db: TransportDB?, language: Lang) -> String {
         guard let name = db?.stopList[id]?.name.text(language), !name.isEmpty else { return id }

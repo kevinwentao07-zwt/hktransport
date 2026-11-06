@@ -1,7 +1,7 @@
 import MapKit
 
-/// The shape of one journey on the map: every leg as a line through the stops
-/// it passes. The data has stops but no road geometry, so lines join stops.
+/// The shape of one journey on the map: every leg through the stops it passes.
+/// Real road lines are laid over these once they arrive; see `RouteShapes`.
 struct JourneyMapPath: Equatable, Sendable {
     enum Mode: Equatable, Sendable {
         case walk
@@ -14,6 +14,9 @@ struct JourneyMapPath: Equatable, Sendable {
         let points: [StopLocation]
         /// Matches `points` one to one on rides; empty on walks.
         var stopIDs: [String] = []
+        var routeKey: String?
+        /// Each stop's place in the whole route, matching `stopIDs`.
+        var positions: [Int] = []
     }
 
     let origin: StopLocation
@@ -27,6 +30,8 @@ struct JourneyMapPath: Equatable, Sendable {
             let mode: Mode
             let points: [StopLocation]
             var stopIDs: [String] = []
+            var routeKey: String?
+            var positions: [Int] = []
             switch leg {
             case .walk(_, _, let toStopID):
                 // Only the final walk has no stop; it ends at the destination.
@@ -36,15 +41,19 @@ struct JourneyMapPath: Equatable, Sendable {
                 points = [cursor, target]
             case .ride(let ride):
                 mode = .ride(route: ride.route, op: ride.op)
-                let stops = ride.stopIDs(in: db).compactMap { id -> (id: String, location: StopLocation)? in
+                let ids = ride.stopIDs(in: db), isWhole = ids.count == ride.alightPosition - ride.boardPosition + 1
+                let stops = ids.enumerated().compactMap { index, id -> (id: String, location: StopLocation, position: Int)? in
                     guard let location = db.stopList[id]?.location, location.isValid else { return nil }
-                    return (id, location)
+                    return (id, location, isWhole ? ride.boardPosition + index : index == 0 ? ride.boardPosition : ride.alightPosition)
                 }
                 points = stops.map(\.location)
                 stopIDs = stops.map(\.id)
+                positions = stops.map(\.position)
+                routeKey = ride.routeKey
             }
             guard let last = points.last else { continue }
-            segments.append(Segment(id: segments.count, mode: mode, points: points, stopIDs: stopIDs))
+            segments.append(Segment(id: segments.count, mode: mode, points: points, stopIDs: stopIDs,
+                                    routeKey: routeKey, positions: positions))
             cursor = last
         }
         self.origin = origin

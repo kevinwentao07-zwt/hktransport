@@ -120,7 +120,7 @@ final class StopSearchModel: ObservableObject {
                 ResolvedPlace(name: $0.name.text(language), location: $0.location)
             }
         } notFound: {
-            language == .zh ? "找不到「\(text)」，請換個說法。" : "Couldn't find \"\(text)\". Try another name."
+            language.pick("找不到「\(text)」，請換個說法。", "Couldn't find \"\(text)\". Try another name.")
         }
     }
 

@@ -4,6 +4,7 @@ import SwiftUI
 struct NearbyBusPanel: View {
     @ObservedObject var model: AppModel
     @ObservedObject var location: BusLocationModel
+    var openRoute: ((String, Int) -> Void)? = nil
     @State private var radius = 1_000
     @State private var nearby: [NearbyBusStop] = []
     @State private var selectedStopID: String?
@@ -138,7 +139,7 @@ struct NearbyBusPanel: View {
                         LazyVStack(spacing: 8) {
                             ForEach(Array(nearby.enumerated()), id: \.element.id) { index, stop in
                                 NearbyBusStopCard(model: model, stop: stop, isNearest: index == 0,
-                                                  isSelected: selectedStopID == stop.id) {
+                                                  isSelected: selectedStopID == stop.id, openRoute: openRoute) {
                                     selectedStopID = selectedStopID == stop.id ? nil : stop.id
                                 }
                                 .id(stop.id)
@@ -198,6 +199,8 @@ struct NearbyBusStopCard: View {
     let isSelected: Bool
     /// Offers a route to this stop when set.
     var planRoute: (() -> Void)?
+    /// Shows a whole route with this stop picked, when set.
+    var openRoute: ((String, Int) -> Void)? = nil
     let toggleSelected: () -> Void
 
     var body: some View {
@@ -241,7 +244,7 @@ struct NearbyBusStopCard: View {
                 }
                 Text(model.t("此站路線 · 點選查看最近兩班", "Routes at this stop · select for arrivals"))
                     .font(.system(size: 10)).foregroundStyle(.secondary)
-                NearbyBusRoutes(model: model, visits: stop.site.visits)
+                NearbyBusRoutes(model: model, visits: stop.site.visits, openRoute: openRoute)
                     .id(stop.id)
             }
         }
@@ -262,6 +265,7 @@ struct NearbyBusStopCard: View {
 private struct NearbyBusRoutes: View {
     @ObservedObject var model: AppModel
     let visits: [BusStopVisit]
+    var openRoute: ((String, Int) -> Void)?
     @State private var expandedVisit: String?
 
     var body: some View {
@@ -290,6 +294,15 @@ private struct NearbyBusRoutes: View {
                         StopArrivalPreview(model: model, route: route,
                                            stop: SavedStop(routeKey: visit.routeKey, seq: visit.seq))
                             .id(visit.id)
+                        if let openRoute {
+                            Button {
+                                openRoute(visit.routeKey, visit.seq)
+                            } label: {
+                                Label(model.t("在地圖看整條路線", "See the whole route on the map"), systemImage: "map")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .buttonStyle(.link)
+                        }
                     }
                 }
                 .padding(.vertical, 4)

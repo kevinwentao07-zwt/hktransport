@@ -7,7 +7,9 @@ struct StopSearchPanel: View {
     @ObservedObject var search: StopSearchModel
     @ObservedObject var location: BusLocationModel
     let planRoute: (BusStopSite) -> Void
+    var openRoute: ((String, Int) -> Void)?
     @FocusState private var focused: Bool
+    @StateObject private var suggester = PlaceSuggester()
     @State private var selectedStopID: String?
     @State private var position: MapCameraPosition = .region(MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 22.3400, longitude: 114.1500),
@@ -17,6 +19,19 @@ struct StopSearchPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             searchBar
+                .zIndex(2)
+                .overlay(alignment: .topLeading) {
+                    if focused {
+                        SuggestionList(items: suggester.items) { item in
+                            search.query = item.title
+                            suggester.clear()
+                            focused = false
+                            runSearch()
+                        }
+                        .frame(width: 520)
+                        .offset(y: 42)
+                    }
+                }
             if focused || search.place == nil {
                 SearchHistoryBar(model: model, box: SearchHistory.Box.stops) { text in
                     search.query = text
@@ -34,10 +49,17 @@ struct StopSearchPanel: View {
                 stopList.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .onChange(of: search.query) {
+            suggester.update(focused ? search.query : "", index: model.db?.allStopIndex, around: location.location, language: model.language)
+        }
         .onChange(of: search.place) { fit() }
         .onChange(of: search.radius) { fit() }
         .onChange(of: search.stops.map(\.id)) { selectedStopID = nil }
-        .onAppear { fit() }
+        .onAppear {
+            fit()
+            location.requestOnce()
+        }
+        .onChange(of: location.location) { fit() }
         .task {
             try? await Task.sleep(for: .milliseconds(60))
             focused = true
@@ -147,7 +169,7 @@ struct StopSearchPanel: View {
                             ForEach(Array(stops.enumerated()), id: \.element.id) { index, stop in
                                 NearbyBusStopCard(model: model, stop: stop, isNearest: index == 0,
                                                   isSelected: selectedStopID == stop.id,
-                                                  planRoute: { planRoute(stop.site) }) {
+                                                  planRoute: { planRoute(stop.site) }, openRoute: openRoute) {
                                     selectedStopID = selectedStopID == stop.id ? nil : stop.id
                                 }
                                 .id(stop.id)
@@ -198,7 +220,17 @@ struct StopSearchPanel: View {
     }
 
     private func fit() {
-        guard let place = search.place else { return }
+        guard let place = search.place else {
+            // Nothing searched yet: the stops around the rider are the likely ones.
+            guard let fix = location.location else { return }
+            let here = StopLocation(lat: fix.coordinate.latitude, lng: fix.coordinate.longitude)
+            if PlaceResolver.isInHongKong(here) {
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    position = .region(MKCoordinateRegion(center: here.coordinate2D, latitudinalMeters: 2_000, longitudinalMeters: 2_000))
+                }
+            }
+            return
+        }
         let meters = Double(search.radius) * 2.6
         withAnimation(.easeInOut(duration: 0.35)) {
             position = .region(MKCoordinateRegion(center: place.location.coordinate2D,

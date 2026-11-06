@@ -4,6 +4,27 @@ import SwiftUI
 enum Lang: String, Sendable {
     case zh
     case en
+
+    static let scriptKey = "hktransport.script"
+    /// Traditional or Simplified, within `.zh`.
+    static var isSimplified: Bool { UserDefaults.standard.string(forKey: scriptKey) == "hans" }
+
+    func pick(_ zh: String, _ en: String) -> String {
+        self == .zh ? zh.forScript : en
+    }
+}
+
+private let simplifiedText = NSCache<NSString, NSString>()
+
+extension String {
+    /// The app is written in Traditional Chinese; this is what the rider chose to read.
+    var forScript: String {
+        guard Lang.isSimplified else { return self }
+        if let known = simplifiedText.object(forKey: self as NSString) { return known as String }
+        let text = applyingTransform(StringTransform("Hant-Hans"), reverse: false) ?? self
+        simplifiedText.setObject(text as NSString, forKey: self as NSString)
+        return text
+    }
 }
 
 enum Operator: String, CaseIterable, Sendable {
@@ -40,7 +61,7 @@ struct Name: Codable, Hashable, Sendable {
     static let empty = Name(en: "", zh: "")
 
     func text(_ lang: Lang) -> String {
-        lang == .zh ? zh : en
+        lang.pick(zh, en)
     }
 }
 

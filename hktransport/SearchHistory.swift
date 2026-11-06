@@ -109,9 +109,10 @@ struct SearchHistoryBar: View {
             Text(SearchHistory.label(text))
                 .lineLimit(1)
                 .fixedSize()
-                .padding(.horizontal, 8)
-                .frame(height: 22)
-                .background(.white.opacity(0.08), in: Capsule())
+                .padding(.horizontal, 10)
+                .frame(height: 24)
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().stroke(.white.opacity(0.14), lineWidth: 0.5))
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)

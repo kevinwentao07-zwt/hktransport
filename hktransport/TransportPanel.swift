@@ -7,7 +7,7 @@ struct TransportPanel: View {
     @State private var query = ""
     @State private var pickedRouteKey: String?
     @State private var expandedStop: SavedStop?
-    @State private var category: TransportCategory = .saved
+    @State private var category: TransportCategory = .plan
     @State private var selectedStation: String?
     @State private var selectedLightRailStation: String?
     @ObservedObject private var busLocation = BusLocationModel.shared
@@ -37,7 +37,7 @@ struct TransportPanel: View {
                     if category == .plan {
                         RoutePlanPanel(model: model, planner: planner, location: busLocation)
                     } else if category == .stops {
-                        StopSearchPanel(model: model, search: stopSearch, location: busLocation, planRoute: planRoute)
+                        StopSearchPanel(model: model, search: stopSearch, location: busLocation, planRoute: planRoute, openRoute: openRoute)
                     } else {
                         searchField
                         if query.isEmpty {
@@ -56,7 +56,23 @@ struct TransportPanel: View {
                         } else if category == .notice {
                             NoticePanel(model: model, query: query)
                         } else if category == .bus && query.trimmingCharacters(in: .whitespaces).isEmpty && pickedRouteKey == nil {
-                            NearbyBusPanel(model: model, location: busLocation)
+                            NearbyBusPanel(model: model, location: busLocation, openRoute: openRoute)
+                        } else if let key = pickedRouteKey, let route = model.db?.routeList[key], let op = route.operators.first {
+                            HStack(alignment: .top, spacing: 12) {
+                                ScrollViewReader { proxy in
+                                    ScrollView {
+                                        LazyVStack(spacing: 6) { content }
+                                    }
+                                    .scrollIndicators(.never)
+                                    .onChange(of: expandedStop) { _, stop in
+                                        guard let stop else { return }
+                                        withAnimation(model.motion(.easeInOut(duration: 0.2))) { proxy.scrollTo(stop, anchor: .top) }
+                                    }
+                                }
+                                .frame(width: 360)
+                                LiveRouteMap(model: model, routeKey: key, route: route, op: op, chosen: chosenStop(routeKey: key))
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            }
                         } else {
                             ScrollView {
                                 LazyVStack(spacing: 6) { content }
@@ -159,6 +175,23 @@ struct TransportPanel: View {
             query = ""
         } else if let first = model.searchRoutes(query, category: category).first {
             pickedRouteKey = first
+        }
+    }
+
+    /// The stop open in the list and the stop picked on the map are the same stop.
+    private func chosenStop(routeKey: String) -> Binding<Int?> {
+        Binding(get: { expandedStop?.routeKey == routeKey ? expandedStop?.seq : nil },
+                set: { expandedStop = $0.map { SavedStop(routeKey: routeKey, seq: $0) } })
+    }
+
+    /// Shows a whole route, from a stop's list of routes, with that stop picked.
+    private func openRoute(_ routeKey: String, seq: Int) {
+        query = ""
+        category = .bus
+        // Changing the page clears the route, so this runs after that has.
+        DispatchQueue.main.async {
+            pickedRouteKey = routeKey
+            DispatchQueue.main.async { expandedStop = SavedStop(routeKey: routeKey, seq: seq) }
         }
     }
 

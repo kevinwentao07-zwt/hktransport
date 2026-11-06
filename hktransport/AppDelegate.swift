@@ -51,6 +51,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.setNotch(isOn)
         }
         model.start()
+        // The map opens on the rider, so ask as soon as the app does.
+        BusLocationModel.shared.requestOnce()
     }
 
     func showMainWindow() {

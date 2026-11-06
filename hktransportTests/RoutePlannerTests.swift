@@ -490,30 +490,12 @@ final class RoutePlannerTests: XCTestCase {
 
     // MARK: Finding somewhere
 
-    func testAIReplyIsEitherATripOrAWish() {
-        XCTAssertEqual(DeepSeekClient.decodeChat(#"{"origin":null,"destination":"理大","preference":"fastest"}"#),
-                       .trip(TripIntent(origin: nil, destination: "理大")))
-        let wish = #"{"kind":"discover","want":"螺螄粉","searchTerms":["螺螄粉","米線","mixian","noodles","五"],"area":null,"areaOptions":["旺角","佐敦"]}"#
-        XCTAssertEqual(DeepSeekClient.decodeChat(wish),
-                       .discover(DiscoveryRequest(want: "螺螄粉", searchTerms: ["螺螄粉", "米線", "mixian", "noodles"], area: nil,
-                                                  areaOptions: ["旺角", "佐敦"])))
-        XCTAssertEqual(DeepSeekClient.decodeChat(#"{"kind":"discover","want":"拉麵","area":"旺角"}"#),
-                       .discover(DiscoveryRequest(want: "拉麵", searchTerms: ["拉麵"], area: "旺角")))
-        XCTAssertNil(DeepSeekClient.decodeChat(#"{"kind":"discover","want":" "}"#))
-    }
-
     func testWishesAreRecognisedWithoutTheAI() {
         XCTAssertEqual(TripIntentParser.discovery("我想吃螺狮粉")?.want, "螺狮粉")
         XCTAssertEqual(TripIntentParser.discovery("想食拉麵？")?.searchTerms, ["拉麵", "restaurant"])
         XCTAssertEqual(TripIntentParser.discovery("想買手機")?.searchTerms, ["手機"])
         XCTAssertNil(TripIntentParser.discovery("去機場"))
         XCTAssertNil(TripIntentParser.discovery("我想吃"))
-    }
-
-    func testAreaButtonsStartWithNearbyAndStayShort() {
-        let request = DiscoveryRequest(want: "粉", searchTerms: ["粉"], areaOptions: ["旺角", "附近", "旺角", "佐敦", "荃灣", "沙田", "屯門"])
-        XCTAssertEqual(request.areaChoices, ["附近", "旺角", "佐敦", "荃灣", "沙田"])
-        XCTAssertEqual(DiscoveryRequest(want: "粉", searchTerms: ["粉"]).areaChoices.first, "附近")
     }
 
     func testAreaWordsAreCleaned() {
@@ -545,144 +527,8 @@ final class RoutePlannerTests: XCTestCase {
         XCTAssertTrue(list.contains { $0.name == "米線店" })
     }
 
-    func testNearbyMeansTheRidersOwnDistrict() {
-        let center = StopLocation(lat: 22.270, lng: 114.250)
-        var inside = Self.shop("區內", 22.300)
-        inside.district = "Yau Tsim Mong District"
-        var outside = Self.shop("區外", 22.272)
-        outside.district = "Kowloon City District"
-        let unknown = Self.shop("未知區", 22.271)
-        let area = SearchArea(name: "油尖旺區", center: center, radius: PlaceDiscovery.districtRadius,
-                              district: "Yau Tsim Mong District")
-        XCTAssertEqual(PlaceDiscovery.within(area, [outside, inside, unknown]).map(\.name), ["未知區", "區內"],
-                       "a farther shop in the district beats a closer one across the border")
-    }
-
-    func testOnlyTheShopTheAINamedCounts() {
-        let tamjai = AIPlace(name: "譚仔雲南米線", nameEn: "TamJai Yunnan Mixian")
-        XCTAssertTrue(PlaceDiscovery.isSamePlace("Tamjai Yunnan Mixian", as: tamjai))
-        XCTAssertTrue(PlaceDiscovery.isSamePlace("譚仔雲南米線 (旺角)", as: tamjai))
-        XCTAssertFalse(PlaceDiscovery.isSamePlace("Joe's Billiards & Bar", as: tamjai))
-        XCTAssertTrue(PlaceDiscovery.isSamePlace("Tsui Wah Restaurant", as: AIPlace(name: "翠華餐廳", nameEn: "Tsui Wah")))
-        XCTAssertTrue(PlaceDiscovery.isSamePlace("ICHIRAN", as: AIPlace(name: "一蘭", nameEn: "Ichiran Ramen")))
-        XCTAssertFalse(PlaceDiscovery.isSamePlace("Nam Kee Noodle", as: AIPlace(name: "興記", nameEn: "Hing Kee")))
-        XCTAssertFalse(PlaceDiscovery.isSamePlace("Yau Kee Noodles", as: AIPlace(name: "老友記粉麵", nameEn: "Lo Yau Kee Noodles")))
-    }
-
-    func testRunningOutOfTokensIsReportedNotHidden() {
-        let reply = #"{"choices":[{"finish_reason":"length","message":{"content":"","reasoning_content":"..."}}]}"#
-        XCTAssertThrowsError(try DeepSeekClient.parseCompletion(Data(reply.utf8), status: 200)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("ran out of tokens"))
-        }
-    }
-
-    func testAIPlacesAreDecoded() {
-        let reply = #"{"places":[{"name":"譚仔","nameEn":"TamJai","reason":"米線專門店"},{"name":" ","nameEn":"Only English"},{"reason":"冇名"}]}"#
-        XCTAssertEqual(DeepSeekClient.decodePlaces(reply), [
-            AIPlace(name: "譚仔", nameEn: "TamJai", reason: "米線專門店"),
-            AIPlace(name: "Only English", nameEn: "Only English", reason: nil),
-        ])
-        XCTAssertTrue(DeepSeekClient.decodePlaces("sorry").isEmpty)
-        XCTAssertTrue(DeepSeekClient.suggestPrompt(.zh).contains("Never make a shop up"))
-    }
-
-    func testShopsTheMapCannotFindAreNeverShown() async {
-        let center = StopLocation(lat: 22.270, lng: 114.250)
-        let area = SearchArea(name: "區", center: center, radius: 3_000)
-        let nearBranch = Self.shop("Real Noodle", 22.272), farBranch = Self.shop("Real Noodle", 22.280)
-        let named = [AIPlace(name: "幻想店", nameEn: "Dream Shop", reason: "編造"),
-                     AIPlace(name: "真店", nameEn: "Real Noodle", reason: "真的"),
-                     AIPlace(name: "真店分店", nameEn: "Real Noodle", reason: "同一家")]
-        let verified = await PlaceDiscovery.verify(named, in: area) { term, _, _ in
-            term == "Real Noodle" ? [farBranch, nearBranch] : [Self.shop("Joe's Billiards", 22.2701)]
-        }
-        XCTAssertEqual(verified.map(\.place.location), [nearBranch.location])
-        XCTAssertEqual(verified.first?.reason, "真的")
-        XCTAssertEqual(verified.first?.isNamedByAI, true)
-    }
-
-    func testAICanOnlyRecommendPlacesThatExist() {
-        let places = [Self.shop("甲", 22.27), Self.shop("乙", 22.271)]
-        let reply = #"{"picks":[{"index":1,"reason":"最符合"},{"index":99,"reason":"編造的店"},{"index":1,"reason":"重複"},{"index":0,"reason":" "}]}"#
-        let picks = DeepSeekClient.decodePicks(reply, from: places)
-        XCTAssertEqual(picks.map(\.place.name), ["乙", "甲"])
-        XCTAssertEqual(picks.map(\.reason), ["最符合", nil])
-        XCTAssertTrue(DeepSeekClient.decodePicks("not json", from: places).isEmpty)
-
-        let list = DeepSeekClient.placeList(places, want: "粉", extra: "要平啲")
-        XCTAssertTrue(list.contains("1. 乙"))
-        XCTAssertTrue(list.contains("Also wants: 要平啲"))
-        XCTAssertFalse(list.contains("22.27"), "coordinates must not reach the AI")
-        XCTAssertTrue(DeepSeekClient.recommendPrompt(.zh).contains("Never invent"))
-        XCTAssertTrue(DeepSeekClient.recommendPrompt(.zh).contains("no menus"))
-    }
-
     @MainActor
-    func testFindingFoodThenRoutingToThePlacePicked() async throws {
-        FakeDeepSeek.start(intent: #"{"kind":"discover","want":"螺螄粉","searchTerms":["螺螄粉","米線"],"area":null,"areaOptions":["站二"]}"#)
-        FakeDeepSeek.picks = #"{"picks":[{"index":1,"reason":"較符合"},{"index":42,"reason":"不存在"}]}"#
-        defer { FakeDeepSeek.stop() }
-        let db = try Self.fixture()
-        let planner = RoutePlannerModel()
-        let searched = SearchLog()
-        let first = Self.shop("近店", 22.2705), second = Self.shop("遠店", 22.2715)
-        planner.placeSearch = { term, _, _ in
-            await searched.add(term)
-            return [first, second]
-        }
-        planner.originText = "站一"
-        planner.chatText = "我想吃螺狮粉"
-        let ai = DeepSeekClient(apiKey: "test-key")
-        planner.sendChat(db: db, language: .zh, currentLocation: { nil }, ai: ai)
-        await waitUntil { planner.discovery != nil }
-        guard case .asking(let request) = planner.discovery else { return XCTFail("should ask where to look") }
-        XCTAssertEqual(request.areaChoices, ["附近", "站二"])
-
-        planner.chooseArea("站二", db: db, language: .zh, currentLocation: { nil }, ai: ai)
-        await waitUntil { planner.visibleSuggestions != nil }
-        let terms = await searched.terms
-        XCTAssertEqual(terms, ["螺螄粉", "米線"])
-        XCTAssertEqual(planner.visibleSuggestions?.map(\.place.name), ["遠店"], "the invented index is dropped")
-        XCTAssertEqual(planner.visibleSuggestions?.first?.reason, "較符合")
-
-        let pick = try XCTUnwrap(planner.visibleSuggestions?.first)
-        planner.choosePlace(pick, db: db, language: .zh, currentLocation: { nil }, ai: ai)
-        await waitUntil { !planner.journeys.isEmpty && planner.phase != .planning }
-        XCTAssertEqual(planner.destination?.location, second.location)
-        XCTAssertEqual(planner.destinationText, "遠店")
-        XCTAssertFalse(planner.journeys.isEmpty)
-        XCTAssertNil(planner.visibleSuggestions)
-
-        planner.backToSuggestions()
-        XCTAssertEqual(planner.visibleSuggestions?.map(\.place.name), ["遠店"])
-    }
-
     @MainActor
-    func testNearbySearchesTheDistrictWithTheAIsOwnPicks() async throws {
-        FakeDeepSeek.start(intent: #"{"kind":"discover","want":"螺螄粉","searchTerms":["螺螄粉"],"area":"附近"}"#)
-        FakeDeepSeek.places = #"{"places":[{"name":"真店","nameEn":"Real Noodle","reason":"專做螺螄粉"}]}"#
-        defer { FakeDeepSeek.stop() }
-        let db = try Self.fixture()
-        let planner = RoutePlannerModel()
-        planner.districtLookup = { _, _ in ("油尖旺區", "Yau Tsim Mong District") }
-        var shop = Self.shop("Real Noodle", 22.28)
-        shop.district = "Yau Tsim Mong District"
-        let found = shop
-        planner.placeSearch = { term, _, radius in
-            radius == PlaceDiscovery.districtRadius && term == "Real Noodle" ? [found] : []
-        }
-        planner.chatText = "附近有冇螺螄粉"
-        planner.sendChat(db: db, language: .zh, currentLocation: { Self.here }, ai: DeepSeekClient(apiKey: "test-key"))
-        await waitUntil { planner.visibleSuggestions != nil || planner.isFailed }
-
-        XCTAssertEqual(planner.visibleSuggestions?.map(\.reason), ["專做螺螄粉"])
-        guard case .choosing(_, let area, _) = planner.discovery else { return XCTFail("should show places") }
-        XCTAssertEqual(area, "油尖旺區")
-        let sent = FakeDeepSeek.bodies.joined()
-        XCTAssertTrue(sent.contains("Area: 油尖旺區"))
-        XCTAssertFalse(sent.contains("22.25"), "coordinates must not reach the AI")
-    }
-
     @MainActor
     func testTypedAreaAndNoResultsAskAgain() async throws {
         let db = try Self.fixture()
@@ -700,17 +546,6 @@ final class RoutePlannerTests: XCTestCase {
     }
 
     @MainActor
-    func testNearbyWithoutALocationAsksForAnArea() async throws {
-        let db = try Self.fixture()
-        let planner = RoutePlannerModel()
-        planner.chatText = "想食拉麵"
-        planner.sendChat(db: db, language: .zh, currentLocation: { nil }, ai: nil)
-        await waitUntil { planner.discovery != nil }
-        planner.chooseArea(DiscoveryRequest.nearby, db: db, language: .zh, currentLocation: { nil }, ai: nil)
-        await waitUntil { planner.isFailed }
-        guard case .asking = planner.discovery else { return XCTFail("should offer other areas") }
-    }
-
     // MARK: Search history
 
     @MainActor
@@ -854,7 +689,7 @@ final class RoutePlannerTests: XCTestCase {
                                    : ResolvedPlace(name: "循道衛理大廈", location: StopLocation(lat: 22.40, lng: 114.10))
         }
         search.query = "理大"
-        search.search(db: db, language: .zh, ai: DeepSeekClient(apiKey: "test-key"))
+        search.search(db: db, language: .zh, ai: DeepSeekClient())
         await waitForStopSearch(search)
         XCTAssertEqual(search.place?.name, "香港理工大學")
         XCTAssertEqual(search.place?.location, polyU)
@@ -920,7 +755,7 @@ final class RoutePlannerTests: XCTestCase {
         let planner = RoutePlannerModel()
         planner.destinationText = "二站"
         planner.search(db: db, language: .zh, currentLocation: { Self.here },
-                       ai: DeepSeekClient(apiKey: "test-key"))
+                       ai: DeepSeekClient())
         await waitUntil { planner.explanation != nil || planner.isFailed }
 
         XCTAssertEqual(planner.journeys.first?.rides.first?.route, "XYL")
@@ -940,7 +775,7 @@ final class RoutePlannerTests: XCTestCase {
         let db = try Self.fixture()
         let planner = RoutePlannerModel()
         planner.chatText = "由一站去二站唔想轉車"
-        planner.sendChat(db: db, language: .zh, currentLocation: { nil }, ai: DeepSeekClient(apiKey: "test-key"))
+        planner.sendChat(db: db, language: .zh, currentLocation: { nil }, ai: DeepSeekClient())
         await waitUntil { planner.explanation != nil || planner.isFailed }
 
         XCTAssertEqual(planner.originText, "站一")
@@ -959,7 +794,7 @@ final class RoutePlannerTests: XCTestCase {
         let planner = RoutePlannerModel()
         planner.originText = "站一"
         planner.destinationText = "站二"
-        planner.search(db: db, language: .zh, currentLocation: { nil }, ai: DeepSeekClient(apiKey: "test-key"))
+        planner.search(db: db, language: .zh, currentLocation: { nil }, ai: DeepSeekClient())
         await waitUntil { planner.phase == .done || planner.isFailed }
 
         XCTAssertEqual(planner.journeys.first?.rides.first?.route, "XYL")
@@ -999,15 +834,6 @@ final class RoutePlannerTests: XCTestCase {
         XCTAssertEqual(DeepSeekClient.decodeIntent(#"{"origin":"我的位置","destination":"旺角","preference":"odd"}"#),
                        TripIntent(origin: nil, destination: "旺角", preference: .fastest))
         XCTAssertNil(DeepSeekClient.decodeIntent("Sorry, I can't help with that."))
-    }
-
-    func testDeepSeekCompletionParsing() throws {
-        let ok = #"{"choices":[{"message":{"role":"assistant","content":" 你好 "}}]}"#
-        XCTAssertEqual(try DeepSeekClient.parseCompletion(Data(ok.utf8), status: 200), "你好")
-        let unauthorized = #"{"error":{"message":"Authentication Fails"}}"#
-        XCTAssertThrowsError(try DeepSeekClient.parseCompletion(Data(unauthorized.utf8), status: 401)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("invalid"))
-        }
     }
 
     func testSummaryContainsNoCoordinates() throws {

@@ -11,12 +11,50 @@ struct TripIntent: Equatable, Sendable {
     var preference: TripPreference = .fastest
 }
 
+/// What the AI needs to tell a follow-up from a new subject.
+struct ChatContext: Equatable, Sendable {
+    struct Search: Equatable, Sendable {
+        var want: String
+        var query: String
+        var area: String?
+        var extra: String?
+        var shops: [String] = []
+    }
+
+    var talk: [String] = []
+    var search: Search?
+    /// What the AI just asked the rider.
+    var question: String?
+    var mayAsk = true
+
+    func message(_ text: String, current: TripIntent?) -> String {
+        var lines: [String] = []
+        if !talk.isEmpty { lines += ["Conversation so far"] + talk + [""] }
+        if let current {
+            lines += ["Current trip", "Start: \(current.origin ?? "current location")", "Destination: \(current.destination)",
+                      "Preference: \(current.preference.rawValue)", ""]
+        }
+        if let search {
+            lines += ["Current search", "Looking for: \(search.want)", "Query: \(search.query)"]
+            if let area = search.area { lines.append("Area: \(area)") }
+            if let extra = search.extra { lines.append("Also wants: \(extra)") }
+            if !search.shops.isEmpty {
+                lines += ["Shops on screen:"] + search.shops.enumerated().map { "\($0.offset + 1). \($0.element)" }
+            }
+            lines.append("")
+        }
+        if let question { lines.append("You just asked: \(question)") }
+        if !mayAsk { lines.append("You may not ask anything more, so question must be null.") }
+        return lines.isEmpty ? text : (lines + ["Rider says: \(text)"]).joined(separator: "\n")
+    }
+}
+
 /// One thing the rider asked for, from either the search bar or the AI box.
 enum TripRequest: Equatable, Sendable {
     /// Top search bar. A nil origin means the current location.
     case search(origin: String?, destination: String, preference: TripPreference)
     /// AI box. `current` is the trip on screen, so "less walking" can refine it.
-    case chat(String, current: TripIntent?)
+    case chat(String, current: TripIntent?, context: ChatContext = ChatContext())
     /// A place picked from the recommendations; its position is already known.
     case place(ResolvedPlace, origin: String?, preference: TripPreference)
 
@@ -30,15 +68,8 @@ enum TripRequest: Equatable, Sendable {
             Destination: \(destination)
             Preference: \(preference.rawValue)
             """
-        case .chat(let text, let current):
-            guard let current else { return text }
-            return """
-            Current trip
-            Start: \(current.origin ?? "current location")
-            Destination: \(current.destination)
-            Preference: \(current.preference.rawValue)
-            Rider says: \(text)
-            """
+        case .chat(let text, let current, let context):
+            return context.message(text, current: current)
         case .place(let place, _, _):
             return place.name
         }
@@ -52,7 +83,7 @@ enum TripRequest: Equatable, Sendable {
             guard !destination.isEmpty else { return nil }
             return TripIntent(origin: TripIntentParser.normalizedOrigin(origin), destination: destination,
                               preference: preference)
-        case .chat(let text, let current):
+        case .chat(let text, let current, _):
             return TripIntentParser.parse(text, current: current)
         case .place(let place, let origin, let preference):
             return TripIntent(origin: TripIntentParser.normalizedOrigin(origin), destination: place.name,
@@ -117,7 +148,16 @@ enum TripIntentParser {
         guard !want.isEmpty else { return nil }
         // Apple Maps knows shops, not dishes, so food also falls back to restaurants.
         let isFood = ["吃", "食", "eat"].contains { prefix.contains($0) }
-        return DiscoveryRequest(want: want, searchTerms: isFood ? [want, "restaurant"] : [want])
+        return DiscoveryRequest(want: want, query: want, searchTerms: isFood ? [want, "restaurant"] : [want])
+    }
+
+    /// Without the AI, whatever isn't plainly a trip is searched for as typed.
+    static func search(_ text: String) -> DiscoveryRequest? {
+        let want = text.trimmingCharacters(in: CharacterSet(charactersIn: " ，,。.？?！!～~、"))
+        guard !want.isEmpty, !contains(want, any: fewerTransfersWords + lessWalkingWords),
+              want.range(of: #"[去到往至由從从→]|->|\b(to|from)\b"#, options: [.regularExpression, .caseInsensitive]) == nil
+        else { return nil }
+        return DiscoveryRequest(want: want, query: want, searchTerms: [want])
     }
 
     /// Applies a follow-up to the trip on screen: anything not mentioned stays.
@@ -177,112 +217,68 @@ enum ChatReply: Equatable, Sendable {
     case discover(DiscoveryRequest)
 }
 
-/// Minimal client for DeepSeek's OpenAI-compatible chat completions API.
-/// The AI only interprets the request and explains results; routes and
-/// times always come from `RoutePlanner` and live ETAs.
+/// The AI, reached through the hktransport server. The prompts and the key stay there, and
+/// the server holds every rider to the daily spending limits.
 struct DeepSeekClient: Sendable {
-    static let defaultModel = "deepseek-flash"
-    static let endpoint = URL(string: "https://api.deepseek.com/chat/completions")!
-
-    let apiKey: String
-    var model: String = DeepSeekClient.defaultModel
+    static let site = "https://hk.52-220-124-215.sslip.io"
+    private static let longestMessage = 3_900
 
     struct APIError: LocalizedError, Equatable {
         let message: String
         var errorDescription: String? { message }
     }
 
-    /// Reasoning counts towards `max_tokens`: with too small a limit the model
-    /// spends it all thinking and the answer comes back empty.
-    func complete(system: String, user: String, maxTokens: Int = 4_000, thinking: Bool = true) async throws -> String {
-        var request = URLRequest(url: Self.endpoint, timeoutInterval: 60)
+    /// `task` names one of the server's prompts; a prompt is never sent from here.
+    func complete(task: String, message: String) async throws -> String {
+        var request = URLRequest(url: URL(string: "\(Self.site)/api/ai")!, timeoutInterval: 60)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(Self.site, forHTTPHeaderField: "Origin")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: Any] = [
-            "model": model,
-            "messages": [
-                ["role": "system", "content": system],
-                ["role": "user", "content": user],
-            ],
-            "temperature": 0.2,
-            "max_tokens": maxTokens,
-            "stream": false,
-            "thinking": ["type": thinking ? "enabled" : "disabled"],
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["task": task, "message": String(message.prefix(Self.longestMessage))])
         let (data, response) = try await URLSession.shared.data(for: request)
-        return try Self.parseCompletion(data, status: (response as? HTTPURLResponse)?.statusCode ?? 0)
+        return try Self.parseReply(data, status: (response as? HTTPURLResponse)?.statusCode ?? 0)
     }
 
-    static func parseCompletion(_ data: Data, status: Int) throws -> String {
+    static func parseReply(_ data: Data, status: Int) throws -> String {
         let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        guard status == 200 else {
-            let detail = ((object?["error"] as? [String: Any])?["message"] as? String) ?? "HTTP \(status)"
-            switch status {
-            case 401: throw APIError(message: "DeepSeek API key is invalid (\(detail))")
-            case 402: throw APIError(message: "DeepSeek account has insufficient balance (\(detail))")
-            case 429: throw APIError(message: "DeepSeek rate limit reached (\(detail))")
-            default: throw APIError(message: "DeepSeek error: \(detail)")
-            }
+        guard status == 200 else { throw APIError(message: (object?["error"] as? String)?.forScript ?? "HTTP \(status)") }
+        guard let reply = (object?["reply"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !reply.isEmpty else {
+            throw APIError(message: "AI returned an empty answer")
         }
-        let choices = object?["choices"] as? [[String: Any]]
-        let message = choices?.first?["message"] as? [String: Any]
-        if choices?.first?["finish_reason"] as? String == "length", (message?["content"] as? String)?.isEmpty != false {
-            throw APIError(message: "DeepSeek ran out of tokens before answering")
-        }
-        guard let content = (message?["content"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !content.isEmpty else {
-            throw APIError(message: "DeepSeek returned an empty answer")
-        }
-        return content
+        return reply
     }
 
     // MARK: Request interpretation
 
     func parseIntent(_ request: TripRequest) async throws -> TripIntent {
-        let reply = try await complete(system: Self.intentPrompt, user: request.aiMessage, thinking: false)
-        guard let intent = Self.decodeIntent(reply) else {
-            throw APIError(message: "DeepSeek reply was not valid trip JSON")
+        guard let intent = Self.decodeIntent(try await complete(task: "intent", message: request.aiMessage)) else {
+            throw APIError(message: "AI reply was not valid trip JSON")
         }
         return intent
     }
 
     func parseChat(_ request: TripRequest) async throws -> ChatReply {
-        let reply = try await complete(system: Self.chatPrompt, user: request.aiMessage, thinking: false)
-        guard let decoded = Self.decodeChat(reply) else {
-            throw APIError(message: "DeepSeek reply was not valid trip JSON")
+        guard let decoded = Self.decodeChat(try await complete(task: "chat", message: request.aiMessage)) else {
+            throw APIError(message: "AI reply was not valid trip JSON")
         }
         return decoded
     }
-
-    static let chatPrompt = intentPrompt + """
-
-    The rider may instead want to find a kind of place, such as food, a shop or something to do, without
-    naming one place to go to. Then reply with this JSON object instead:
-    {"kind": "discover", "want": string, "searchTerms": [string], "area": string or null, "areaOptions": [string]}
-    - want is a short phrase in Traditional Chinese with typos fixed, e.g. 我想吃螺狮粉 -> 螺螄粉.
-    - searchTerms are up to four Apple Maps search terms, most specific first. Apple Maps matches shop names
-      and types, not menus, and many Hong Kong shops are listed in English. So start with the item itself,
-      then short shop types in Chinese and English that would sell it, e.g. ["螺螄粉", "米線", "mixian", "noodles"]
-      or ["拉麵", "ramen"].
-    - area is the district or landmark the rider named, "附近" if they said nearby, otherwise null.
-    - areaOptions are three or four Hong Kong districts where this kind of place is easy to find.
-    - Going to a named place is still a trip, e.g. 去時代廣場 or 去理大.
-    """
 
     /// A trip request, or a request to find somewhere.
     static func decodeChat(_ reply: String) -> ChatReply? {
         guard let object = jsonObject(in: reply), object["kind"] as? String == "discover" else {
             return decodeIntent(reply).map(ChatReply.trip)
         }
-        guard let want = (object["want"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !want.isEmpty else { return nil }
-        let terms = strings(object["searchTerms"])
-        let area = (object["area"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return .discover(DiscoveryRequest(want: want, searchTerms: terms.isEmpty ? [want] : Array(terms.prefix(4)),
-                                          area: area?.isEmpty == false ? area : nil,
-                                          areaOptions: strings(object["areaOptions"])))
+        func text(_ key: String) -> String? {
+            let value = (object[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value?.isEmpty == false ? value : nil
+        }
+        guard let want = text("want") else { return nil }
+        let terms = strings(object["searchTerms"]), question = text("question")
+        return .discover(DiscoveryRequest(want: want, query: text("query") ?? want, queryEn: text("queryEn"),
+                                          searchTerms: terms.isEmpty ? [want] : Array(terms.prefix(4)),
+                                          area: text("area"), extra: text("extra"), question: question,
+                                          options: question == nil ? [] : Array(strings(object["options"]).prefix(4))))
     }
 
     private static func strings(_ value: Any?) -> [String] {
@@ -297,128 +293,34 @@ struct DeepSeekClient: Sendable {
 
     // MARK: Finding places
 
-    /// Reads what the rider typed as the search area.
-    func parseArea(_ text: String, want: String) async throws -> (area: String, extra: String?) {
-        let reply = try await complete(system: Self.areaPrompt, user: "Looking for: \(want)\nRider says: \(text)", thinking: false)
-        guard let object = Self.jsonObject(in: reply), let area = object["area"] as? String else {
-            throw APIError(message: "DeepSeek reply was not valid area JSON")
-        }
-        let extra = (object["extra"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (area.trimmingCharacters(in: .whitespacesAndNewlines), extra?.isEmpty == false ? extra : nil)
+    /// Puts every place found in order, best first, with reasons for the top few.
+    func rank(_ places: [PlaceCandidate], for request: DiscoveryRequest, language: Lang) async throws -> [PlaceSuggestion] {
+        let reply = try await complete(task: language == .zh ? "rank_zh" : "rank_en", message: Self.rankMessage(places, for: request))
+        return Self.applyRanking(reply, to: places)
     }
 
-    static let areaPrompt = """
-    A rider in Hong Kong is narrowing down where to look for a place. Reply with one JSON object and nothing else:
-    {"area": string, "extra": string or null}
-    - area is one district or landmark Apple Maps can find, in Traditional Chinese, without words such as 附近,
-      e.g. 朗豪坊附近 -> 朗豪坊. Use "附近" when the rider means near them.
-    - extra is any other wish in the message, e.g. 要平啲, otherwise null.
-    """
-
-    /// The AI's own recommendations. It can't browse, so these come from what it
-    /// knows; `PlaceDiscovery.verify` checks each one on Apple Maps before it is shown.
-    func suggestPlaces(want: String, area: String, extra: String?, language: Lang) async throws -> [AIPlace] {
-        var lines = ["Looking for: \(want)", "Area: \(area)"]
-        if let extra { lines.append("Also wants: \(extra)") }
-        // Thinking made no difference to the shops named, took ten times as long and could run out of tokens.
-        let reply = try await complete(system: Self.suggestPrompt(language), user: lines.joined(separator: "\n"), thinking: false)
-        return Self.decodePlaces(reply)
-    }
-
-    static func suggestPrompt(_ language: Lang) -> String {
-        let output = language == .zh ? "Write reasons in Traditional Chinese as used in Hong Kong." : "Write reasons in English."
-        return """
-        You recommend real shops in Hong Kong from your own knowledge.
-        Reply with one JSON object and nothing else:
-        {"places": [{"name": string, "nameEn": string, "reason": string}]}
-        - Name 6 to 8 specific shops in or near the given area, best first. Every name is checked on a map
-          afterwards and the ones not found are dropped, so give your best candidates rather than holding back.
-        - Start with specialists and places people go to for exactly this. Chains are fine.
-        - If few shops offer exactly this, fill the list with the closest alternatives, such as a 米線 or
-          雲南 restaurant for someone who wants 螺螄粉, and say so in the reason.
-        - name is the shop's Chinese name and nameEn its English name, as on its sign, without the branch.
-        - Never make a shop up, and never give a generic description in place of a shop's name.
-        - Each reason is one short sentence on why it fits. No invented ratings, prices or opening hours.
-        \(output)
-        """
-    }
-
-    static func decodePlaces(_ reply: String) -> [AIPlace] {
-        let places = (jsonObject(in: reply)?["places"] as? [[String: Any]]) ?? []
-        return places.compactMap { place in
-            func text(_ key: String) -> String? {
-                let value = (place[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                return value?.isEmpty == false ? value : nil
-            }
-            guard let name = text("name") ?? text("nameEn") else { return nil }
-            return AIPlace(name: name, nameEn: text("nameEn"), reason: text("reason"))
-        }
-    }
-
-    /// Picks from `places` only; anything else the AI names is dropped.
-    func recommend(_ places: [PlaceCandidate], want: String, extra: String?, language: Lang) async throws -> [PlaceSuggestion] {
-        let reply = try await complete(system: Self.recommendPrompt(language),
-                                       user: Self.placeList(places, want: want, extra: extra), thinking: false)
-        return Self.decodePicks(reply, from: places)
-    }
-
-    static func recommendPrompt(_ language: Lang) -> String {
-        let output = language == .zh ? "Write reasons in Traditional Chinese as used in Hong Kong." : "Write reasons in English."
-        return """
-        You help a rider in Hong Kong choose from real places found on Apple Maps.
-        Reply with one JSON object and nothing else: {"picks": [{"index": number, "reason": string}]}
-        - Choose up to \(PlaceDiscovery.maxSuggestions) places that best match what the rider wants, best first.
-        - Use only the numbered places given, and leave out any that clearly don't match.
-        - Places are listed nearest first.
-        - Each reason is one short sentence based only on the listed name, category and position in the list.
-          Never invent ratings, prices, opening hours, dishes or reviews.
-        - Apple Maps has no menus. Unless a place's name shows it, never say it sells what the rider wants:
-          say it is the closest kind of shop, e.g. a 米線 shop for someone who wants 螺螄粉.
-        \(output)
-        """
-    }
-
-    /// Names and categories only: no coordinates and no distances from the rider.
-    static func placeList(_ places: [PlaceCandidate], want: String, extra: String?) -> String {
-        var lines = ["Looking for: \(want)"]
-        if let extra { lines.append("Also wants: \(extra)") }
+    /// Names, kinds and distances only: no coordinates.
+    static func rankMessage(_ places: [PlaceCandidate], for request: DiscoveryRequest) -> String {
+        var lines = ["Rider wants: \(request.want)"]
+        if let extra = request.extra { lines.append("Also wants: \(extra)") }
+        lines.append("Shops:")
         for (index, place) in places.enumerated() {
-            lines.append("\(index). \(place.name) | \(place.category) | \(place.address)")
+            lines.append("\(index + 1). \(place.name): \(place.category); \(Int(place.meters)) m away")
         }
         return lines.joined(separator: "\n")
     }
 
-    static func decodePicks(_ reply: String, from places: [PlaceCandidate]) -> [PlaceSuggestion] {
-        var seen = Set<Int>()
-        let picks = (jsonObject(in: reply)?["picks"] as? [[String: Any]]) ?? []
-        let suggestions = picks.compactMap { pick -> PlaceSuggestion? in
-            guard let index = (pick["index"] as? NSNumber)?.intValue, places.indices.contains(index),
-                  seen.insert(index).inserted else { return nil }
-            let reason = (pick["reason"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            return PlaceSuggestion(place: places[index], reason: reason?.isEmpty == false ? reason : nil)
+    /// The AI's order. A number it skips or repeats can't lose or double a shop.
+    static func applyRanking(_ reply: String, to places: [PlaceCandidate]) -> [PlaceSuggestion] {
+        var used = Set<Int>(), ranked: [PlaceSuggestion] = []
+        for item in (jsonObject(in: reply)?["ranking"] as? [[String: Any]]) ?? [] {
+            guard let number = (item["number"] as? NSNumber)?.intValue, places.indices.contains(number - 1),
+                  used.insert(number - 1).inserted else { continue }
+            let reason = (item["reason"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ranked.append(PlaceSuggestion(place: places[number - 1], reason: reason?.isEmpty == false ? reason?.forScript : nil))
         }
-        return Array(suggestions.prefix(PlaceDiscovery.maxSuggestions))
+        return ranked + places.indices.filter { !used.contains($0) }.map { PlaceSuggestion(place: places[$0], reason: nil) }
     }
-
-    static let intentPrompt = """
-    You turn Hong Kong public transport trip requests into JSON for a route planner.
-    Reply with one JSON object and nothing else:
-    {"origin": string or null, "destination": string, "preference": "fastest" | "fewerTransfers" | "lessWalking"}
-    Rules:
-    - origin is null when the rider starts from their current location or does not say where they start.
-    - A "Search form" message gives the Start and Destination the rider typed: clean up each one, and keep
-      the Preference unless the typed text asks for something else.
-    - A "Current trip" message is what is on screen, and "Rider says" is the follow-up: change only what the
-      rider mentions and keep everything else, e.g. "少行路" keeps both places, "改去機場" keeps the start.
-    - "current location" as a Start means origin is null.
-    - Expand nicknames and abbreviations into full place names that Apple Maps can find in Hong Kong,
-      in Traditional Chinese. Examples: 理大 -> 香港理工大學, 中大 -> 香港中文大學, 港大 -> 香港大學,
-      機場 -> 香港國際機場一號客運大樓, 尖東 -> 尖沙咀東, 銅鑼灣時代廣場 -> 時代廣場.
-    - Keep MTR station names as station names, e.g. 旺角, 九龍塘.
-    - preference is fewerTransfers when the rider wants no or few changes, lessWalking when they want to
-      walk less, otherwise fastest.
-    - Never suggest routes, times or fares.
-    """
 
     /// Accepts bare JSON or JSON inside a Markdown code fence.
     static func decodeIntent(_ reply: String) -> TripIntent? {
@@ -434,20 +336,7 @@ struct DeepSeekClient: Sendable {
     // MARK: Explanation
 
     func explain(_ summary: String, language: Lang) async throws -> String {
-        try await complete(system: Self.explanationPrompt(language), user: summary, thinking: false)
-    }
-
-    static func explanationPrompt(_ language: Lang) -> String {
-        let output = language == .zh
-            ? "Write in Traditional Chinese as used in Hong Kong."
-            : "Write in English."
-        return """
-        You help a rider in Hong Kong choose between public transport options computed by a route planner.
-        In one or two short sentences, recommend the best option for the rider's preference and say why.
-        Use only the facts given. Do not invent routes, stops, times or fares.
-        When an option's first departure is marked live, you may mention that it is based on real-time arrivals.
-        \(output) No Markdown, no lists.
-        """
+        try await complete(task: language == .zh ? "explain_zh" : "explain_en", message: summary).forScript
     }
 
     /// A compact, coordinate-free description of the options for the AI.
