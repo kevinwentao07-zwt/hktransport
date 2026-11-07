@@ -25,7 +25,11 @@ Run the tests with `node --test web/test/core.test.mjs`. To try it locally:
 python3 -m http.server 8642 --directory web
 ```
 
-To publish to your own server, put `DEPLOY_HOST`, `DEPLOY_KEY` and `DEPLOY_DOMAIN` in `.env.deploy`
+Pushing to `main` or to a `claude/` branch publishes the site automatically: the "Deploy web" GitHub
+Actions workflow runs the tests and then does what `Deploy web.command` does, using the repository secrets
+`DEPLOY_HOST`, `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS` and `DEPLOY_DOMAIN`.
+
+To publish to your own server by hand, put `DEPLOY_HOST`, `DEPLOY_KEY` and `DEPLOY_DOMAIN` in `.env.deploy`
 (ignored by git) and run `Deploy web.command`. Run `Set AI key.command` once to put the DeepSeek key
 on the server. It never goes into the repository or the web folder. Run `Set routes key.command` for walking routes, and `Set Google keys.command` to add
 Google's map and place keys. The server counts each map load and place search on disk, and stops
