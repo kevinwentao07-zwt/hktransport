@@ -875,13 +875,46 @@ function pathEdges(path) {
   })));
 }
 
-function metersToEdge(here, edge) {
+function nearestOnEdge(here, edge) {
   const scale = Math.cos((here.lat * Math.PI) / 180);
   const x = (edge.to.lng - edge.from.lng) * scale, y = edge.to.lat - edge.from.lat;
   const px = (here.lng - edge.from.lng) * scale, py = here.lat - edge.from.lat;
   const length = x * x + y * y;
   const t = length > 0 ? Math.min(1, Math.max(0, (px * x + py * y) / length)) : 0;
-  return meters(here, { lat: edge.from.lat + t * y, lng: edge.from.lng + t * (edge.to.lng - edge.from.lng) });
+  return { lat: edge.from.lat + t * y, lng: edge.from.lng + t * (edge.to.lng - edge.from.lng) };
+}
+
+const metersToEdge = (here, edge) => meters(here, nearestOnEdge(here, edge));
+
+/** The real road from a point on it onward. */
+function roadFrom(road, cut) {
+  const nearest = road.reduce((best, point, index) => (meters(point, cut) < meters(road[best], cut) ? index : best), 0);
+  return [cut, ...road.slice(nearest + 1)];
+}
+
+/**
+ * What is still ahead of the rider: the part already travelled is gone, the
+ * current leg starts where the rider is, and later legs are `upcoming`, drawn
+ * light until the rider gets there. `lead` is how many points come before the
+ * first of `stopIDs`. Without a position yet, the whole trip is ahead.
+ */
+export function pathAhead(path, progress, here) {
+  const edge = progress && pathEdges(path)[progress.edge];
+  if (!edge) return path;
+  if (progress.hasArrived) return { ...path, segments: [] };
+  const cut = progress.isOffRoute || !here ? edge.from : nearestOnEdge(here, edge);
+  const segments = path.segments.flatMap((segment, index) => {
+    if (index < edge.segment) return [];
+    if (index > edge.segment) return [{ ...segment, upcoming: true }];
+    const rest = (list) => list?.slice(edge.toPoint);
+    const { legs, ...current } = segment;
+    return [{
+      ...current, points: [cut, ...rest(segment.points)], stopIDs: rest(segment.stopIDs), lead: 1,
+      ...(segment.line && { line: roadFrom(segment.line, cut), marks: rest(segment.marks), positions: rest(segment.positions) }),
+      ...(segment.dots && { dots: rest(segment.dots) }),
+    }];
+  });
+  return { ...path, segments };
 }
 
 /** Where the rider is along a journey. `previous` stops a noisy fix from undoing progress. */

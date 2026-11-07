@@ -64,14 +64,40 @@ extension JourneyMapPath {
                                metersFromRoute: bestMeters, isOffRoute: isOffRoute, hasArrived: hasArrived)
     }
 
-    private static func meters(from here: StopLocation, toEdge edge: Edge) -> Double {
+    /// What is still ahead of the rider: the part already travelled is gone, the
+    /// current leg starts where the rider is, and later legs are upcoming, drawn
+    /// light until the rider gets there. Without a position yet, the whole trip is ahead.
+    func ahead(of progress: JourneyProgress?, at here: StopLocation?) -> [Segment] {
+        guard let progress, edges.indices.contains(progress.edge) else { return segments }
+        if progress.hasArrived { return [] }
+        let edge = edges[progress.edge]
+        let cut = progress.isOffRoute ? edge.from : here.map { Self.nearest(to: $0, on: edge) } ?? edge.from
+        return segments.enumerated().compactMap { index, segment -> Segment? in
+            if index < edge.segment { return nil }
+            var segment = segment
+            if index > edge.segment {
+                segment.isUpcoming = true
+            } else {
+                segment.points = [cut] + segment.points.dropFirst(edge.toPoint)
+                segment.stopIDs = Array(segment.stopIDs.dropFirst(edge.toPoint))
+                segment.positions = Array(segment.positions.dropFirst(edge.toPoint))
+                segment.lead = 1
+            }
+            return segment
+        }
+    }
+
+    private static func nearest(to here: StopLocation, on edge: Edge) -> StopLocation {
         let scale = cos(here.lat * .pi / 180)
         let x = (edge.to.lng - edge.from.lng) * scale, y = edge.to.lat - edge.from.lat
         let px = (here.lng - edge.from.lng) * scale, py = here.lat - edge.from.lat
         let length = x * x + y * y
         let t = length > 0 ? min(1, max(0, (px * x + py * y) / length)) : 0
-        let nearest = StopLocation(lat: edge.from.lat + t * y, lng: edge.from.lng + t * (edge.to.lng - edge.from.lng))
-        return Geo.meters(here, nearest)
+        return StopLocation(lat: edge.from.lat + t * y, lng: edge.from.lng + t * (edge.to.lng - edge.from.lng))
+    }
+
+    private static func meters(from here: StopLocation, toEdge edge: Edge) -> Double {
+        Geo.meters(here, nearest(to: here, on: edge))
     }
 
     /// One line telling the rider what to do now.

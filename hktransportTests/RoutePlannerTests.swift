@@ -426,6 +426,25 @@ final class RoutePlannerTests: XCTestCase {
         XCTAssertEqual(try text(path.progress(at: StopLocation(lat: 22.320, lng: 114.1702), after: onBus)), "步行前往 E")
     }
 
+    func testMapKeepsOnlyWhatIsAheadWithLaterLegsLight() throws {
+        let (path, _, end) = try navigationPath()
+        let walking = StopLocation(lat: 22.2997, lng: 114.170)
+        let before = path.ahead(of: path.progress(at: walking), at: walking)
+        XCTAssertEqual(before.map(\.isUpcoming), [false, true, true, true, true])
+        XCTAssertEqual(before[1].stops.map { $0.id }, ["A", "B", "C"])
+
+        // On bus 1 between A and B: the walk and A are behind, the line starts at the rider.
+        let riding = StopLocation(lat: 22.305, lng: 114.170)
+        let onBus = path.ahead(of: path.progress(at: riding), at: riding)
+        XCTAssertEqual(onBus.map(\.id), [1, 2, 3, 4])
+        XCTAssertFalse(onBus[0].isUpcoming)
+        XCTAssertEqual(onBus[0].stops.map { $0.id }, ["B", "C"])
+        XCTAssertEqual(onBus[0].points.first?.lat ?? 0, 22.305, accuracy: 1e-6)
+
+        XCTAssertEqual(path.ahead(of: nil, at: nil), path.segments)
+        XCTAssertTrue(path.ahead(of: path.progress(at: end), at: end).isEmpty)
+    }
+
     func testNoisyFixCannotUndoProgress() throws {
         let (path, db, _) = try navigationPath()
         let late = try XCTUnwrap(path.progress(at: StopLocation(lat: 22.335, lng: 114.170)))

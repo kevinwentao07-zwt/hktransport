@@ -585,6 +585,18 @@ private struct JourneyMap: View {
         let route: String
         let op: Operator
         let location: StopLocation
+        let isUpcoming: Bool
+    }
+
+    /// Legs the rider hasn't reached yet are drawn this faint while navigating.
+    private static let upcomingOpacity = 0.4
+
+    /// The whole trip, or while navigating only what is still ahead of the rider.
+    private var segments: [JourneyMapPath.Segment] {
+        guard let path else { return [] }
+        guard navigation.journeyID != nil, path == navigation.path else { return path.segments }
+        let here = navigation.fix.map { StopLocation(lat: $0.coordinate.latitude, lng: $0.coordinate.longitude) }
+        return path.ahead(of: navigation.progress, at: here)
     }
 
     var body: some View {
@@ -712,14 +724,20 @@ private struct JourneyMap: View {
 
     private var lines: [RouteLine] {
         guard let db = model.db else { return [] }
-        var lines = (path?.segments ?? []).flatMap { segment -> [RouteLine] in
-            if case .ride(_, let op) = segment.mode, let key = segment.routeKey, let route = db.routeList[key] {
-                return RouteDrawing.ride(id: "\(segment.id)", routeKey: key, route: route, op: op, positions: segment.positions,
-                                         points: segment.points, stopList: db.stopList, shapes: shapes)
+        var lines = segments.flatMap { segment -> [RouteLine] in
+            let opacity = segment.isUpcoming ? Self.upcomingOpacity : 1
+            if case .ride(let number, let op) = segment.mode {
+                // The leg under way starts where the rider is, so it runs straight from there.
+                if segment.lead == 0, let key = segment.routeKey, let route = db.routeList[key] {
+                    return RouteDrawing.ride(id: "\(segment.id)", routeKey: key, route: route, op: op, positions: segment.positions,
+                                             points: segment.points, stopList: db.stopList, shapes: shapes).map { $0.faded(opacity) }
+                }
+                return [RouteLine(id: "\(segment.id)-casing", points: segment.points, color: .white, width: 7, isCasing: true),
+                        RouteLine(id: "\(segment.id)-ride", points: segment.points, color: op.lineColor(number))].map { $0.faded(opacity) }
             }
             let road = segment.points.first.flatMap { from in segment.points.last.flatMap { walks.line(from, $0) } } ?? segment.points
             return [RouteLine(id: "\(segment.id)-casing", points: road, color: .white, width: 7, isCasing: true),
-                    RouteLine(id: "\(segment.id)-walk", points: road, color: .blue, isDotted: true)]
+                    RouteLine(id: "\(segment.id)-walk", points: road, color: .blue, isDotted: true)].map { $0.faded(opacity) }
         }
         // The road the coming bus still has to cover, set apart from the trip itself.
         if chosen == nil, let ride, let coming = live.shown.first(where: \.isNext), let track = shapes.track(ride.routeKey, ride.op) {
@@ -731,10 +749,10 @@ private struct JourneyMap: View {
 
     private var dots: [RouteDot] {
         guard let db = model.db else { return [] }
-        return (path?.segments ?? []).flatMap { segment -> [RouteDot] in
+        return segments.flatMap { segment -> [RouteDot] in
             guard case .ride(_, let op) = segment.mode, let key = segment.routeKey, let route = db.routeList[key] else { return [] }
             return RouteDrawing.dots(id: "\(segment.id)", routeKey: key, route: route, op: op, positions: segment.positions,
-                                     points: segment.points, stopIDs: segment.stopIDs, stopList: db.stopList, shapes: shapes,
+                                     points: Array(segment.points.dropFirst(segment.lead)), stopIDs: segment.stopIDs, stopList: db.stopList, shapes: shapes,
                                      language: model.language)
         }
     }
@@ -778,6 +796,7 @@ private struct JourneyMap: View {
                         .foregroundStyle(boarding.op == .ctb ? Color.black : Color.white)
                         .background(boarding.op.lineColor(boarding.route), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(.white, lineWidth: 1))
+                        .opacity(boarding.isUpcoming ? 0.6 : 1)
                 }
                 .annotationTitles(.hidden)
             }
@@ -838,9 +857,9 @@ private struct JourneyMap: View {
     }
 
     private var boardings: [Boarding] {
-        (path?.segments ?? []).compactMap { segment -> Boarding? in
+        segments.compactMap { segment -> Boarding? in
             guard case .ride(let route, let op) = segment.mode, let first = segment.points.first else { return nil }
-            return Boarding(id: segment.id, route: route, op: op, location: first)
+            return Boarding(id: segment.id, route: route, op: op, location: first, isUpcoming: segment.isUpcoming)
         }
     }
 }

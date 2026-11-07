@@ -91,10 +91,16 @@ private extension MKPolyline {
 struct RouteLine: Identifiable {
     let id: String
     let points: [StopLocation]
-    let color: Color
+    var color: Color
     var width: CGFloat = 4
     var isDotted = false
     var isCasing = false
+
+    func faded(_ opacity: Double) -> RouteLine {
+        var line = self
+        line.color = color.opacity(opacity)
+        return line
+    }
 }
 
 struct RouteDot: Identifiable {

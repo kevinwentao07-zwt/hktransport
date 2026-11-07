@@ -11,12 +11,21 @@ struct JourneyMapPath: Equatable, Sendable {
     struct Segment: Identifiable, Equatable, Sendable {
         let id: Int
         let mode: Mode
-        let points: [StopLocation]
-        /// Matches `points` one to one on rides; empty on walks.
+        var points: [StopLocation]
+        /// Matches `points` one to one on rides, after the first `lead`; empty on walks.
         var stopIDs: [String] = []
         var routeKey: String?
         /// Each stop's place in the whole route, matching `stopIDs`.
         var positions: [Int] = []
+        /// Points before the first stop: 1 once navigation has cut the line where the rider is.
+        var lead = 0
+        /// Not reached yet while navigating, so drawn light.
+        var isUpcoming = false
+
+        /// Each stop with the point it sits on.
+        var stops: [(id: String, location: StopLocation)] {
+            Array(zip(stopIDs, points.dropFirst(lead))).map { (id: $0.0, location: $0.1) }
+        }
     }
 
     let origin: StopLocation
