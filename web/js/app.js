@@ -1,6 +1,6 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
 import { meters,
-  OP_COLORS, OP_LABELS, MODES, buildStopIndex, planAdvice, exactSite, instruction, journeyID, journeyPath, RETURN_COLOR, circularTurn, roadBetween, lineColor, lineName, matchingSites,
+  OP_COLORS, OP_LABELS, MODES, LIVE_AHEAD_MS, arrivalTime, arrivesLate, buildStopIndex, closestPosition, nextRouteKeys, planAdvice, routeFamily, routeWays, exactSite, instruction, journeyID, journeyPath, RETURN_COLOR, circularTurn, roadBetween, lineColor, lineName, matchingSites,
   nameText, normalizeDB, partialSite, placeOnTrack, primaryMode, progressAt, retime, rides, routeTrack, score, searchRoutes, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
   totalMinutes, transfers, walkingMeters,
 } from './transit.js?v=dev';
@@ -46,11 +46,11 @@ const history = {
 
 const state = {
   lang: store.get('lang', 'zh'), script: store.get('script', 'hant'), tab: 'plan', db: null, dbError: null, index: null,
-  origin: '', destination: '', chat: '', preference: store.get('preference', 'fastest'), phase: 'idle', error: null,
+  origin: '', destination: '', when: null, chat: '', preference: store.get('preference', 'fastest'), phase: 'idle', error: null,
   from: null, to: null, journeys: [], expanded: null, explanation: null, aiNotice: null, lastChat: null,
   discovery: null,
   stopQuery: '', stopPlace: null, stops: [], stopMode: 'all', stopRadius: 500, stopBusy: false, stopError: null, stopOpen: null,
-  routeQuery: '', routeKey: null, saved: store.get('saved', []),
+  routeQuery: '', routeKey: null, routeKeyboard: false, recentRoutes: store.get('recentRoutes', []), thread: null, saved: store.get('saved', []),
   talk: [], focus: null, routeView: false, nav: null, fix: null, speechLang: store.get('speechLang', 'zh-HK'), listening: false,
 };
 const t = (zh, en) => (state.lang === 'zh' ? zh : en);
@@ -118,6 +118,8 @@ const ICONS = {
   bus: ['M6 17V6.5A2.5 2.5 0 0 1 8.5 4h7A2.5 2.5 0 0 1 18 6.5V17a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1Z', 'M6 12h12', 'M8.5 18v2', 'M15.5 18v2', 'M9 15h.01', 'M15 15h.01'],
   star: ['M12 3.5l2.6 5.3 5.9.9-4.2 4.1 1 5.8-5.3-2.8-5.3 2.8 1-5.8-4.2-4.1 5.9-.9L12 3.5Z'],
   settings: ['M4 7h10', 'M18 7h2', 'M4 17h2', 'M10 17h10', 'M16 9.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z', 'M8 19.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z'],
+  keyboard: ['M4 7h16a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1Z', 'M7 10.5h.01', 'M11 10.5h.01', 'M15 10.5h.01', 'M8 14h8'],
+  backspace: ['M9 6h10a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-6-6 6-6Z', 'M12.5 10l4 4', 'M16.5 10l-4 4'],
   mic: ['M12 15a3.5 3.5 0 0 0 3.5-3.5v-5a3.5 3.5 0 0 0-7 0v5A3.5 3.5 0 0 0 12 15Z', 'M5.5 11.5a6.5 6.5 0 0 0 13 0', 'M12 18v3'],
   stop: ['M7 7h10v10H7z'],
   send: ['M12 19V5', 'M6 11l6-6 6 6'],
@@ -824,7 +826,7 @@ function resetPlan() {
 }
 
 function showRouteView() {
-  sheet.snap('half');
+  if (!whenOpen) sheet.snap('half');
   if (state.routeView) return;
   state.routeView = true;
   renderPlanTop();
@@ -850,7 +852,8 @@ function closeTrip() {
   planRun++;
   stopNavigation();
   resetPlan();
-  Object.assign(state, { origin: '', destination: '', discovery: null, lastChat: null, talk: [], routeView: false, phase: 'idle' });
+  Object.assign(state, { origin: '', destination: '', when: null, discovery: null, lastChat: null, talk: [], thread: null, routeView: false, phase: 'idle' });
+  whenOpen = false;
   stagger();
   renderTab();
   slideView('back');
@@ -859,6 +862,7 @@ function closeTrip() {
 }
 
 function setPhase(phase, error = null) {
+  if (phase === 'failed') answer(error);
   state.phase = phase;
   state.error = error;
   renderSheet();
@@ -872,22 +876,41 @@ function currentTrip() {
 
 /** `request` is {kind: 'search'}, {kind: 'chat', text} or {kind: 'place', place}. */
 async function runPlan(request) {
-  const run = ++planRun, ai = client(), stale = () => run !== planRun;
-  stopNavigation();
-  resetPlan();
+  const run = ++planRun, ai = client(), stale = () => run !== planRun, isChat = request.kind === 'chat', phaseBefore = state.phase;
+  const startOver = () => {
+    const notice = state.aiNotice;
+    stopNavigation();
+    resetPlan();
+    state.aiNotice = notice;
+    // A place already known stays reachable even if the trip to it can't be planned.
+    if (request.place) state.to = request.place;
+    renderNearStops();
+  };
+  state.aiNotice = null;
+  if (!isChat) {
+    state.thread = null;
+    startOver();
+  }
   renderBottomStatus();
   setPhase('understanding');
-  let intent = null;
+  let intent = null, wish = null;
 
   if (request.kind === 'place') {
     intent = { origin: normalizedOrigin(state.origin), destination: request.place.name, preference: state.preference };
-  } else if (request.kind === 'chat' && ai) {
+  } else if (isChat && ai) {
     // Only the chat box needs the AI: the search box holds a place, and the planner does the rest.
     try {
       const reply = await ai.chat(chatMessage(request.text, request.current, request.context));
       if (stale()) return;
-      if (reply.wish) return startDiscovery({ ...reply.wish, asked: request.asked, question: request.context.mayAsk ? reply.wish.question : null }, run);
-      intent = reply.trip;
+      // Small talk changes nothing, so what is on screen stays.
+      if (reply.say) {
+        state.discovery = request.discovery;
+        state.phase = phaseBefore === 'done' ? 'done' : 'idle';
+        answer(reply.say);
+        return renderSheet();
+      }
+      wish = reply.wish ?? null;
+      intent = reply.trip ?? null;
     } catch (error) {
       state.aiNotice = googleShops()
         ? t('AI 額度已用完或暫時未能使用，已直接用 Google 搜尋。', 'AI is used up or unavailable, so this went straight to Google.')
@@ -895,11 +918,13 @@ async function runPlan(request) {
     }
   }
   if (stale()) return;
-  if (!intent && request.kind === 'chat') {
+  if (isChat) startOver();
+  if (wish) return startDiscovery({ ...wish, asked: request.asked, question: request.context.mayAsk ? wish.question : null }, run);
+  if (!intent && isChat) {
     // Without the AI, an answer to "where?" can only be a place.
     if (request.asked) return discover({ ...request.wish, area: request.text, question: null }, run);
-    const wish = parseWish(request.text) ?? (googleShops() && !request.current ? parseSearch(request.text) : null);
-    if (wish) return startDiscovery(wish, run);
+    const guess = parseWish(request.text) ?? (googleShops() && !request.current ? parseSearch(request.text) : null);
+    if (guess) return startDiscovery(guess, run);
     intent = parseFollowUp(request.text, request.current);
   }
   intent ??= currentTrip();
@@ -924,6 +949,7 @@ async function runPlan(request) {
   if (!end) return setPhase('failed', t(`找不到目的地「${intent.destination}」。`, `Couldn't find "${intent.destination}".`));
   state.from = start;
   state.to = end;
+  renderNearStops();
   // A search can land somewhere other than the words typed, so the boxes say where it went.
   if (request.kind === 'search') {
     if (intent.origin) state.origin = start.name;
@@ -935,8 +961,17 @@ async function runPlan(request) {
   if (meters(start.location, end.location) < SAME_PLACE_METERS) return setPhase('failed', t('出發地和目的地是同一個地方。', 'The start and destination are the same place.'));
 
   setPhase('planning');
-  const departure = Date.now();
-  const { journeys } = await ask({ type: 'plan', from: start.location, to: end.location, departure, preference: state.preference });
+  const now = Date.now();
+  if (state.when?.at <= now) {
+    state.when = null;
+    renderWhen();
+    showToast(t('所選時間已過，改為現在出發。', 'That time has passed, so this leaves now.'));
+  }
+  const { mode, at } = state.when ?? {};
+  const { journeys } = await ask({
+    type: 'plan', from: start.location, to: end.location, preference: state.preference,
+    departure: mode === 'depart' ? at : now, arriveBy: mode === 'arrive' ? at : null,
+  });
   if (stale()) return;
   if (!journeys.length) return setPhase('failed', t('找不到公共交通路線，可能已經收車，或距離太近／太遠。', 'No public transport route found. Services may have ended, or the trip is too short or too far.'));
   state.journeys = journeys;
@@ -944,17 +979,20 @@ async function runPlan(request) {
   setPhase('checkingLive');
 
   const arrivals = liveArrivalCache(state.db, state.lang);
-  const live = await Promise.all(journeys.map((journey) => retime(journey, arrivals)));
+  const live = await Promise.all(journeys.map((journey) => (journey.departure - now <= LIVE_AHEAD_MS ? retime(journey, arrivals) : journey)));
   if (stale()) return;
   state.journeys = live.sort((a, b) => score(a, state.preference) - score(b, state.preference));
+  writeAdvice();
   setPhase('done');
-
-  showAdvice();
+  const [best] = state.journeys, minutes = Math.round(totalMinutes(best)), changes = transfers(best);
+  answer(t(
+    `${start.name}到${end.name}：最佳方案 ${minutes} 分鐘，${changes ? `轉 ${changes} 次車` : '直達'}。`,
+    `${start.name} to ${end.name}: best option ${minutes} min, ${changes ? `${changes} change${changes > 1 ? 's' : ''}` : 'direct'}.`,
+  ));
 }
 
-function showAdvice() {
+function writeAdvice() {
   state.explanation = planAdvice(state.journeys, t, (ride) => lineName(ride.op, ride.route, state.lang), Date.now());
-  renderBottomStatus();
 }
 
 // MARK: Finding places
@@ -965,6 +1003,7 @@ function startDiscovery(wish, run) {
   if (!wish.question) return discover(wish, run);
   remember('App', `Asked: ${wish.question}`);
   state.discovery = { stage: 'asking', wish };
+  answer(null);
   setPhase('idle');
   renderBottomStatus();
 }
@@ -1035,6 +1074,7 @@ async function discover(wish, run = ++planRun) {
   }
   state.discovery = { stage: 'choosing', wish, areaName: searchArea.name, center: searchArea.center, suggestions, isRanked };
   remember('App', `Showed ${wish.want} around ${searchArea.name}: ${suggestions.map(({ place }) => place.name).join(', ')}`);
+  answer(t(`找到 ${suggestions.length} 個「${wish.want}」的結果，點選就可以看路線。`, `Found ${suggestions.length} for "${wish.want}". Tap one for a route.`));
   stagger();
   setPhase('idle');
   renderBottomStatus();
@@ -1118,7 +1158,9 @@ const arrivalsSeen = new Map();
 function rideOnScreen() {
   if (state.tab === 'plan') {
     const journey = state.journeys.find((j) => journeyID(j) === (state.nav?.id ?? state.expanded));
-    return journey && rides(journey).find((ride) => !['mtr', 'lightRail'].includes(ride.op));
+    // The buses out there now are not the ones a later trip will catch.
+    if (!journey || (!state.nav && journey.departure - Date.now() > LIVE_AHEAD_MS)) return null;
+    return rides(journey).find((ride) => !['mtr', 'lightRail'].includes(ride.op));
   }
   const focus = state.focus, route = focus && state.db?.routes[focus.routeKey];
   if (!route || ['mtr', 'lightRail'].includes(focus.op)) return null;
@@ -1141,6 +1183,9 @@ function moveVehicles() {
   if (key !== vehicleKey) {
     vehicleKey = key;
     vehicleList = [];
+    // These buses aren't on this route, so none of them may carry over as the same bus.
+    shownVehicles = [];
+    mapView.vehicles([]);
     // Coming back to a route shows its buses at once, as the times are still good.
     ({ arrivals: vehicleArrivals, at: vehicleFetched } = arrivalsSeen.get(key) ?? { arrivals: [], at: 0 });
   }
@@ -1325,6 +1370,52 @@ function showPlanStop() {
   return fitFocus();
 }
 
+function variantLabel(variant, variants, index) {
+  if (!index) return t('常規班次', 'Regular');
+  const origin = nameText(variant.orig, state.lang), end = nameText(variant.dest, state.lang);
+  if (origin !== nameText(variants[0].orig, state.lang)) return t(`由 ${origin}`, `From ${origin}`);
+  if (end !== nameText(variants[0].dest, state.lang)) return t(`往 ${end}`, `To ${end}`);
+  return t(`特別班 ${index}`, `Special ${index}`);
+}
+
+/** Which way the stops below run, and how to change that. */
+function routeHead(route, op) {
+  const { variants, opposite } = routeWays(state.db, route);
+  const end = nameText(route.dest, state.lang), origin = nameText(route.orig, state.lang);
+  return h('div', { class: 'card route-head' },
+    h('div', { class: 'row' }, badge(op, route.route),
+      h('div', { class: 'grow', style: 'min-width:0' },
+        h('div', { class: 'bold' }, t(`往 ${end}`, `To ${end}`)),
+        h('div', { class: 'tiny muted' }, t(`由 ${origin} 開出`, `From ${origin}`))),
+      opposite && h('button', { class: 'swap-way', onclick: () => showRouteWay(opposite, true) }, icon('swap', 16), t('轉方向', 'Reverse'))),
+    variants.length > 1 && h('div', { class: 'days' }, variants.map((variant, index) => h('button', {
+      'aria-pressed': String(variant === route), onclick: () => showRouteWay(variant),
+    }, variantLabel(variant, variants, index)))));
+}
+
+/**
+ * Another service of this route. A chosen stop becomes the one across the road, if there is one.
+ * The opposite direction runs the same streets, so the map and the sheet stay exactly where they are.
+ */
+function showRouteWay(route, keepsView = false) {
+  const { routeKey, op, position } = state.focus ?? {}, wasAt = position == null ? null : state.db.stops[state.db.routes[routeKey].stops[op][position]]?.location;
+  const nextOp = route.operators.includes(op) ? op : route.operators[0];
+  if (state.tab === 'routes') {
+    state.routeKey = route.key;
+    rememberRoute(route);
+  }
+  const chosen = wasAt ? closestPosition(route, nextOp, wasAt, state.db) : null;
+  if (keepsView) {
+    state.focus = { routeKey: route.key, op: nextOp, position: chosen };
+    drawMap();
+  } else {
+    focusRoute(route.key, nextOp, chosen);
+  }
+  stagger();
+  renderSheet();
+  $('sheet').scrollTop = 0;
+}
+
 /** One route's stops, with the chosen stop's arrivals at the top. */
 function routeDetail(route, op, back) {
   const position = state.focus?.position, id = position == null ? null : route.stops[op][position];
@@ -1332,7 +1423,7 @@ function routeDetail(route, op, back) {
   const legDot = (color) => h('i', { class: 'leg-dot', style: `background:${color}` });
   return [
     h('button', { class: 'back', onclick: back }, icon('back', 17), t('返回', 'Back')),
-    h('div', { class: 'row' }, badge(op, route.route), h('span', { class: 'bold' }, `${nameText(route.orig, state.lang)} → ${nameText(route.dest, state.lang)}`)),
+    routeHead(route, op),
     id && arrivalCard(id),
     !id && h('div', { class: 'tiny muted' }, t('點選站點查看來車時間，左右滑動可設為出發地或目的地。', 'Tap a stop for arrivals, or swipe it to start or end a trip there.')),
     turn != null && h('div', { class: 'leg-key tiny' },
@@ -1511,6 +1602,7 @@ function toggleSpeech() {
     text = [...event.results].map((result) => result[0].transcript).join('');
     state.chat = text;
     $('chat-input').value = text;
+    syncComposer();
   };
   recognition.onerror = (event) => {
     if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
@@ -1540,10 +1632,13 @@ function renderChatControls() {
   if (input) input.placeholder = chatPrompt();
 }
 
+/** The microphone gives way to the send button once there is something to send. */
+const syncComposer = () => $('composer')?.classList.toggle('typing', !!state.chat.trim());
+
 function chatPrompt() {
   if (state.listening) return t('正在聆聽…', 'Listening…');
   if (state.discovery?.stage === 'asking') return t('輸入你的回答…', 'Type your answer…');
-  return t('告訴 AI，例如：去吃茶餐廳', 'Ask AI, e.g. Find a cha chaan teng');
+  return t('問 AI，例如：去吃茶餐廳', 'Ask AI, e.g. Find a cha chaan teng');
 }
 
 // MARK: Actions
@@ -1557,6 +1652,7 @@ function search() {
   if (!isCurrentLocation(state.destination)) history.add('destination', state.destination);
   state.discovery = null;
   state.talk = [];
+  state.thread = null;
   renderBottomStatus();
   document.activeElement?.blur();
   showRouteView();
@@ -1581,11 +1677,13 @@ function chatContext() {
 
 function askAI(text) {
   const { stage, wish, suggestions } = state.discovery ?? {}, context = chatContext(), current = currentTrip();
+  const discovery = state.discovery;
   remember('Rider', text);
   state.discovery = null;
+  state.thread = { said: text, busy: true };
   renderBottomStatus();
   runPlan({
-    kind: 'chat', text, current, context, wish, asked: stage === 'asking' ? (wish.asked ?? 0) + 1 : 0,
+    kind: 'chat', text, current, context, wish, discovery, asked: stage === 'asking' ? (wish.asked ?? 0) + 1 : 0,
     shops: suggestions?.map(({ place }) => place),
   });
 }
@@ -1600,6 +1698,7 @@ function sendChat() {
     input.value = '';
     input.blur();
   }
+  syncComposer();
   state.lastChat = text;
   renderChatHistory(false);
   askAI(text);
@@ -1917,14 +2016,136 @@ function renderPlanTop() {
       h('div', { class: 'stack', style: 'align-items:center' },
         h('button', { class: 'icon-button', 'aria-label': t('對調起點及目的地', 'Swap start and destination'), onclick: swapEnds }, icon('swap', 19)),
         h('button', { class: 'go', 'aria-label': t('搜尋', 'Search'), onclick: search }, icon('search', 19)))),
+    h('div', { id: 'plan-when' }),
     h('div', { id: 'place-history' }));
+  renderWhen();
+}
+
+const HK_OFFSET_MS = 8 * 3_600_000, DAY_MS = 86_400_000, FIVE_MINUTES_MS = 300_000;
+const hkDay = (ms) => Math.floor((ms + HK_OFFSET_MS) / DAY_MS);
+// Hong Kong has no daylight saving, and the picker means Hong Kong time wherever the phone is.
+const timeParts = (ms) => {
+  const minutes = Math.floor(((ms + HK_OFFSET_MS) % DAY_MS) / 60_000);
+  return { day: hkDay(ms), hour: Math.floor(minutes / 60), minute: minutes % 60 };
+};
+const fromParts = ({ day, hour, minute }) => day * DAY_MS - HK_OFFSET_MS + (hour * 60 + minute) * 60_000;
+const DAYS_OFFERED = 7, WHEEL_ROW = 36, WHEEL_SETTLES_MS = 140;
+let whenOpen = false, whenTimer = 0;
+
+function whenLabel() {
+  if (!state.when) return t('現在出發', 'Leave now');
+  const { mode, at } = state.when, days = hkDay(at) - hkDay(Date.now());
+  const date = new Date(at).toLocaleDateString(state.lang === 'zh' ? 'zh-HK' : 'en-HK', { month: 'short', day: 'numeric', timeZone: 'Asia/Hong_Kong' });
+  const day = days === 0 ? '' : days === 1 ? t('明天 ', 'tomorrow ') : `${date} `;
+  return mode === 'arrive' ? t(`${day}${clock(at)} 前到達`, `Arrive by ${day}${clock(at)}`) : t(`${day}${clock(at)} 出發`, `Leave ${day}${clock(at)}`);
+}
+
+/** Times the trip on screen again; with no trip yet, the time waits for the search. */
+function planAgainForTime() {
+  clearTimeout(whenTimer);
+  if (state.to) runPlan({ kind: 'place', place: state.to });
+}
+
+/** The choices take up the sheet's half, so it opens fully to keep the routes in view as they change. */
+function showWhen(open) {
+  whenOpen = open;
+  sheet.snap(open ? 'full' : 'half');
+}
+
+function chooseWhen(mode) {
+  if (mode === 'now') {
+    state.when = null;
+    showWhen(false);
+  } else {
+    const soon = Date.now() + (mode === 'arrive' ? 60 : 15) * 60_000;
+    state.when = { mode, at: state.when?.at ?? Math.ceil(soon / FIVE_MINUTES_MS) * FIVE_MINUTES_MS };
+  }
+  renderWhen();
+  planAgainForTime();
+}
+
+/** Takes a day, an hour or a minute. A time already gone moves up to the next one still possible. */
+function pickWhen(change) {
+  const wanted = fromParts({ ...timeParts(state.when.at), ...change });
+  const at = Math.max(wanted, Math.ceil((Date.now() + 60_000) / FIVE_MINUTES_MS) * FIVE_MINUTES_MS), moved = at !== state.when.at;
+  state.when.at = at;
+  if (at !== wanted || 'day' in change) renderWhen();
+  if (!moved) return;
+  $('when-label').textContent = whenLabel();
+  clearTimeout(whenTimer);
+  whenTimer = setTimeout(planAgainForTime, 700);
+}
+
+function dayLabel(day, index) {
+  if (index < 2) return index ? t('明天', 'Tomorrow') : t('今天', 'Today');
+  const date = new Date(day * DAY_MS); // Shifted to Hong Kong already, so read in UTC.
+  const weekday = date.toLocaleDateString(state.lang === 'zh' ? 'zh-HK' : 'en-HK', { weekday: 'short', timeZone: 'UTC' });
+  return `${weekday} ${date.getUTCMonth() + 1}/${date.getUTCDate()}`;
+}
+
+/** A column of numbers that settles on one, like a clock's wheel. */
+function wheel(values, value, label, pick) {
+  const rows = values.map((number, index) => h('button', { onclick: () => list.scrollTo({ top: index * WHEEL_ROW, behavior: calm.matches ? 'auto' : 'smooth' }) }, String(number).padStart(2, '0')));
+  const list = h('div', { class: 'wheel no-drag', role: 'group', 'aria-label': label }, h('i'), rows, h('i'));
+  const mark = (index) => rows.forEach((row, at) => row.classList.toggle('on', at === index));
+  let settling = 0;
+  list.addEventListener('scroll', () => {
+    const index = Math.min(values.length - 1, Math.max(0, Math.round(list.scrollTop / WHEEL_ROW)));
+    mark(index);
+    clearTimeout(settling);
+    settling = setTimeout(() => pick(values[index]), WHEEL_SETTLES_MS);
+  });
+  const start = Math.max(0, values.indexOf(value));
+  mark(start);
+  requestAnimationFrame(() => { list.scrollTop = start * WHEEL_ROW; });
+  return list;
+}
+
+function whenPicker() {
+  const { day, hour, minute } = timeParts(state.when.at), today = hkDay(Date.now());
+  const days = Array.from({ length: DAYS_OFFERED }, (_, index) => today + index);
+  const count = (length, step = 1) => Array.from({ length }, (_, index) => index * step);
+  return [
+    h('div', { class: 'days' }, days.map((choice, index) => h('button', { 'aria-pressed': String(choice === day), onclick: () => pickWhen({ day: choice }) }, dayLabel(choice, index)))),
+    h('div', { class: 'wheels' },
+      wheel(count(24), hour, t('小時', 'Hour'), (value) => pickWhen({ hour: value })),
+      h('b', {}, ':'),
+      wheel(count(12, 5), minute, t('分鐘', 'Minute'), (value) => pickWhen({ minute: value }))),
+  ];
+}
+
+function renderWhen() {
+  const slot = $('plan-when');
+  if (!slot) return;
+  clear(slot,
+    h('button', {
+      class: 'when-chip', 'aria-expanded': String(whenOpen),
+      onclick: () => { showWhen(!whenOpen); renderWhen(); },
+    }, icon('clock', 15), h('span', { id: 'when-label' }, whenLabel()), icon('down', 12)),
+    h('span', { id: 'near-stops' }),
+    whenOpen && h('div', { class: 'when-panel' },
+      segments([['now', t('現在出發', 'Leave now')], ['depart', t('出發時間', 'Leave at')], ['arrive', t('抵達時間', 'Arrive by')]], state.when?.mode ?? 'now', chooseWhen),
+      state.when && whenPicker()));
+  renderNearStops();
+}
+
+/** Beside the time, and apart from it, so that planning again leaves a half-picked time alone. */
+function renderNearStops() {
+  const slot = $('near-stops');
+  if (slot) clear(slot, state.to && h('button', { class: 'when-chip', onclick: () => showStopsNear(state.to) }, icon('bus', 15), t('目的地附近站點', 'Stops near destination')));
+}
+
+function showStopsNear(place) {
+  state.stopQuery = place.name;
+  setTab('stops');
+  searchStops(false, place);
 }
 
 function journeyCard(journey) {
   const id = journeyID(journey), isOpen = state.expanded === id, isNavigating = state.nav?.id === id;
   const shown = journey.legs.filter((leg) => leg.type === 'ride' || leg.minutes >= 0.5);
   const changes = transfers(journey);
-  const arrive = clock(journey.departure + totalMinutes(journey) * 60_000);
+  const arrive = clock(arrivalTime(journey));
   return h('div', { class: `card${isOpen ? ' open' : ''}${state.justOpened === id ? ' reveal' : ''}`, 'data-journey': id },
     h('button', {
       class: 'tap', 'aria-expanded': String(isOpen), onclick: () => {
@@ -1941,7 +2162,7 @@ function journeyCard(journey) {
         h('span', { class: 'small muted' }, t('分鐘', 'min')),
         h('span', { class: 'grow' }),
         rides(journey).some((ride) => ride.liveDeparture) && h('span', { class: 'row tiny live bold', style: 'gap:6px' }, h('i', { class: 'pulse' }), t('實時', 'Live')),
-        h('span', { class: 'small muted' }, t(`${arrive} 到達`, `Arrive ${arrive}`))),
+        h('span', { class: `small ${arrivesLate(journey) ? 'late' : 'muted'}` }, state.when ? `${clock(journey.departure)} – ${arrive}` : t(`${arrive} 到達`, `Arrive ${arrive}`))),
       h('div', { class: 'chips', style: 'margin-top:9px' }, shown.flatMap((leg, index) => [
         index > 0 && icon('next', 13),
         leg.type === 'walk' ? h('span', { class: 'walk' }, icon('walk', 15), Math.max(1, Math.round(leg.minutes))) : badge(leg.op, leg.route),
@@ -2063,16 +2284,21 @@ function planSheet() {
     return items;
   }
   items.push(h('div', { id: 'plan-stop' }, planStopCard()));
-  if (PHASES[state.phase]) items.push(h('div', { class: 'status' }, h('span', { class: 'spinner' }), PHASES[state.phase]()));
+  // While the AI thinks, its card says so.
+  if (PHASES[state.phase] && !(state.phase === 'understanding' && state.thread)) items.push(h('div', { class: 'status' }, h('span', { class: 'spinner' }), PHASES[state.phase]()));
   if (PHASES[state.phase] && !state.journeys.length) items.push(h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }));
-  if (state.error) items.push(h('div', { class: 'notice' }, state.error));
+  if (state.error && !state.thread?.reply) items.push(h('div', { class: 'notice' }, state.error));
+  const best = state.journeys[0];
+  if (best && arrivesLate(best)) items.push(h('div', { class: 'notice' }, t(`${clock(best.arriveBy)} 前趕不及，最快約 ${clock(arrivalTime(best))} 到達。`, `You can't make it by ${clock(best.arriveBy)}. The earliest is about ${clock(arrivalTime(best))}.`)));
   if (state.journeys.length) {
     items.push(segments([['fastest', t('最快', 'Fastest')], ['fewerTransfers', t('少轉車', 'Fewer changes')], ['lessWalking', t('少行路', 'Less walking')]], state.preference, (preference) => {
       state.preference = preference;
       state.journeys = [...state.journeys].sort((a, b) => score(a, preference) - score(b, preference));
+      writeAdvice();
       renderSheet();
-      showAdvice();
     }));
+    // The AI's card already sums up a trip it was asked for.
+    if (state.explanation && !state.thread) items.push(h('div', { class: 'advice' }, state.explanation));
   }
   if (state.discovery?.stage === 'choosing') {
     if (state.journeys.length || state.phase !== 'idle') {
@@ -2082,60 +2308,70 @@ function planSheet() {
     }
   }
   items.push(state.journeys.map(journeyCard));
-  if (!state.routeView && !state.discovery && state.phase === 'idle') items.push(state.destination.trim() && state.db ? placeSuggestions() : homeSheet());
+  const isWaitingForAnswer = state.discovery?.stage === 'asking';
+  if (!state.routeView && (!state.discovery || isWaitingForAnswer) && state.phase === 'idle') items.push(state.destination.trim() && state.db ? placeSuggestions() : homeSheet());
   return items;
 }
 
+/** The AI's turn in the conversation; null while it only has a question to add. */
+function answer(reply) {
+  if (!state.thread?.busy) return;
+  state.thread = { said: state.thread.said, reply };
+  renderBottomStatus();
+}
+
+function endChat() {
+  if (state.discovery?.stage === 'asking') state.discovery = null;
+  state.thread = null;
+  state.talk = [];
+  renderBottomStatus();
+  renderSheet();
+}
+
+/** One card for the last exchange: what the rider said, then the answer. The results are in the sheet. */
 function renderBottomStatus() {
   const slot = $('ai-status');
   if (!slot) return;
   const wish = state.discovery?.stage === 'asking' ? state.discovery.wish : null;
-  let area = null;
-  if (wish) {
-    // The AI's own question, or just "where?" when the search couldn't find the rider.
-    const question = wish.question ?? t(`想找${wish.want}，要在哪裡找？`, `Where should I look for ${wish.want}?`);
-    const options = wish.question ? wish.options : [t('附近', 'Nearby'), '旺角', '銅鑼灣', '尖沙咀', '中環'];
-    area = h('div', { class: 'area' },
-      h('div', { class: 'row' }, icon('spark', 17), h('span', { class: 'bold grow' }, question),
-        h('button', { 'aria-label': t('取消', 'Cancel'), class: 'muted', onclick: () => { state.discovery = null; renderBottomStatus(); renderChatControls(); renderSheet(); } }, icon('close', 17))),
-      options.length > 0 && h('div', { class: 'choices' }, options.map((option) => h('button', { onclick: () => askAI(option) }, option))),
-      h('div', { class: 'tiny muted' }, t('也可以在下方直接輸入', 'Or type your answer below')));
-  }
+  // The AI's own question, or just "where?" when the search couldn't find the rider.
+  const question = wish && (wish.question ?? t(`想找${wish.want}，要在哪裡找？`, `Where should I look for ${wish.want}?`));
+  const options = wish ? (wish.question ? wish.options : [t('附近', 'Nearby'), '旺角', '銅鑼灣', '尖沙咀', '中環']) : [];
+  const { said, reply, busy } = state.thread ?? {}, text = [reply, question].filter(Boolean).join(' ');
+  const isNew = !slot.querySelector('.ai-card');
   clear(slot,
-    state.explanation && h('div', { class: 'reply' }, h('span', {}, state.explanation)),
-    state.aiNotice && h('div', { class: 'tiny muted' }, state.aiNotice),
-    area);
+    (said || text) && h('div', { class: `ai-card${isNew ? ' fresh' : ''}` },
+      h('i', { class: 'ai-mark' }, icon('spark', 15, true)),
+      h('div', { class: 'ai-body' },
+        said && h('div', { class: 'ai-said ellipsis' }, said),
+        busy ? h('div', { class: 'typing', role: 'status', 'aria-label': t('AI 正在回覆', 'AI is replying') }, h('i'), h('i'), h('i')) : h('div', { class: 'ai-text' }, text),
+        !busy && options.length > 0 && h('div', { class: 'choices' }, options.map((option) => h('button', { onclick: () => askAI(option) }, option))),
+        state.aiNotice && h('div', { class: 'tiny muted' }, state.aiNotice)),
+      !busy && h('button', { class: 'ai-close', 'aria-label': t('結束對話', 'End conversation'), onclick: endChat }, icon('close', 13))),
+    !said && !text && state.aiNotice && h('div', { class: 'tiny muted' }, state.aiNotice));
   renderChatControls();
 }
 
 const speechLabels = () => ({ 'zh-HK': t('粵語', 'Cantonese'), 'zh-CN': t('普通話', 'Mandarin'), 'en-US': 'English' });
 
 function renderPlanBottom() {
-  const hasAI = !!client(), labels = speechLabels();
-  const speechButton = Recognition && h('button', {
-    class: 'lang', onclick: (event) => {
-      const order = Object.keys(labels);
-      state.speechLang = order[(order.indexOf(state.speechLang) + 1) % order.length];
-      store.set('speechLang', state.speechLang);
-      event.target.textContent = labels[state.speechLang];
-    },
-  }, labels[state.speechLang]);
   clear($('bottom'),
-    h('div', { id: 'ai-status', style: 'display:flex;flex-direction:column;gap:4px' }),
+    h('div', { id: 'ai-status' }),
     h('div', { id: 'chat-history' }),
-    h('div', { class: 'field' },
-      h('span', { class: hasAI ? 'ai' : 'muted' }, icon('spark', 18)),
+    h('div', { id: 'composer', class: `field composer${Recognition ? '' : ' no-mic'}${state.chat.trim() ? ' typing' : ''}` },
+      h('span', { class: client() ? 'ai' : 'muted' }, icon('spark', 18)),
       h('input', {
         id: 'chat-input', value: state.chat, placeholder: chatPrompt(), enterkeyhint: 'send', autocomplete: 'off',
-        oninput: (event) => { state.chat = event.target.value; },
+        oninput: (event) => {
+          state.chat = event.target.value;
+          syncComposer();
+        },
         onfocus: () => renderChatHistory(true),
         onblur: () => setTimeout(() => renderChatHistory(false), 150),
         onkeydown: (event) => { if (event.key === 'Enter') sendChat(); },
       }),
-      speechButton,
       Recognition && h('button', { id: 'mic', class: 'icon-button', 'aria-label': t('語音輸入', 'Voice input'), onclick: toggleSpeech }, icon('mic', 20)),
-      h('button', { class: 'go', 'aria-label': t('傳送', 'Send'), onclick: sendChat }, icon('send', 19))),
-    !hasAI && h('div', { class: 'tiny muted', style: 'padding:0 6px' }, t('AI 未連接，現時使用基本解析。', 'AI isn\'t connected, using basic parsing.')));
+      h('button', { class: 'go', 'aria-label': t('傳送', 'Send'), onmousedown: (event) => event.preventDefault(), onclick: sendChat }, icon('send', 19))),
+    !client() && h('div', { class: 'tiny muted', style: 'padding:0 6px' }, t('AI 未連接，現時使用基本解析。', 'AI isn\'t connected, using basic parsing.')));
   renderBottomStatus();
 }
 
@@ -2232,46 +2468,121 @@ function renderRoutesTop() {
   clear($('top'), viewHeader(t('路線', 'Routes')),
     h('label', { class: 'search-card single' }, h('span', { class: 'muted' }, icon('search', 19)), h('input', {
       id: 'route-input', value: state.routeQuery, placeholder: t('搜尋路線，例如 1A、960、505', 'Search routes, e.g. 1A, 960, 505'), enterkeyhint: 'search', autocomplete: 'off',
+      inputmode: state.routeKeyboard ? 'text' : 'none',
+      onfocus: () => { if (state.routeKey) leaveRoute(); },
       oninput: (event) => {
         state.routeQuery = event.target.value;
         state.routeKey = null;
         renderSheet();
         if (state.focus) leaveFocus();
       },
-      onkeydown: (event) => { if (event.key === 'Enter') { history.add('routes', state.routeQuery); event.target.blur(); } },
-    })),
-    historyBar('routes', (text) => {
-      state.routeQuery = text;
-      state.routeKey = null;
-      $('route-input').value = text;
-      renderSheet();
-    }));
+      onkeydown: (event) => { if (event.key === 'Enter') event.target.blur(); },
+    }),
+    h('button', {
+      class: `icon-button${state.routeKeyboard ? ' on' : ''}`, 'aria-label': t('用系統鍵盤輸入', 'Type with the system keyboard'), 'aria-pressed': String(state.routeKeyboard),
+      onclick: (event) => {
+        event.preventDefault();
+        state.routeKeyboard = !state.routeKeyboard;
+        renderRoutesTop();
+        renderRoutePad();
+        if (state.routeKeyboard) $('route-input').focus();
+      },
+    }, icon('keyboard', 20))));
 }
 
-function routesSheet() {
-  if (!state.db) return h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('正在載入路線資料…', 'Loading route data…'));
-  if (state.routeKey) {
-    const route = state.db.routes[state.routeKey];
-    return routeDetail(route, route.operators[0], () => {
-      state.routeKey = null;
-      renderSheet();
-      leaveFocus();
-    });
-  }
-  const routes = searchRoutes(state.db, state.routeQuery);
-  if (!state.routeQuery.trim()) return h('div', { class: 'small muted' }, t('輸入路線號碼，查看沿線站點及到站時間。按星號可收藏常用車站。', 'Type a route number to see its stops and arrivals. Press the star to save a stop.'));
-  if (!routes.length) return h('div', { class: 'small muted' }, t('找不到這條路線。', 'No such route.'));
-  return routes.map((route) => h('button', {
+/** Back from a route's stops to the search, with room for the keypad. */
+function leaveRoute() {
+  state.routeKey = null;
+  state.focus = null;
+  renderSheet();
+  leaveFocus();
+  sheet.snap('full');
+}
+
+function typeRoute(text) {
+  state.routeQuery = text;
+  $('route-input').value = text;
+  $('sheet').scrollTop = 0;
+  renderSheet();
+}
+
+const LETTERS_SHOWN = 8;
+
+/** Only keys that lead to a real route work: most routes are three or four presses away. */
+function renderRoutePad() {
+  if (state.tab !== 'routes') return;
+  if (!state.db || state.routeKey || state.focus || state.routeKeyboard) return clear($('bottom'));
+  const query = state.routeQuery, next = nextRouteKeys(state.db, query), keepFocus = (event) => event.preventDefault();
+  const key = (text, kind = '') => h('button', { class: `key ${kind}`, disabled: !next.has(text), onmousedown: keepFocus, onclick: () => typeRoute(query + text) }, text);
+  const letters = [...next].filter((text) => /[A-Z]/.test(text)).sort();
+  const action = (label, symbol, press) => h('button', { class: 'key action', 'aria-label': label, disabled: !query, onmousedown: keepFocus, onclick: press }, symbol);
+  clear($('bottom'), h('div', { class: 'route-pad' },
+    h('div', { class: 'digits' }, [...'123456789'].map((digit) => key(digit)),
+      action(t('清除', 'Clear'), icon('close', 20), () => typeRoute('')),
+      key('0'),
+      action(t('刪除', 'Delete'), icon('backspace', 22), () => typeRoute(query.slice(0, -1)))),
+    h('div', { class: `letters no-drag${letters.length > LETTERS_SHOWN ? ' more' : ''}` }, letters.map((letter) => key(letter, 'letter')))));
+}
+
+const MOST_RECENT_ROUTES = 12;
+
+function keepRecentRoutes(keys) {
+  state.recentRoutes = keys.slice(0, MOST_RECENT_ROUTES);
+  store.set('recentRoutes', state.recentRoutes);
+}
+
+/** A route is kept once, in the direction last looked at. */
+function rememberRoute(route) {
+  const { routes } = routeFamily(state.db, route);
+  keepRecentRoutes([route.key, ...state.recentRoutes.filter((key) => !routes.some((other) => other.key === key))]);
+}
+
+function routeCard(main) {
+  const { opposite } = routeWays(state.db, main), { routes } = routeFamily(state.db, main);
+  const end = nameText(main.dest, state.lang);
+  return h('button', {
     class: 'card tap', onclick: () => {
-      history.add('routes', state.routeQuery);
+      const route = routes.find((other) => state.recentRoutes.includes(other.key)) ?? main;
+      rememberRoute(route);
       state.routeKey = route.key;
       renderSheet();
       $('sheet').scrollTop = 0;
       focusRoute(route.key, route.operators[0]);
     },
-  }, h('div', { class: 'row' }, badge(route.operators[0], route.route),
-    h('div', { class: 'grow' }, h('div', { class: 'small bold ellipsis' }, `→ ${nameText(route.dest, state.lang)}`),
-      h('div', { class: 'tiny muted' }, `${route.operators.map((op) => OP_LABELS[op]).join(' · ')}${route.serviceType === '1' ? '' : t(' · 特別班', ' · Special')}`)))));
+  }, h('div', { class: 'row' }, badge(main.operators[0], main.route),
+    h('div', { class: 'grow', style: 'min-width:0' }, h('div', { class: 'small bold ellipsis' }, opposite ? `${nameText(main.orig, state.lang)} ⇄ ${end}` : `→ ${end}`),
+      h('div', { class: 'tiny muted ellipsis' }, main.operators.map((op) => OP_LABELS[op]).join(' · ')))));
+}
+
+function recentRoutes() {
+  const routes = [...new Set(state.recentRoutes.flatMap((key) => (state.db.routes[key] ? routeFamily(state.db, state.db.routes[key]).main : [])))];
+  if (!routes.length) return h('div', { class: 'small muted' }, t('輸入路線號碼，查看沿線站點及到站時間。按星號可收藏常用車站。', 'Type a route number to see its stops and arrivals. Press the star to save a stop.'));
+  return [
+    h('div', { class: 'section' }, h('span', {}, t('最近查看', 'Recent')),
+      h('button', { class: 'link', onclick: () => { keepRecentRoutes([]); renderSheet(); } }, t('清除', 'Clear'))),
+    routes.map((route) => h('div', { class: 'route-row' }, routeCard(route),
+      h('button', {
+        class: 'ai-close', 'aria-label': t('移除', 'Remove'),
+        onclick: () => {
+          const { routes: family } = routeFamily(state.db, route);
+          keepRecentRoutes(state.recentRoutes.filter((key) => !family.some((other) => other.key === key)));
+          renderSheet();
+        },
+      }, icon('close', 13)))),
+  ];
+}
+
+function routesSheet() {
+  renderRoutePad();
+  if (!state.db) return h('div', { class: 'status' }, h('span', { class: 'spinner' }), t('正在載入路線資料…', 'Loading route data…'));
+  if (state.routeKey) {
+    const route = state.db.routes[state.routeKey];
+    return routeDetail(route, state.focus?.op ?? route.operators[0], leaveRoute);
+  }
+  if (!state.routeQuery.trim()) return recentRoutes();
+  const routes = searchRoutes(state.db, state.routeQuery);
+  if (!routes.length) return h('div', { class: 'small muted' }, t('找不到這條路線。', 'No such route.'));
+  return routes.map(routeCard);
 }
 
 function stopRow(route, seq, id, op, dot) {
@@ -2422,7 +2733,7 @@ function clearButton(label, count, clearAll) {
 }
 
 function settingsSheet() {
-  const searches = Object.values(store.get('history', {})).flat().length;
+  const searches = Object.values(store.get('history', {})).flat().length + state.recentRoutes.length;
   return [
     settingGroup(t('一般', 'General'),
       setting(t('語言', 'Language'), segments([['hant', '繁體中文'], ['hans', '简体中文'], ['en', 'English']], state.lang === 'en' ? 'en' : state.script, (choice) => {
@@ -2450,7 +2761,10 @@ function settingsSheet() {
       h('div', { class: 'tiny muted' }, t('每人每日有使用上限，用完後會直接用 Google 搜尋，不影響查路線。', 'Everyone has a daily limit. After it, searches go straight to Google, and routes still work.'))),
     settingGroup(t('我的資料', 'My data'),
       h('div', { class: 'setting inline' }, h('span', {}, t(`搜尋記錄（${searches}）`, `Search history (${searches})`)),
-        clearButton(t('清除', 'Clear'), searches, () => store.set('history', {}))),
+        clearButton(t('清除', 'Clear'), searches, () => {
+          store.set('history', {});
+          keepRecentRoutes([]);
+        })),
       h('div', { class: 'setting inline' }, h('span', {}, t(`收藏（${state.saved.length}）`, `Saved (${state.saved.length})`)),
         clearButton(t('清除', 'Clear'), state.saved.length, () => {
           state.saved = [];
@@ -2501,7 +2815,7 @@ const sheet = {
     // The whole sheet is a handle. Once it is full, the list scrolls instead.
     panel.addEventListener('pointerdown', (event) => {
       swallowClick = false;
-      if (event.button !== 0 || !grabber.offsetParent || event.target === document.activeElement) return;
+      if (event.button !== 0 || !grabber.offsetParent || event.target === document.activeElement || event.target.closest?.('.no-drag')) return;
       if (this.current === 'full' && list.contains(event.target)) return;
       fromGrabber = grabber.contains(event.target);
       startX = event.clientX;

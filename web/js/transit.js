@@ -44,6 +44,9 @@ export const walkMinutes = (meters) => (meters * SETTINGS.walkDetour) / SETTINGS
 
 const SPEED_KMH = { kmb: 17, ctb: 17, nlb: 20, gmb: 20, lightRail: 18, mtr: 38 };
 const HEADWAY = { kmb: 15, ctb: 15, nlb: 20, gmb: 10, lightRail: 6, mtr: 4 };
+// Rail has no timetable in the data, and it stops overnight: about 05:30 to 01:00.
+const railBand = (op) => [{ start: 330, end: 60, headway: HEADWAY[op] * 60 }];
+const RAIL_HOURS = { mtr: railBand('mtr'), lightRail: railBand('lightRail') };
 const dwell = (op) => (op === 'mtr' ? 0.5 : 0.4);
 
 export function meters(a, b) {
@@ -229,10 +232,11 @@ class WaitEstimator {
   }
   wait(p, position, minutesAfterDeparture) {
     const pattern = this.network.patterns[p];
-    if (!pattern.frequency) return HEADWAY[pattern.op] / 2;
+    const hours = RAIL_HOURS[pattern.op];
+    if (!pattern.frequency && !hours) return HEADWAY[pattern.op] / 2;
     let t = (this.clock.minuteOfDay + minutesAfterDeparture - pattern.offsets[position]) % 1440;
     if (t < 0) t += 1440;
-    return waitFromBands(this.bands(p), t, SETTINGS.maxWaitMinutes);
+    return waitFromBands(pattern.frequency ? this.bands(p) : hours, t, SETTINGS.maxWaitMinutes);
   }
   bands(p) {
     if (this.cache.has(p)) return this.cache.get(p);
@@ -254,11 +258,15 @@ export const totalMinutes = (journey) => journey.legs.reduce((total, leg) => tot
 export const walkingMeters = (journey) => journey.legs.reduce((total, leg) => total + (leg.type === 'walk' ? leg.meters : 0), 0);
 const walkingMinutes = (journey) => journey.legs.reduce((total, leg) => total + (leg.type === 'walk' ? leg.minutes : 0), 0);
 export const transfers = (journey) => Math.max(0, rides(journey).length - 1);
+export const arrivalTime = (journey) => journey.departure + totalMinutes(journey) * 60_000;
+export const arrivesLate = (journey) => journey.arriveBy != null && arrivalTime(journey) > journey.arriveBy;
 export const journeyID = (journey) => rides(journey).map((r) => `${r.op}|${r.route}@${r.boardStopID}>${r.alightStopID}`).join(',') || 'walk';
 
-/** Lower is better. Weights are in "minutes the rider would trade". */
+const LATE_PENALTY = 100_000;
+
+/** Lower is better. Weights are in "minutes the rider would trade". A late arrival never beats an on-time one. */
 export function score(journey, preference) {
-  const minutes = totalMinutes(journey), changes = transfers(journey);
+  const minutes = totalMinutes(journey) + (arrivesLate(journey) ? LATE_PENALTY : 0), changes = transfers(journey);
   if (preference === 'fewerTransfers') return minutes + changes * 12;
   if (preference === 'lessWalking') return minutes + walkingMinutes(journey) * 1.5 + changes * 3;
   return minutes + changes * 2;
@@ -278,6 +286,7 @@ export function planAdvice(journeys, t, lineOf, now) {
     `建議第一個方案：全程 ${minutes} 分鐘，${changes ? `轉 ${changes} 次車` : '直達'}，步行 ${walk} 米。`,
     `Best option: ${minutes} min, ${changes ? `${changes} change${changes > 1 ? 's' : ''}` : 'direct'}, ${walk} m on foot.`,
   )];
+  if (best.arriveBy != null && !arrivesLate(best)) lines.push(t('出發時間已預留最長的候車時間。', 'The start time allows for the longest wait.'));
   const first = rides(best)[0];
   if (first?.liveDeparture && !first.isProjected) {
     const wait = Math.max(0, Math.floor((first.liveDeparture - now) / 60_000)), line = lineOf(first);
@@ -471,9 +480,31 @@ export function plan(network, origin, destination, departure, preference = 'fast
   return rank(found, preference, limit);
 }
 
+/**
+ * Only headways are known, so a bus could be a full headway away: the average wait in the journey
+ * is counted twice, and the rider who leaves then is on time even after the longest wait.
+ */
+const latestStart = (journey, arriveBy) => arriveBy - (totalMinutes(journey) + rides(journey).reduce((total, ride) => total + ride.waitMinutes, 0)) * 60_000;
+
+/** Journeys that reach the destination by `arriveBy`. One that cannot leaves `now` and shows as late. */
+export function planArriving(network, origin, destination, arriveBy, now, preference = 'fastest', limit = 5) {
+  let found = [];
+  // Which buses run depends on the hour, so first find about when to leave, then plan from there.
+  for (const minutes of [45, 15, 90]) {
+    found = plan(network, origin, destination, arriveBy - minutes * 60_000, preference, limit);
+    if (found.length) break;
+  }
+  if (found.length) {
+    const closer = plan(network, origin, destination, latestStart(found[0], arriveBy), preference, limit);
+    if (closer.length) found = closer;
+  }
+  return found.map((journey) => ({ ...journey, departure: Math.max(now, latestStart(journey, arriveBy)), arriveBy }));
+}
+
 // MARK: Live ETAs
 
 export const MAX_PROJECTION_MINUTES = 60;
+export const LIVE_AHEAD_MS = 30 * 60_000; // Further off, today's arrivals say nothing about the trip.
 
 /**
  * The first departure the rider can catch. Rail feeds stop after about four
@@ -521,7 +552,7 @@ export async function retime(journey, arrivals) {
     clock = atStop + (ride.waitMinutes + ride.rideMinutes) * 60_000;
     legs.push(ride);
   }
-  return { legs, departure: journey.departure };
+  return { ...journey, legs };
 }
 
 /** False for a train that ends before the rider's stop or takes the other branch. */
@@ -997,11 +1028,92 @@ export function partialSite(query, index) {
 }
 
 /** Route keys whose number starts with the search text, in natural order. */
+/** What can follow `query` in a real route number, so a keypad offers nothing that leads nowhere. */
+export function nextRouteKeys(db, query) {
+  const prefix = query.trim().toUpperCase(), keys = new Set();
+  for (const { route } of Object.values(db.routes)) {
+    const number = route.toUpperCase(), key = number[prefix.length];
+    if (key && /[0-9A-Z]/.test(key) && number.startsWith(prefix)) keys.add(key);
+  }
+  return keys;
+}
+
+const SAME_TERMINUS_METERS = 600;
+
+const terminiOf = (route, db) => {
+  const ids = route.stops[route.operators[0]] ?? [];
+  return { from: db.stops[ids[0]]?.location, to: db.stops[ids.at(-1)]?.location };
+};
+const isNear = (a, b) => !!a && !!b && meters(a, b) <= SAME_TERMINUS_METERS;
+
+/** Minibuses reuse numbers across the territory, so a shared number alone doesn't make one route. */
+function isSameRoute(a, b, db) {
+  if (!a.operators.some((op) => b.operators.includes(op))) return false;
+  if (a.gtfsId && a.gtfsId === b.gtfsId) return true;
+  const x = terminiOf(a, db), y = terminiOf(b, db);
+  return isNear(x.from, y.from) || isNear(x.from, y.to) || isNear(x.to, y.from) || isNear(x.to, y.to);
+}
+
+/** Its ends lie closer swapped than as they are, which also holds for routes only a street long. */
+function isReverse(route, of, db) {
+  const x = terminiOf(route, db), y = terminiOf(of, db);
+  if (!x.from || !x.to || !y.from || !y.to) return false;
+  return meters(x.from, y.to) + meters(x.to, y.from) < meters(x.from, y.from) + meters(x.to, y.to);
+}
+
+/** Regular service first, then plain outbound (so not the 'OI' round trip of a route with both halves), then the fullest. */
+const routeRank = (a, b) => Number(a.serviceType) - Number(b.serviceType)
+  || Number(Object.values(a.bound)[0] !== 'O') - Number(Object.values(b.bound)[0] !== 'O')
+  || (b.stops[b.operators[0]]?.length ?? 0) - (a.stops[a.operators[0]]?.length ?? 0);
+
+const familiesOf = new WeakMap();
+
+function routeFamilies(db) {
+  if (familiesOf.has(db)) return familiesOf.get(db);
+  const byNumber = new Map(), families = new Map();
+  for (const route of Object.values(db.routes)) byNumber.set(route.route, [...(byNumber.get(route.route) ?? []), route]);
+  for (const routes of byNumber.values()) {
+    let groups = [];
+    for (const route of routes) {
+      const joined = groups.filter((group) => group.some((other) => isSameRoute(route, other, db)));
+      groups = [...groups.filter((group) => !joined.includes(group)), [route, ...joined.flat()]];
+    }
+    for (const group of groups) {
+      const sorted = [...group].sort(routeRank), family = { main: sorted[0], routes: sorted };
+      for (const route of group) families.set(route.key, family);
+    }
+  }
+  familiesOf.set(db, families);
+  return families;
+}
+
+/** Both directions of a route and its special services. `main` stands for them all. */
+export const routeFamily = (db, route) => routeFamilies(db).get(route.key);
+
+/** The services running the same way as `route`, and the regular one running the other way. */
+export function routeWays(db, route) {
+  const { main, routes } = routeFamily(db, route), isBack = (other) => other !== main && isReverse(other, main, db);
+  return { variants: routes.filter((other) => isBack(other) === isBack(route)), opposite: routes.find((other) => isBack(other) !== isBack(route)) ?? null };
+}
+
+/** The stop on a route closest to a place, if one is close: across the road, in the other direction. */
+export function closestPosition(route, op, location, db) {
+  let best = null, least = SAME_TERMINUS_METERS;
+  route.stops[op].forEach((id, position) => {
+    const here = db.stops[id]?.location, distance = here ? meters(here, location) : Infinity;
+    if (distance <= least) [best, least] = [position, distance];
+  });
+  return best;
+}
+
+/** One entry for each route, however many directions and special services it has. */
 export function searchRoutes(db, query, limit = 60) {
-  const prefix = query.trim().toUpperCase();
+  const prefix = query.trim().toUpperCase(), seen = new Set();
   if (!prefix) return [];
   return Object.values(db.routes)
     .filter((route) => route.route.toUpperCase().startsWith(prefix) || lineName(route.operators[0], route.route, 'zh').includes(query.trim()))
     .sort((a, b) => compare(a.route, b.route) || a.serviceType.localeCompare(b.serviceType))
+    .map((route) => routeFamily(db, route).main)
+    .filter((route) => !seen.has(route.key) && seen.add(route.key))
     .slice(0, limit);
 }

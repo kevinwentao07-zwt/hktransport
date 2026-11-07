@@ -141,7 +141,13 @@ First decide whether "Rider says" continues them or starts something new:
 - Asking how to get to a shop on screen, e.g. 第一間點去, 去第二間, 呢間點去: reply with a trip whose
   destination is that shop's exact name from the list, and origin null.
 - A new subject, e.g. 去機場 while looking at ramen shops, or 我想買手機: ignore the conversation, the
-  search and the trip completely.`;
+  search and the trip completely.
+
+If the message is neither a trip nor a search for somewhere, e.g. the weather, small talk or a question
+about you, reply with this JSON object instead:
+{"kind": "say", "text": string}
+- text is one or two short, friendly sentences in the rider's language, saying you can plan a trip or
+  find places, with one example. Never answer the question itself, and never give facts, times or fares.`;
 
 export const rankPrompt = (lang) => `You put shops in Hong Kong in order for a rider, best first, and say why.
 Reply with one JSON object and nothing else:
@@ -179,6 +185,10 @@ export function decodeIntent(reply) {
 /** A trip request ({trip}), or a request to find somewhere ({wish}). */
 export function decodeChat(reply) {
   const object = jsonObject(reply);
+  if (object?.kind === 'say') {
+    const say = clean(object.text);
+    return say ? { say } : null;
+  }
   if (object?.kind !== 'discover') {
     const trip = decodeIntent(reply);
     return trip ? { trip } : null;

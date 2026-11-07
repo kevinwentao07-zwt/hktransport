@@ -68,20 +68,18 @@ export async function googlePlaceLocation(id) {
 }
 
 /**
- * Stops and places as one list, nearest first, and anything of unknown distance last.
- * Each kind keeps half the list when it has that many, so neither crowds out the other.
+ * Places, then stops, each nearest first with anything of unknown distance last. A stop named
+ * like a place gives way to it, and each kind keeps half the list when it has that many.
  */
 export function mergeSuggestions(stops, places, limit = 10) {
-  const away = (item) => item.meters ?? Infinity;
-  const seen = new Set(), isStop = new Set(stops);
-  const once = [...stops, ...places].sort((a, b) => away(a) - away(b)).filter((item) => {
+  const away = (item) => item.meters ?? Infinity, seen = new Set();
+  const once = (items) => [...items].sort((a, b) => away(a) - away(b)).filter((item) => {
     const name = item.name.replace(/\s/g, '');
     return !seen.has(name) && seen.add(name);
   });
-  const stopsLeft = once.filter((item) => isStop.has(item)), placesLeft = once.filter((item) => !isStop.has(item));
+  const placesLeft = once(places), stopsLeft = once(stops);
   const stopRoom = Math.min(stopsLeft.length, Math.max(Math.ceil(limit / 2), limit - placesLeft.length));
-  const kept = new Set([...stopsLeft.slice(0, stopRoom), ...placesLeft.slice(0, limit - stopRoom)]);
-  return once.filter((item) => kept.has(item));
+  return [...placesLeft.slice(0, limit - stopRoom), ...stopsLeft.slice(0, stopRoom)];
 }
 
 const shapes = new Map();

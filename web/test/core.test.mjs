@@ -346,7 +346,7 @@ test('joint routes take the line of KMB\'s direction, whichever operator is on s
 });
 test('stops and places mix from near to far, once each', () => {
   const merged = P.mergeSuggestions([{ name: '旺角站', meters: 300 }, { name: '朗豪坊', meters: 90 }], [{ name: '朗豪坊', meters: 80 }, { name: '遠方' }, { name: '始創中心', meters: 150 }]);
-  assert.deepEqual(merged.map((item) => item.name), ['朗豪坊', '始創中心', '旺角站', '遠方']);
+  assert.deepEqual(merged.map((item) => item.name), ['朗豪坊', '始創中心', '遠方', '旺角站']);
   assert.equal(merged[0].meters, 80);
   assert.equal(P.mergeSuggestions([{ name: 'a', meters: 1 }, { name: 'b', meters: 2 }], [], 1).length, 1);
   // Shops stay on the list however many stops match, near or not, and either kind fills spare room.
@@ -395,4 +395,72 @@ test('the shared AI sends a task name and the text, never a prompt or a key', as
   assert.equal(sent[0].headers.Authorization, undefined);
   globalThis.fetch = async () => ({ ok: false, status: 429, json: async () => ({ error: '太頻繁' }) });
   await assert.rejects(A.sharedAI().chat('去中環'), /太頻繁/);
+});
+
+test('arriving by a time leaves early enough for the longest wait', () => {
+  const by = noon + 3_600_000, [journey] = T.planArriving(network, at('A'), at('C'), by, noon);
+  const waits = T.rides(journey).reduce((total, ride) => total + ride.waitMinutes, 0);
+  assert.equal(journey.arriveBy, by);
+  close(journey.departure, by - (T.totalMinutes(journey) + waits) * 60_000, 1);
+  assert.ok(waits > 0 && T.arrivalTime(journey) < by && !T.arrivesLate(journey));
+});
+
+test('a trip that cannot arrive in time leaves now, shows as late, and ranks after one on time', async () => {
+  const [late] = T.planArriving(network, at('A'), at('C'), noon + 60_000, noon);
+  assert.equal(late.departure, noon);
+  assert.ok(T.arrivesLate(late));
+  const onTime = { ...late, departure: noon - 7_200_000 };
+  assert.ok(T.score(onTime, 'fastest') < T.score(late, 'fastest'));
+  assert.equal((await T.retime(late, async () => null)).arriveBy, late.arriveBy);
+});
+
+test('no service at the time means no journey, leaving or arriving', () => {
+  const late = Date.parse('2026-11-04T23:30:00+08:00');
+  assert.deepEqual(T.planArriving(network, at('G'), at('H'), noon + 3_600_000, noon).filter((journey) => journey.legs.some((leg) => leg.route === 'N1')), []);
+  assert.ok(T.plan(network, at('G'), at('H'), late).some((journey) => T.rides(journey).some((ride) => ride.route === 'N1')));
+});
+
+test('rail has no timetable but still stops overnight', () => {
+  const rides = (when) => T.plan(network, at('AAA'), at('BBB'), Date.parse(when)).filter((journey) => T.rides(journey).length);
+  assert.equal(rides('2026-11-04T03:00:00+08:00').length, 0);
+  assert.ok(rides('2026-11-04T08:00:00+08:00').length > 0);
+  assert.ok(rides('2026-11-04T05:20:00+08:00').length > 0); // The first train is only minutes away.
+});
+
+test('the route keypad only offers what leads to a route', () => {
+  assert.deepEqual([...T.nextRouteKeys(db, '')].sort(), ['1', '2', 'N', 'X', 'Z']);
+  assert.deepEqual([...T.nextRouteKeys(db, 'n')], ['1']);
+  assert.equal(T.nextRouteKeys(db, 'N1').size, 0);
+  assert.equal(T.nextRouteKeys(db, '9').size, 0);
+});
+
+test('small talk comes back as words, not a trip', () => {
+  assert.deepEqual(A.decodeChat('{"kind":"say","text":"我可以幫你規劃路線。"}'), { say: '我可以幫你規劃路線。' });
+  assert.equal(A.decodeChat('{"kind":"say","text":" "}'), null);
+  assert.match(A.CHAT_PROMPT, /"kind": "say"/);
+});
+
+test('a route is one entry, with its other direction and special services behind it', () => {
+  const stop = (lat) => ({ name: { zh: `${lat}`, en: `${lat}` }, location: { lat, lng: 114 } });
+  const route = (number, co, serviceType, bound, stops, gtfsId = null) => ({
+    route: number, co: [co], orig: { zh: stops[0], en: stops[0] }, dest: { zh: stops.at(-1), en: stops.at(-1) }, serviceType, stops: { [co]: stops }, bound: { [co]: bound }, gtfsId,
+  });
+  const many = T.normalizeDB({
+    routeList: {
+      out: route('96', 'kmb', '1', 'O', ['a', 'm', 'b']), back: route('96', 'kmb', '1', 'I', ['b2', 'm2', 'a2']),
+      special: route('96', 'kmb', '2', 'O', ['c', 'b']), elsewhere: route('96', 'gmb', '1', 'O', ['x', 'y']), far: route('77', 'gmb', '1', 'O', ['x', 'y']),
+      far2: route('77', 'gmb', '1', 'O', ['p', 'q']), loop: route('8', 'kmb', '1', 'O', ['a', 'b', 'a']),
+    },
+    stopList: { a: stop(22.3), a2: stop(22.3005), m: stop(22.35), m2: stop(22.3505), b: stop(22.4), b2: stop(22.4005), c: stop(22.25), x: stop(22.5), y: stop(22.55), p: stop(22.1), q: stop(22.15) },
+  });
+  assert.deepEqual(T.searchRoutes(many, '96').map(({ key }) => key), ['out', 'elsewhere']);
+  assert.equal(T.searchRoutes(many, '77').length, 2); // A number reused far away is another route.
+  const out = many.routes.out, back = many.routes.back, special = many.routes.special;
+  assert.equal(T.routeWays(many, out).opposite, back);
+  assert.equal(T.routeWays(many, back).opposite, out);
+  assert.deepEqual(T.routeWays(many, out).variants, [out, special]);
+  assert.equal(T.routeWays(many, special).opposite, back);
+  assert.equal(T.routeWays(many, many.routes.loop).opposite, null);
+  assert.equal(T.closestPosition(back, 'kmb', many.stops.m.location, many), 1);
+  assert.equal(T.closestPosition(back, 'kmb', many.stops.x.location, many), null);
 });
