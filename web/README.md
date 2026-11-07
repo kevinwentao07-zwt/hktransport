@@ -1,12 +1,11 @@
 # hktransport web
 
-The phone version: a static page, published at <https://kevinwentao07-zwt.github.io/hktransport/>.
+The web app: a static page, live at <https://hk.52-220-124-215.sslip.io/>.
 
 Every data source allows direct browser calls, so only the AI goes through a server:
 route data from hkbus.app, arrivals from the operators, maps from Google on your own server and OpenFreeMap elsewhere, place
 search from Google on your own server and otherwise the Government and OpenStreetMap's Photon, and AI
-from DeepSeek. To find shops, the AI works out what to search for, Google finds them with their details,
-and the AI ranks them and says why.
+from DeepSeek. To find shops, the AI works out what to search for, and Google finds them with their details, in its own order.
 On your own server, `server/ai_proxy.py` holds the DeepSeek key and every visitor can use the AI.
 Without it, as on GitHub Pages, riders add their own key in Settings.
 
