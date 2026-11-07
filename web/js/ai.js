@@ -23,7 +23,8 @@ export function parseTrip(input) {
   for (const word of [...FEWER, ...LESS_WALK, ...FILLER]) {
     working = working.replace(new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ');
   }
-  working = strip(working);
+  // 改去中環 changes the destination: 改 isn't a place to start from.
+  working = strip(working).replace(/^(?:改|換|换|轉|转)\s*(?=去|到|往)/, '');
   const intent = (origin, destination) => {
     const end = (destination ?? '').trim();
     return end ? { origin: normalizedOrigin(origin), destination: end, preference } : null;
@@ -149,22 +150,8 @@ about you, reply with this JSON object instead:
 - text is one or two short, friendly sentences in the rider's language, saying you can plan a trip or
   find places, with one example. Never answer the question itself, and never give facts, times or fares.`;
 
-export const rankPrompt = (lang) => `You put shops in Hong Kong in order for a rider, best first, and say why.
-Reply with one JSON object and nothing else:
-{"ranking": [{"number": number, "reason": string}]}
-- Include every shop, using its number from the list. Shops that don't really fit go last.
-- Weigh how well it fits what the rider wants first, then the rating and how many people gave it,
-  then whether it is open now and how near it is. A high rating from very few people counts for less.
-- Give a reason for the top five only, and an empty reason for the rest.
-- reason is one or two short sentences saying why this shop is ranked here, using only the facts
-  given. Never invent ratings, prices, hours or dishes. If a fact is missing, don't mention it.
-- Speak to the person directly as 你, or not at all. Never call them 車手, 乘客 or a rider.
-${lang === 'zh' ? 'Write reasons in Traditional Chinese as used in Hong Kong.' : 'Write reasons in English.'}`;
-
-/** Every job the AI does. The server is sent a name from this list, never a prompt. */
 export const PROMPTS = {
   intent: INTENT_PROMPT, chat: CHAT_PROMPT,
-  rank_zh: rankPrompt('zh'), rank_en: rankPrompt('en'),
 };
 
 function jsonObject(reply) {
@@ -207,28 +194,6 @@ function decodeWish(object) {
   };
 }
 
-/** What Google knows about each shop, for the AI to rank. */
-export function rankMessage(wish, suggestions) {
-  const shops = suggestions.map(({ place }, index) => {
-    const facts = [place.kind, place.rating && `rating ${place.rating} from ${place.ratings ?? 0} people`, place.price,
-      place.open === true && 'open now', place.open === false && 'closed now', Number.isFinite(place.meters) && `${Math.round(place.meters)} m away`];
-    return `${index + 1}. ${place.name}: ${facts.filter(Boolean).join('; ')}`;
-  });
-  return [`Rider wants: ${wish.want}`, wish.extra && `Also wants: ${wish.extra}`, 'Shops:', ...shops].filter(Boolean).join('\n').slice(0, 3900);
-}
-
-/** The AI's order. A number it skips or repeats can't lose or double a shop. */
-export function applyRanking(reply, suggestions) {
-  const ranking = jsonObject(reply)?.ranking, used = new Set(), ranked = [];
-  for (const item of Array.isArray(ranking) ? ranking : []) {
-    const index = Number(item?.number) - 1;
-    if (!suggestions[index] || used.has(index)) continue;
-    used.add(index);
-    ranked.push({ ...suggestions[index], reason: clean(item.reason) || suggestions[index].reason });
-  }
-  return [...ranked, ...suggestions.filter((_, index) => !used.has(index))];
-}
-
 /** The AI this site's server provides, which holds the key. */
 export function sharedAI() {
   return assistant(async (task, message) => {
@@ -256,6 +221,5 @@ function assistant(complete) {
       if (!reply) throw new Error('DeepSeek reply was not valid trip JSON');
       return reply;
     },
-    rank: async (wish, suggestions, lang) => applyRanking(await complete(`rank_${lang}`, rankMessage(wish, suggestions)), suggestions),
   };
 }

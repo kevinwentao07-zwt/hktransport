@@ -30,7 +30,8 @@ PORT = int(os.environ.get('AI_PORT', '8787'))
 MODEL = os.environ.get('AI_MODEL', 'deepseek-flash')
 MAX_BODY = 32 * 1024
 MAX_MESSAGE = 4000
-MAX_TOKENS = 2000
+MAX_TOKENS = 600
+MAX_ANSWER_TEXT = 200
 PROMPTS = json.loads((Path(__file__).parent / 'prompts.json').read_text('utf-8'))
 
 
@@ -178,6 +179,22 @@ budget = Budget(
     Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'usage.json',
     {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 9000, 40), 'details': (30, 900, 12), 'suggest': (300, 9000, 60), 'place': (300, 9000, 60)},
 )
+
+
+def is_app_reply(answer):
+    """The app only reads short JSON, so anything else is someone using this as a free chatbot."""
+    try:
+        reply = json.loads(answer[answer.index('{'):answer.rindex('}') + 1])
+    except ValueError:
+        return False
+    return isinstance(reply, dict) and is_short(reply)
+
+
+def is_short(value):
+    if isinstance(value, str):
+        return len(value) <= MAX_ANSWER_TEXT
+    parts = value.values() if isinstance(value, dict) else value if isinstance(value, list) else []
+    return all(is_short(part) for part in parts)
 
 
 def api_key():
@@ -473,6 +490,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             answer, usage = ask_deepseek(system, message)
             spending.add(self.visitor(), cost_of(usage))
+            if not is_app_reply(answer):
+                return self.send(502, {'error': 'AI 暫時未能使用'})
             self.send(200, {'reply': answer})
         except urllib.error.HTTPError as error:
             print(f'DeepSeek returned {error.code}', file=sys.stderr, flush=True)

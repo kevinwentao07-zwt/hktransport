@@ -189,17 +189,6 @@ test('HK grid converts to WGS84', () => {
   close(langham.lat, 22.3177, 0.0008);
   close(langham.lng, 114.1684, 0.0008);
 });
-test('the AI ranks shops but can never lose or double one', () => {
-  const a = { place: { name: 'A', rating: 4.5, ratings: 900, meters: 120.4, open: true, kind: '拉麵店' } };
-  const b = { place: { name: 'B', meters: 50 } }, c = { place: { name: 'C' } };
-  const message = A.rankMessage({ want: '拉麵', extra: '要平' }, [a, b]);
-  assert.match(message, /1\. A: 拉麵店; rating 4\.5 from 900 people; open now; 120 m away/);
-  assert.match(message, /Also wants: 要平/);
-  const ranked = A.applyRanking('{"ranking":[{"number":2,"reason":"最近"},{"number":2,"reason":"重複"},{"number":9},{"number":1,"reason":""}]}', [a, b, c]);
-  assert.deepEqual(ranked.map((s) => s.place.name), ['B', 'A', 'C']);
-  assert.equal(ranked[0].reason, '最近');
-  assert.deepEqual(A.applyRanking('not json', [a, b]), [a, b]);
-});
 test('shops keep Google order, alternate between searches and appear once', () => {
   const shop = (id, lat) => ({ id, location: { lat, lng: 114.17 } });
   const area = { center: { lat: 22.33, lng: 114.17 }, radius: 2500 };
@@ -385,12 +374,12 @@ test('the shared AI sends a task name and the text, never a prompt or a key', as
   const sent = [];
   globalThis.fetch = async (url, options) => {
     sent.push({ url, headers: options.headers, body: JSON.parse(options.body) });
-    return { ok: true, status: 200, json: async () => ({ reply: 'Take the first.' }) };
+    return { ok: true, status: 200, json: async () => ({ reply: '{"destination":"中環"}' }) };
   };
-  await A.sharedAI().rank({ want: 'tea' }, [], 'en');
+  await A.sharedAI().chat('去中環');
   assert.equal(sent[0].url, 'api/ai');
   assert.deepEqual(Object.keys(sent[0].body), ['task', 'message']);
-  assert.equal(sent[0].body.task, 'rank_en');
+  assert.equal(sent[0].body.task, 'chat');
   assert.ok(A.PROMPTS[sent[0].body.task]);
   assert.equal(sent[0].headers.Authorization, undefined);
   globalThis.fetch = async () => ({ ok: false, status: 429, json: async () => ({ error: '太頻繁' }) });
@@ -464,3 +453,11 @@ test('a route is one entry, with its other direction and special services behind
   assert.equal(T.closestPosition(back, 'kmb', many.stops.m.location, many), 1);
   assert.equal(T.closestPosition(back, 'kmb', many.stops.x.location, many), null);
 });
+
+test('changing the destination in words keeps the start', () => {
+  const trip = { origin: '旺角', destination: '沙田', preference: 'fastest' };
+  assert.deepEqual(A.parseFollowUp('改去中環', trip), { origin: '旺角', destination: '中環', preference: 'fastest' });
+  assert.equal(A.parseTrip('轉去機場').origin, null);
+});
+
+test('only reading sentences is left to the AI', () => assert.deepEqual(Object.keys(A.PROMPTS).sort(), ['chat', 'intent']));

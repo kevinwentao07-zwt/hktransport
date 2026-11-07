@@ -53,7 +53,7 @@ svg.icon.solid { fill: currentColor; }
 #app.sheet-full #locate { opacity: 0; transform: scale(.7); pointer-events: none; }
 #top { flex: none; padding: 0 14px 8px; display: flex; flex-direction: column; gap: 8px; }
 #top:empty { display: none; }
-#panel { position: absolute; z-index: 10; left: 8px; right: 8px; bottom: calc(env(safe-area-inset-bottom) + 8px); height: var(--panel-h); display: flex; flex-direction: column; overflow: hidden; background: var(--material); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); border-radius: 30px; box-shadow: var(--rim), var(--lift); transition: height .34s var(--ease-out); transition: height .62s var(--spring); will-change: height; }
+#panel { position: absolute; z-index: 10; left: 8px; right: 8px; bottom: calc(env(safe-area-inset-bottom) + 8px + var(--keyboard, 0px)); height: var(--panel-h); max-height: calc(var(--room, 100dvh) - 20px); display: flex; flex-direction: column; overflow: hidden; background: var(--material); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); border-radius: 30px; box-shadow: var(--rim), var(--lift); transition: height .34s var(--ease-out); transition: height .62s var(--spring); will-change: height; }
 #panel.dragging { transition: none; }
 #panel.dragging { user-select: none; -webkit-user-select: none; }
 /* Vertical drags move the sheet until it is full; sideways swipes still scroll chips. */
@@ -140,6 +140,7 @@ svg.icon.solid { fill: currentColor; }
 /* Cards */
 .card { background: var(--tile); box-shadow: var(--rim), var(--tile-shadow); border-radius: 20px; padding: 13px 15px; display: flex; flex-direction: column; gap: 10px; transition: box-shadow .3s; }
 .card.open { box-shadow: var(--rim), var(--shadow); }
+.card.on-map:not(.open) { box-shadow: var(--rim), 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent), var(--tile-shadow); }
 .tap { text-align: left; width: 100%; display: block; color: inherit; }
 .minutes { font-size: 30px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1; }
 .badge { display: inline-block; min-width: 30px; padding: 2px 8px; border-radius: 7px; font-size: 12.5px; font-weight: 700; text-align: center; color: #fff; white-space: nowrap; }
@@ -335,7 +336,7 @@ svg.icon.solid { fill: currentColor; }
 
 /* Wider screens: the same panel floats beside the map. */
 @media (min-width: 820px) {
-  #panel { left: 16px; right: auto; width: 400px; top: 16px; bottom: 16px; height: auto; }
+  #panel { left: 16px; right: auto; width: 400px; top: 16px; bottom: calc(16px + var(--keyboard, 0px)); height: auto; max-height: none; }
   #app.sheet-full #map { transform: none; filter: none; border-radius: 0; }
   #app.sheet-full #locate { opacity: 1; transform: none; pointer-events: auto; }
   #grabber { display: none; }

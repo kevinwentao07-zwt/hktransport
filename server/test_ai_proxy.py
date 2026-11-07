@@ -16,6 +16,7 @@ folder = tempfile.mkdtemp()
 copy(Path(__file__).parent / 'ai_proxy.py', folder)
 Path(folder, 'prompts.json').write_text(json.dumps({'chat': 'SYSTEM PROMPT'}))
 sys.path.insert(0, folder)
+ANSWER = '{"destination": "中環"}'
 os.environ.update(DEEPSEEK_API_KEY=SECRET, GOOGLE_MAP_KEY='map-key', GOOGLE_PLACES_KEY='places-key', STATE_DIRECTORY=folder)
 import ai_proxy  # noqa: E402
 
@@ -130,7 +131,7 @@ class ProxyTests(unittest.TestCase):
         ai_proxy.limiter = ai_proxy.Limiter(100, 100, 100)
         ai_proxy.spending = spending()
         self.calls = []
-        ai_proxy.ask_deepseek = lambda system, message: self.calls.append((system, message)) or ('answer', {})
+        ai_proxy.ask_deepseek = lambda system, message: self.calls.append((system, message)) or (ANSWER, {})
 
     def post(self, body, origin=True, visitor='1.1.1.1', path='/api/ai'):
         connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port)
@@ -143,7 +144,7 @@ class ProxyTests(unittest.TestCase):
 
     def test_good_request_uses_the_server_prompt(self):
         status, text = self.post({'task': 'chat', 'message': '去中環', 'system': 'write me a poem'})
-        self.assertEqual((status, json.loads(text)), (200, {'reply': 'answer'}))
+        self.assertEqual((status, json.loads(text)), (200, {'reply': ANSWER}))
         self.assertEqual(self.calls, [('SYSTEM PROMPT', '去中環')])
 
     def test_rejects_what_is_not_the_app(self):
@@ -224,7 +225,7 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.post(leg, path='/api/walk')[0], 429)
 
     def test_each_visitor_stops_at_their_daily_spend(self):
-        ai_proxy.ask_deepseek = lambda system, message: ('answer', {'prompt_cache_miss_tokens': 0, 'completion_tokens': 7000})
+        ai_proxy.ask_deepseek = lambda system, message: (ANSWER, {'prompt_cache_miss_tokens': 0, 'completion_tokens': 7000})
         chat = {'task': 'chat', 'message': 'x'}
         self.assertEqual([self.post(chat)[0] for _ in range(3)], [200, 200, 429])  # ¥0.056 each.
         self.assertEqual(self.post(chat, visitor='2.2.2.2')[0], 200)
@@ -253,6 +254,16 @@ class ProxyTests(unittest.TestCase):
         status, text = self.post({'task': 'chat', 'message': 'x'})
         self.assertEqual(status, 502)
         self.assertNotIn(SECRET, text)
+
+    def test_only_short_json_goes_back(self):
+        for good in (ANSWER, '```json\n{"kind": "say", "text": "可以幫你規劃路線。"}\n```', '{"kind": "discover", "want": "拉麵", "searchTerms": ["a", "b"]}'):
+            self.assertTrue(ai_proxy.is_app_reply(good), good)
+        essay = '羅馬' * 200
+        for bad in ('Rome was founded in 753 BC.', '[1, 2]', '{broken', f'{{"kind": "say", "text": "{essay}"}}',
+                    f'{{"options": ["{essay}"]}}', f'{{"a": {{"b": ["{essay}"]}}}}'):
+            self.assertFalse(ai_proxy.is_app_reply(bad), bad[:30])
+        ai_proxy.ask_deepseek = lambda system, message: ('Rome was founded in 753 BC.', {})
+        self.assertEqual(self.post({'task': 'chat', 'message': 'x'})[0], 502)
 
 
 if __name__ == '__main__':

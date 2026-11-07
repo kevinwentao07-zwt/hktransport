@@ -47,10 +47,10 @@ const history = {
 const state = {
   lang: store.get('lang', 'zh'), script: store.get('script', 'hant'), tab: 'plan', db: null, dbError: null, index: null,
   origin: '', destination: '', when: null, chat: '', preference: store.get('preference', 'fastest'), phase: 'idle', error: null,
-  from: null, to: null, journeys: [], expanded: null, explanation: null, aiNotice: null, lastChat: null,
+  from: null, to: null, journeys: [], onMap: null, expanded: null, explanation: null, aiNotice: null, lastChat: null,
   discovery: null,
   stopQuery: '', stopPlace: null, stops: [], stopMode: 'all', stopRadius: 500, stopBusy: false, stopError: null, stopOpen: null,
-  routeQuery: '', routeKey: null, routeKeyboard: false, recentRoutes: store.get('recentRoutes', []), thread: null, saved: store.get('saved', []),
+  routeQuery: '', routeKey: null, routeKeyboard: false, recentRoutes: store.get('recentRoutes', []), thread: null, lastSearch: null, saved: store.get('saved', []),
   talk: [], focus: null, routeView: false, nav: null, fix: null, speechLang: store.get('speechLang', 'zh-HK'), listening: false,
 };
 const t = (zh, en) => (state.lang === 'zh' ? zh : en);
@@ -111,6 +111,8 @@ function h(tag, props = {}, ...children) {
 }
 const $ = (id) => document.getElementById(id);
 const calm = window.matchMedia('(prefers-reduced-motion: reduce)');
+// Far enough out for the longest trips across Hong Kong to fit on a phone.
+const MIN_ZOOM = 9, SNUG_MARGIN = 56;
 
 const ICONS = {
   route: ['M6 19a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z', 'M18 10a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z', 'M8.5 16.5H15a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h6.5'],
@@ -269,7 +271,7 @@ const leafletMap = (() => {
   };
   return {
     init() {
-      map = L.map('map', { zoomControl: false, attributionControl: true, minZoom: 10, maxZoom: 19 }).setView([22.34, 114.15], 11);
+      map = L.map('map', { zoomControl: false, attributionControl: true, minZoom: MIN_ZOOM, maxZoom: 19 }).setView([22.34, 114.15], 11);
       content = L.layerGroup().addTo(map);
       const markZoom = () => $('map').classList.toggle('far', map.getZoom() < 15);
       map.on('zoomend', markZoom);
@@ -359,13 +361,13 @@ const leafletMap = (() => {
         dressBus(bus.element, vehicle);
       }
     },
-    fit(points, maxZoom = 16) {
+    fit(points, maxZoom = 16, isSnug = false) {
       if (!points.length) return;
       // Frame the part of the map the search card and panel leave uncovered.
-      const wide = window.matchMedia('(min-width: 820px)').matches;
+      const wide = window.matchMedia('(min-width: 820px)').matches, margin = isSnug ? SNUG_MARGIN : 0;
       const options = {
-        maxZoom, paddingTopLeft: [wide ? 440 : 24, wide ? 30 : 50],
-        paddingBottomRight: [wide ? 30 : 24, wide ? 30 : sheet.targetHeight() + 32],
+        maxZoom, paddingTopLeft: [(wide ? 440 : 24) + margin, (wide ? 30 : 50) + margin / 2],
+        paddingBottomRight: [(wide ? 30 : 24) + margin, wide ? 30 : sheet.targetHeight() + 32],
       };
       const bounds = L.latLngBounds(points.map(point));
       // Leaflet can't fly to where it already is: its path works out to NaN.
@@ -494,7 +496,7 @@ const googleMap = (() => {
     init() {
       Marker = google.maps.marker.AdvancedMarkerElement;
       map = new google.maps.Map($('map'), {
-        center: { lat: 22.34, lng: 114.15 }, zoom: 11, minZoom: 10, maxZoom: 19, mapId: 'DEMO_MAP_ID',
+        center: { lat: 22.34, lng: 114.15 }, zoom: 11, minZoom: MIN_ZOOM, maxZoom: 19, mapId: 'DEMO_MAP_ID',
         disableDefaultUI: true, clickableIcons: false, gestureHandling: 'greedy', colorScheme: 'FOLLOW_SYSTEM',
       });
       const markZoom = () => $('map').classList.toggle('far', map.getZoom() < 15);
@@ -592,15 +594,19 @@ const googleMap = (() => {
       if (points.length === 1) return this.follow(points[0], maxZoom);
       // Worked out here, as Google's fitBounds lands the route under a sheet this tall.
       // Labels hang off a snug view's stops and buses, so it keeps clear of the sides.
-      const margin = isSnug ? 56 : 0, { top, bottom, left: leftEdge, right: rightEdge } = padding(), box = $('map');
-      const left = leftEdge + margin, right = rightEdge + margin;
+      const margin = isSnug ? SNUG_MARGIN : 0, { top: topEdge, bottom, left: leftEdge, right: rightEdge } = padding(), box = $('map');
+      const left = leftEdge + margin, right = rightEdge + margin, top = topEdge + margin / 2;
       const toX = (lng) => (lng + 180) / 360;
       const toY = (lat) => 0.5 - Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360)) / (2 * Math.PI);
       const xs = points.map((p) => toX(p.lng)), ys = points.map((p) => toY(p.lat));
       const [west, east, north, south] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
       const fits = (pixels, span) => (span ? Math.log2(Math.max(1, pixels) / (256 * span)) : maxZoom);
-      const exact = Math.min(fits(box.clientWidth - left - right, east - west), fits(box.clientHeight - top - bottom, south - north));
-      const zoom = Math.max(10, Math.min(maxZoom, isSnug ? exact : Math.floor(exact)));
+      const room = (sideways, upright) => Math.min(fits(box.clientWidth - sideways, east - west), fits(box.clientHeight - upright, south - north));
+      const exact = room(left + right, top + bottom);
+      // Only a vector map holds a zoom between levels. Others round it, up as often as not, off the route.
+      const canHoldExact = isSnug && map.getRenderingType?.() === google.maps.RenderingType?.VECTOR;
+      // A whole level down halves the route, so it would give up the margin before that.
+      const zoom = Math.max(MIN_ZOOM, Math.min(maxZoom, canHoldExact ? exact : Math.floor(room(leftEdge + rightEdge, topEdge + bottom))));
       const world = 256 * 2 ** zoom;
       const x = (west + east) / 2 + (right - left) / 2 / world, y = (north + south) / 2 + (bottom - top) / 2 / world;
       const center = { lat: (Math.atan(Math.exp((0.5 - y) * 2 * Math.PI)) * 360) / Math.PI - 90, lng: x * 360 - 180 };
@@ -822,7 +828,7 @@ async function here() {
 }
 
 function resetPlan() {
-  Object.assign(state, { focus: null, journeys: [], expanded: null, explanation: null, aiNotice: null, from: null, to: null, error: null });
+  Object.assign(state, { focus: null, journeys: [], onMap: null, expanded: null, explanation: null, aiNotice: null, from: null, to: null, error: null });
 }
 
 function showRouteView() {
@@ -852,7 +858,7 @@ function closeTrip() {
   planRun++;
   stopNavigation();
   resetPlan();
-  Object.assign(state, { origin: '', destination: '', when: null, discovery: null, lastChat: null, talk: [], thread: null, routeView: false, phase: 'idle' });
+  Object.assign(state, { origin: '', destination: '', when: null, discovery: null, lastSearch: null, lastChat: null, talk: [], thread: null, routeView: false, phase: 'idle' });
   whenOpen = false;
   stagger();
   renderTab();
@@ -976,19 +982,30 @@ async function runPlan(request) {
   if (!journeys.length) return setPhase('failed', t('找不到公共交通路線，可能已經收車，或距離太近／太遠。', 'No public transport route found. Services may have ended, or the trip is too short or too far.'));
   state.journeys = journeys;
   stagger();
+  showBestJourney();
   setPhase('checkingLive');
+  fitPlanMap();
 
   const arrivals = liveArrivalCache(state.db, state.lang);
   const live = await Promise.all(journeys.map((journey) => (journey.departure - now <= LIVE_AHEAD_MS ? retime(journey, arrivals) : journey)));
   if (stale()) return;
   state.journeys = live.sort((a, b) => score(a, state.preference) - score(b, state.preference));
   writeAdvice();
+  const moved = showBestJourney();
   setPhase('done');
+  if (moved && !mapTouched) fitPlanMap();
   const [best] = state.journeys, minutes = Math.round(totalMinutes(best)), changes = transfers(best);
   answer(t(
     `${start.name}到${end.name}：最佳方案 ${minutes} 分鐘，${changes ? `轉 ${changes} 次車` : '直達'}。`,
     `${start.name} to ${end.name}: best option ${minutes} min, ${changes ? `${changes} change${changes > 1 ? 's' : ''}` : 'direct'}.`,
   ));
+}
+
+/** The route the map shows until the rider picks another. Says whether that changed it. */
+function showBestJourney() {
+  const id = journeyID(state.journeys[0]), isNew = id !== state.onMap;
+  state.onMap = id;
+  return isNew;
 }
 
 function writeAdvice() {
@@ -1043,7 +1060,7 @@ async function discover(wish, run = ++planRun) {
   }
 
   // Each Google search brings a full page for the price of one.
-  let suggestions = [], isRanked = false;
+  let suggestions = [];
   if (googleShops()) {
     // Chinese and English names reach different shops, and Google's own order is by relevance.
     const search = (query) => googleSearch(searchArea.isAroundRider ? query : `${query} ${searchArea.name}`, searchArea.center, searchArea.radius, state.lang, true);
@@ -1051,15 +1068,6 @@ async function discover(wish, run = ++planRun) {
     if (stale()) return;
     suggestions = mergeShops(insideArea(chinese ?? [], searchArea), insideArea(english ?? [], searchArea), MOST_SHOPS)
       .map((place) => ({ place, isGoogle: true }));
-    // With everything Google knows in hand, the AI puts them in order and says why.
-    try {
-      const ranked = suggestions.length ? await client()?.rank(wish, suggestions, state.lang) : null;
-      if (ranked) {
-        suggestions = ranked;
-        isRanked = true;
-      }
-    } catch { /* Keep Google's order. */ }
-    if (stale()) return;
   }
   if (!suggestions.length) {
     const found = new Map();
@@ -1072,8 +1080,8 @@ async function discover(wish, run = ++planRun) {
     suggestions = [...found.values()].sort((a, b) => a.meters - b.meters).slice(0, MOST_SHOPS).map((place) => ({ place }));
     if (!suggestions.length) return giveUp(t(`${searchArea.name}找不到${wish.want}，請換一個範圍。`, `Couldn't find ${wish.want} around ${searchArea.name}. Try another area.`));
   }
-  state.discovery = { stage: 'choosing', wish, areaName: searchArea.name, center: searchArea.center, suggestions, isRanked };
-  remember('App', `Showed ${wish.want} around ${searchArea.name}: ${suggestions.map(({ place }) => place.name).join(', ')}`);
+  state.discovery = { stage: 'choosing', wish, areaName: searchArea.name, center: searchArea.center, suggestions };
+  state.lastSearch = state.discovery;
   answer(t(`找到 ${suggestions.length} 個「${wish.want}」的結果，點選就可以看路線。`, `Found ${suggestions.length} for "${wish.want}". Tap one for a route.`));
   stagger();
   setPhase('idle');
@@ -1142,7 +1150,7 @@ function backToSuggestions() {
 let watchID = null, wakeLock = null;
 
 function selectedPath() {
-  const journey = state.journeys.find((j) => journeyID(j) === state.expanded);
+  const journey = state.journeys.find((j) => journeyID(j) === state.onMap);
   return journey && state.from && state.to ? journeyPath(journey, state.from.location, state.to.location, state.db) : null;
 }
 
@@ -1157,7 +1165,7 @@ const arrivalsSeen = new Map();
  */
 function rideOnScreen() {
   if (state.tab === 'plan') {
-    const journey = state.journeys.find((j) => journeyID(j) === (state.nav?.id ?? state.expanded));
+    const journey = state.journeys.find((j) => journeyID(j) === (state.nav?.id ?? state.onMap));
     // The buses out there now are not the ones a later trip will catch.
     if (!journey || (!state.nav && journey.departure - Date.now() > LIVE_AHEAD_MS)) return null;
     return rides(journey).find((ride) => !['mtr', 'lightRail'].includes(ride.op));
@@ -1650,9 +1658,7 @@ function search() {
   const origin = normalizedOrigin(state.origin);
   if (origin) history.add('origin', origin);
   if (!isCurrentLocation(state.destination)) history.add('destination', state.destination);
-  state.discovery = null;
-  state.talk = [];
-  state.thread = null;
+  Object.assign(state, { discovery: null, talk: [], thread: null, lastSearch: null });
   renderBottomStatus();
   document.activeElement?.blur();
   showRouteView();
@@ -1661,11 +1667,13 @@ function search() {
 
 const MOST_QUESTIONS = 2;
 
-const remember = (who, text) => { state.talk = [...state.talk, `${who}: ${text.slice(0, 200)}`].slice(-6); };
+const TALK_REMEMBERED = 10;
+const remember = (who, text) => { state.talk = [...state.talk, `${who}: ${text.slice(0, 200)}`].slice(-TALK_REMEMBERED); };
 
 /** What is on screen, so the AI can tell a follow-up from a new subject. */
 function chatContext() {
-  const { stage, wish, areaName, suggestions } = state.discovery ?? {}, asking = stage === 'asking';
+  // A search stays in mind after one of its shops is chosen, so "the second one, then?" still means something.
+  const { stage, wish, areaName, suggestions } = state.discovery ?? state.lastSearch ?? {}, asking = stage === 'asking';
   const asked = asking ? (wish.asked ?? 0) + 1 : 0;
   return {
     talk: state.talk,
@@ -1676,7 +1684,7 @@ function chatContext() {
 }
 
 function askAI(text) {
-  const { stage, wish, suggestions } = state.discovery ?? {}, context = chatContext(), current = currentTrip();
+  const { stage, wish, suggestions } = state.discovery ?? state.lastSearch ?? {}, context = chatContext(), current = currentTrip();
   const discovery = state.discovery;
   remember('Rider', text);
   state.discovery = null;
@@ -2146,13 +2154,16 @@ function journeyCard(journey) {
   const shown = journey.legs.filter((leg) => leg.type === 'ride' || leg.minutes >= 0.5);
   const changes = transfers(journey);
   const arrive = clock(arrivalTime(journey));
-  return h('div', { class: `card${isOpen ? ' open' : ''}${state.justOpened === id ? ' reveal' : ''}`, 'data-journey': id },
+  return h('div', { class: `card${isOpen ? ' open' : ''}${state.onMap === id ? ' on-map' : ''}${state.justOpened === id ? ' reveal' : ''}`, 'data-journey': id },
     h('button', {
       class: 'tap', 'aria-expanded': String(isOpen), onclick: () => {
+        state.onMap = id;
         state.expanded = isOpen ? null : id;
         state.justOpened = isOpen ? null : id;
         state.focus = null;
         renderSheet();
+        // The route is what was asked for, so a sheet covering the map makes way for it.
+        if (!isOpen) closeSheetForMap();
         fitPlanMap();
         if (!isOpen) document.querySelector('.card.open')?.scrollIntoView({ block: 'nearest', behavior: calm.matches ? 'auto' : 'smooth' });
       },
@@ -2220,14 +2231,13 @@ function shopLinks(place, suggestion) {
   return links.length > 0 && h('div', { class: 'shop-links tiny' }, links);
 }
 
-function suggestionList({ wish, areaName, suggestions, isRanked, notice }) {
+function suggestionList({ wish, areaName, suggestions, notice }) {
   return [
     notice && h('div', { class: 'notice' }, notice),
     h('div', { class: 'row' }, h('span', { class: 'title grow' }, wish.anywhere ? t(`「${wish.want}」的結果`, `Results for "${wish.want}"`) : t(`${areaName}的${wish.want}`, `${wish.want} around ${areaName}`)),
       h('button', { class: 'link', onclick: () => { state.discovery = { stage: 'asking', wish: { ...wish, area: null, question: null, options: [] } }; renderSheet(); drawMap(); renderBottomStatus(); } }, t('換範圍', 'Change area'))),
     h('div', { class: 'tiny muted' }, suggestions.some((suggestion) => suggestion.isGoogle)
-      ? (isRanked ? t('AI 按 Google 地圖資料排序。出發前請確認仍在營業。', 'Ranked by AI from Google Maps. Check it is open before you go.')
-        : t('資料及排序來自 Google 地圖。出發前請確認仍在營業。', 'Details and order from Google Maps. Check it is open before you go.'))
+      ? t('資料及排序來自 Google 地圖。出發前請確認仍在營業。', 'Details and order from Google Maps. Check it is open before you go.')
       : t('地點來自地圖搜尋，沒有菜單資料，未必有售，出發前請先確認。', 'Places come from a map search, which has no menus. Check before you go.')),
     suggestions.map((suggestion, index) => h('div', {
       class: 'card tap', role: 'button', tabindex: 0, onclick: () => (embedShops() && suggestion.isGoogle ? showOnEmbed(suggestion) : choosePlace(suggestion)),
@@ -2238,7 +2248,6 @@ function suggestionList({ wish, areaName, suggestions, isRanked, notice }) {
           h('div', { class: 'row' }, h('span', { class: 'bold ellipsis grow' }, suggestion.place.name), h('span', { class: 'tiny muted' }, distanceText(suggestion.place.meters))),
           shopFacts(suggestion.place),
           suggestion.place.address && h('div', { class: 'tiny muted ellipsis' }, suggestion.place.address),
-          suggestion.reason && h('div', { class: 'small ai', style: 'margin-top:3px' }, suggestion.reason),
           shopLinks(suggestion.place, suggestion))))),
   ];
 }
@@ -2294,8 +2303,10 @@ function planSheet() {
     items.push(segments([['fastest', t('最快', 'Fastest')], ['fewerTransfers', t('少轉車', 'Fewer changes')], ['lessWalking', t('少行路', 'Less walking')]], state.preference, (preference) => {
       state.preference = preference;
       state.journeys = [...state.journeys].sort((a, b) => score(a, preference) - score(b, preference));
+      const moved = !state.expanded && showBestJourney();
       writeAdvice();
       renderSheet();
+      if (moved) fitPlanMap();
     }));
     // The AI's card already sums up a trip it was asked for.
     if (state.explanation && !state.thread) items.push(h('div', { class: 'advice' }, state.explanation));
@@ -2317,13 +2328,13 @@ function planSheet() {
 function answer(reply) {
   if (!state.thread?.busy) return;
   state.thread = { said: state.thread.said, reply };
+  if (reply) remember('App', reply);
   renderBottomStatus();
 }
 
 function endChat() {
   if (state.discovery?.stage === 'asking') state.discovery = null;
-  state.thread = null;
-  state.talk = [];
+  Object.assign(state, { thread: null, talk: [], lastSearch: null });
   renderBottomStatus();
   renderSheet();
 }
@@ -2910,7 +2921,7 @@ function markScene(scene) {
 
 function drawMap() {
   showEmbed();
-  markScene(`${state.tab}|${state.expanded ?? ''}|${state.nav?.id ?? ''}|${state.to?.name ?? ''}|${state.discovery?.stage ?? ''}|${state.stopPlace?.name ?? ''}`);
+  markScene(`${state.tab}|${state.onMap ?? ''}|${state.nav?.id ?? ''}|${state.to?.name ?? ''}|${state.discovery?.stage ?? ''}|${state.stopPlace?.name ?? ''}`);
   mapView.clear();
   const here = state.nav?.here ?? state.fix;
   if (here) mapView.me(here);
@@ -2937,7 +2948,12 @@ function drawMap() {
   const path = state.nav?.path ?? selectedPath();
   if (path) {
     mapView.path(withRoads(path), chooseLineStop);
-    loadRoads(path).then((arrived) => { if (arrived) drawMap(); });
+    loadRoads(path).then((arrived) => {
+      if (!arrived) return;
+      drawMap();
+      // The real road can bulge past the stops the view was framed on.
+      if (!mapTouched && !state.nav && state.tab === 'plan') fitPlanMap();
+    });
   }
   const choosing = state.discovery?.stage === 'choosing' && !state.journeys.length && state.phase === 'idle';
   if (choosing && !showsEmbed()) mapView.numbered(state.discovery.suggestions, choosePlace);
@@ -2946,9 +2962,22 @@ function drawMap() {
   moveVehicles();
 }
 
+function closeSheetForMap() {
+  if (whenOpen) {
+    showWhen(false);
+    renderWhen();
+  }
+  sheet.snap('half');
+}
+
+// Once the rider moves the map it is theirs, until they choose something to look at.
+let mapTouched = false;
+for (const gesture of ['pointerdown', 'wheel']) $('map').addEventListener(gesture, () => { mapTouched = true; }, { passive: true });
+
 function fitPlanMap() {
+  mapTouched = false;
   const path = selectedPath();
-  const points = path ? path.segments.flatMap((s) => s.points) : [state.from?.location, state.to?.location].filter(Boolean);
+  const points = path ? withRoads(path).segments.flatMap((s) => s.line ?? s.points) : [state.from?.location, state.to?.location].filter(Boolean);
   if (points.length) mapView.fit(points, 16, !!path);
 }
 
@@ -2994,6 +3023,16 @@ function setTab(tab) {
     else showHomeMap();
   }
 }
+
+/** A phone's keyboard covers the page without resizing it, so the sheet rises to stay above it. */
+function clearKeyboard() {
+  const view = window.visualViewport, app = $('app');
+  const covered = view.scale > 1.01 ? 0 : Math.max(0, Math.round(app.clientHeight - view.height - view.offsetTop));
+  app.style.setProperty('--keyboard', `${covered}px`);
+  app.style.setProperty('--room', `${Math.round(view.height)}px`);
+}
+window.visualViewport?.addEventListener('resize', clearKeyboard);
+window.visualViewport?.addEventListener('scroll', clearKeyboard);
 
 new ResizeObserver(() => mapView.resize()).observe($('map'));
 new ResizeObserver(() => sheet.measure()).observe($('top'));
