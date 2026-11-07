@@ -2696,18 +2696,16 @@ function showToast(text) {
   setTimeout(() => toast.remove(), 2600);
 }
 
-/** The start waits for a destination, so the rider can look through other routes for one. */
+/** A stop goes into its box on the route page. The trip plans as soon as it has a destination. */
 function addStopToTrip(id, side) {
   const stop = name(id);
   pickedPlaces.set(stop, { name: stop, location: state.db.stops[id].location });
-  if (side === 'start') {
-    state.origin = stop;
-    return showToast(t(`出發地：${stop}。再選一個站設為目的地。`, `Starting from ${stop}. Now pick a stop to go to.`));
-  }
-  state.destination = stop;
+  state[side === 'start' ? 'origin' : 'destination'] = stop;
+  state.routeView = true;
   setTab('plan');
   syncPlaceInputs();
-  return search();
+  if (state.destination.trim()) return search();
+  return $('destination-input')?.focus();
 }
 
 // MARK: Saved tab
@@ -3044,15 +3042,24 @@ function setTab(tab) {
   }
 }
 
-/** A phone's keyboard covers the page without resizing it, so the sheet rises to stay above it. */
+const SMALLEST_KEYBOARD = 120;
+
+/**
+ * A phone's keyboard covers the page without resizing it, so the sheet rises to stay above it.
+ * Safari's own toolbars shrink the visible area too, so only a box being typed in counts.
+ */
 function clearKeyboard() {
   const view = window.visualViewport, app = $('app');
-  const covered = view.scale > 1.01 ? 0 : Math.max(0, Math.round(app.clientHeight - view.height - view.offsetTop));
-  app.style.setProperty('--keyboard', `${covered}px`);
-  app.style.setProperty('--room', `${Math.round(view.height)}px`);
+  const isTyping = document.activeElement?.matches('input') && view.scale <= 1.01;
+  const covered = isTyping ? Math.round(app.clientHeight - view.height - view.offsetTop) : 0;
+  const isOpen = covered >= SMALLEST_KEYBOARD;
+  app.style.setProperty('--keyboard', isOpen ? `${covered}px` : '0px');
+  if (isOpen) app.style.setProperty('--room', `${Math.round(view.height)}px`);
+  else app.style.removeProperty('--room');
 }
 window.visualViewport?.addEventListener('resize', clearKeyboard);
 window.visualViewport?.addEventListener('scroll', clearKeyboard);
+document.addEventListener('focusout', () => setTimeout(clearKeyboard, 50));
 
 new ResizeObserver(() => mapView.resize()).observe($('map'));
 new ResizeObserver(() => sheet.measure()).observe($('top'));
