@@ -150,8 +150,45 @@ about you, reply with this JSON object instead:
 - text is one or two short, friendly sentences in the rider's language, saying you can plan a trip or
   find places, with one example. Never answer the question itself, and never give facts, times or fares.`;
 
+export const ROUTE_PROMPT = `You plan public transport trips in Hong Kong for an app that checks every plan against real route data.
+The message gives the start, the destination, the stations and lines within a walk of each, the lines
+that run from one to the other without a change, the time and the rider's preference.
+Reply with one JSON object and nothing else:
+{"plans": [{"legs": [{"mode": "mtr" | "bus" | "minibus" | "lightRail", "route": string}]}]}
+Rules:
+- Give up to three different plans, best first for the preference: fastest, fewerTransfers (fewest
+  changes) or lessWalking. Each plan has one to three legs, in the order ridden. Walking is not a leg.
+- route is a bus or minibus route number such as 968 or 1A, a Light Rail route number such as 610, or an
+  MTR line code: AEL, TCL, DRL, EAL, TML, TWL, KTL, ISL, TKL, SIL. Each MTR line ridden is its own leg.
+- The first leg must be a line listed near the start, and the last leg a line listed near the
+  destination. A change may use any line you know, where both lines really stop within a short walk.
+- A line listed as direct needs no change. Offer the best of them, and a faster plan with a change if
+  there is one, such as the MTR for a long trip.
+- The app picks the stops and works out the times, and drops any plan whose lines do not exist, are not
+  running or do not meet. So name only lines you are sure of, and never give stops, times or fares.
+- If you cannot plan the trip, reply {"plans": []}.`;
+
+const MODE_LABELS = { mtr: 'MTR', lightRail: 'Light Rail', bus: 'Bus', minibus: 'Minibus' };
+const linesText = (lines) => Object.keys(MODE_LABELS).filter((mode) => lines[mode]?.length)
+  .map((mode) => `${MODE_LABELS[mode]} ${lines[mode].join(', ')}`).join('; ') || 'none';
+
+/** A trip for the AI to plan: names, line numbers and the time. `facts` comes from `tripFacts`. */
+export function routeMessage({ from, to, facts, preference, when }) {
+  const end = (label, name, { stations, lines }) => [
+    `${label}: ${name}`,
+    `Stations nearby: ${stations.join(', ') || 'none'}`,
+    `Lines nearby: ${linesText(lines)}`,
+  ];
+  return [
+    ...end('Start', from, facts.start), '',
+    ...end('Destination', to, facts.end), '',
+    `Direct lines: ${linesText(facts.direct)}`,
+    when, `Preference: ${preference}`,
+  ].join('\n');
+}
+
 export const PROMPTS = {
-  intent: INTENT_PROMPT, chat: CHAT_PROMPT,
+  intent: INTENT_PROMPT, chat: CHAT_PROMPT, route: ROUTE_PROMPT,
 };
 
 function jsonObject(reply) {
@@ -194,14 +231,26 @@ function decodeWish(object) {
   };
 }
 
+const MOST_PLANS = 3, MOST_LEGS = 3;
+
+/** The AI's plans as [[{mode, route}]], each still to be checked against the route data. Null if unreadable. */
+export function decodePlans(reply) {
+  const plans = jsonObject(reply)?.plans;
+  if (!Array.isArray(plans)) return null;
+  return plans.map((plan) => (Array.isArray(plan?.legs) ? plan.legs : [])
+    .map((leg) => ({ mode: clean(leg?.mode), route: clean(typeof leg?.route === 'number' ? String(leg.route) : leg?.route) })))
+    .filter((legs) => legs.length > 0 && legs.length <= MOST_LEGS && legs.every((leg) => leg.route))
+    .slice(0, MOST_PLANS);
+}
+
 /** The AI this site's server provides, which holds the key. */
 export function sharedAI() {
-  return assistant(async (task, message) => {
+  return assistant(async (task, message, patience = 60_000) => {
     const response = await fetch('api/ai', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ task, message }),
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(patience),
     });
     const json = await response.json().catch(() => null);
     if (!response.ok || !json?.reply) throw new Error(json?.error ?? `HTTP ${response.status}`);
@@ -220,6 +269,12 @@ function assistant(complete) {
       const reply = decodeChat(await complete('chat', message));
       if (!reply) throw new Error('DeepSeek reply was not valid trip JSON');
       return reply;
+    },
+    /** Plans for a trip. A rider is waiting on the map, so this gives up sooner than a chat. */
+    async route(message) {
+      const plans = decodePlans(await complete('route', message, 20_000));
+      if (!plans) throw new Error('DeepSeek reply was not valid plan JSON');
+      return plans;
     },
   };
 }

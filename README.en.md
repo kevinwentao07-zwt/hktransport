@@ -10,13 +10,15 @@ A Hong Kong public transport web app: trip planning, live arrivals, buses on the
 
 ### Trip planning
 
-- **Search places or stops**: suggestions list places and shops first (Google Maps), then stops.
+- **Search places or stops**: suggestions list places first (the Government's map), then stops.
 - **Routes at once**: the best route is drawn on the map as soon as you search, framed from end to end. Tap another option to switch.
 - **Plan a time**: leave now, leave at a time, or arrive by a time. Arrive-by plans allow for the longest wait, and say so if you can't make it.
 - **Three preferences**: fastest, fewer changes, less walking.
 - **Live correction**: estimates are replaced with the operators' real arrival times, and the options reordered.
 - **Navigation**: follows your position and tells you the next stop, how many are left and where to get off.
-- Routes are worked out in the browser without AI, across buses, minibuses, MTR and Light Rail, with up to three rides.
+- **The AI proposes, the route data checks**: from the stations and lines near each end, the AI says which lines to ride. The browser then checks that each line exists, is running and meets the next, picks the stops and works out the times. If no plan holds up, or the AI is unavailable, the built-in RAPTOR search takes over.
+- Trips are planned without Google: places come from the Government's map and OpenStreetMap, and walks are drawn as straight lines.
+- Covers buses, minibuses, MTR and Light Rail, with up to three rides.
 
 ### Buses on the map
 
@@ -36,7 +38,7 @@ Search a stop or place to see every bus, minibus, MTR and Light Rail stop around
 
 ### AI assistant
 
-It only **reads sentences** and **keeps the conversation**. Routes and shop order never go through it.
+It **reads sentences**, **keeps the conversation** and **proposes routes**. A route it proposes is shown only after the route data confirms it, and the stops and times never come from the AI. Shop order never goes through it.
 
 | You say | What happens |
 | --- | --- |
@@ -46,7 +48,7 @@ It only **reads sentences** and **keeps the conversation**. Routes and shop orde
 | What about the second? | Changes to the second shop |
 | Start from Tsim Sha Tsui | Changes only the start |
 
-Type or speak. If the AI is unavailable, basic parsing takes over and routes keep working.
+Type or speak. If the AI is unavailable, basic parsing and the built-in search take over and routes keep working.
 
 ### Also
 
@@ -59,7 +61,8 @@ Type or speak. If the AI is unavailable, basic parsing takes over and routes kee
 | Part | Approach |
 | --- | --- |
 | Web | Static PWA in plain ES modules, with no framework or build step |
-| Route search | The RAPTOR algorithm, in a Web Worker |
+| Trip planning | The AI proposes lines, checked against the route data in a Web Worker, with the RAPTOR algorithm as the fallback and the yardstick |
+| Place search | The Government's map and OpenStreetMap (Photon); Google for shops |
 | Arrivals | Straight from the browser to KMB/LWB, Citybus, NLB, green minibuses, MTR and Light Rail |
 | Map | Google Maps, moving to OpenFreeMap once the allowance runs out |
 | AI | DeepSeek, through [`server/ai_proxy.py`](server/ai_proxy.py) |

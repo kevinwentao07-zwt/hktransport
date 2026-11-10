@@ -1,6 +1,6 @@
 // Finding places: the Government's location search for landmarks and buildings,
-// and Photon (OpenStreetMap) for shops, neither of which needs a key. Google goes through the
-// site's server, which holds the key and its limits.
+// and Photon (OpenStreetMap) for shops, neither of which needs a key. A trip is planned on these
+// alone. Google is only for finding shops, through the site's server, which holds the key and its limits.
 import { meters } from './transit.js?v=dev';
 
 const HK_BBOX = '113.82,22.13,114.45,22.58';
@@ -31,40 +31,23 @@ export async function googleSearch(query, center, radius, lang, details = false)
 }
 
 const suggested = new Map();
+const MOST_SUGGESTED = 8;
 
-/** Google's suggestions as the rider types. A repeat in the same visit costs nothing. */
-export async function googleSuggest(query, from, lang) {
-  const key = [query, lang].join('|');
-  if (suggested.has(key)) return suggested.get(key);
-  try {
-    const response = await fetch('api/suggest', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, lang, from: from ? { lat: from.lat, lng: from.lng } : null }),
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!response.ok) return [];
-    const { places } = await response.json();
-    suggested.set(key, places);
-    return places;
-  } catch {
-    return [];
+/**
+ * Places as the rider types, from the Government's map, which needs no key and has no allowance.
+ * Each comes with where it is, and how far when `from` is known. A repeat in the same visit costs nothing.
+ */
+export async function suggestPlaces(query, from, lang) {
+  if (!suggested.has(query)) {
+    const found = await governmentSearch(query);
+    // A failed search is asked again next time; an empty answer is an answer.
+    if (!found) return [];
+    // The same search also lists every defibrillator in a building, which nobody travels to by name.
+    suggested.set(query, found.filter((place) => !/^自動心臟除顫器/.test(place.name)).slice(0, MOST_SUGGESTED));
   }
-}
-
-/** Where a suggested place is, as Google only names it. Null at the limit. */
-export async function googlePlaceLocation(id) {
-  try {
-    const response = await fetch('api/place', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
-      signal: AbortSignal.timeout(8_000),
-    });
-    return response.ok ? (await response.json()).location : null;
-  } catch {
-    return null;
-  }
+  return suggested.get(query).map(({ name, nameEn, address, location }) => ({
+    name: (lang === 'en' && nameEn) || name, address, location, ...(from && { meters: meters(from, location) }),
+  }));
 }
 
 /**
@@ -105,29 +88,6 @@ export function loadShape(route, op) {
   return shape.done;
 }
 
-const walks = new Map();
-const walkKey = (from, to) => [from.lat, from.lng, to.lat, to.lng].join();
-
-/** The walking line Google gave for this stretch, once it has arrived. */
-export const knownWalk = (from, to) => walks.get(walkKey(from, to))?.points ?? null;
-
-/** Asks Google once per stretch per visit. Without an answer the map keeps its straight line. */
-export function googleWalk(from, to) {
-  const key = walkKey(from, to);
-  if (walks.has(key)) return walks.get(key).done;
-  const walk = { points: null };
-  walk.done = fetch('api/walk', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from: { lat: from.lat, lng: from.lng }, to: { lat: to.lat, lng: to.lng } }),
-    signal: AbortSignal.timeout(16_000),
-  }).then((response) => (response.ok ? response.json() : null)).then((answer) => {
-    if (answer?.points?.length) walk.points = [from, ...answer.points, to];
-  }).catch(() => {});
-  walks.set(key, walk);
-  return walk.done;
-}
-
 /** Hong Kong 1980 Grid to WGS84: inverse transverse Mercator, then the published datum shift. */
 export function hk80ToWgs84(easting, northing) {
   const a = 6378388, f = 1 / 297, e2 = 2 * f - f * f, rad = Math.PI / 180;
@@ -158,8 +118,10 @@ async function json(url) {
   }
 }
 
+/** Landmarks, buildings and addresses by name. Null when the search itself failed. */
 export async function governmentSearch(text) {
   const found = await json(`https://www.map.gov.hk/gs/api/v1.0.0/locationSearch?q=${encodeURIComponent(text)}`);
+  if (!found) return null;
   return (Array.isArray(found) ? found : []).map((item) => ({
     name: item.nameZH || item.nameEN, nameEn: item.nameEN, address: item.addressZH?.replace(/\s+/g, ' ').trim() ?? '',
     district: item.districtZH ?? '', location: hk80ToWgs84(item.x, item.y),
@@ -185,7 +147,7 @@ export async function photonSearch(text, center, radius) {
 /** The best single match for free text, or null. */
 export async function lookupPlace(text) {
   const wanted = text.trim().toLowerCase();
-  const government = await governmentSearch(text);
+  const government = await governmentSearch(text) ?? [];
   const exact = government.find((item) => item.name?.toLowerCase() === wanted || item.nameEn?.toLowerCase() === wanted);
   if (exact) return { name: exact.name, location: exact.location };
   const [shop] = await photonSearch(text);

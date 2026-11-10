@@ -475,4 +475,95 @@ test('changing the destination in words keeps the start', () => {
   assert.equal(A.parseTrip('轉去機場').origin, null);
 });
 
-test('only reading sentences is left to the AI', () => assert.deepEqual(Object.keys(A.PROMPTS).sort(), ['chat', 'intent']));
+test('the AI reads sentences and proposes lines, and has no other task', () => assert.deepEqual(Object.keys(A.PROMPTS).sort(), ['chat', 'intent', 'route']));
+
+test('lines the AI names become a journey with stops and times from the route data', () => {
+  const direct = T.journeyAlong(network, [{ mode: 'bus', route: '1' }], at('A'), at('C'), noon);
+  assert.deepEqual(direct.legs, T.search(network, at('A'), at('C'), noon)[0].legs);
+  assert.equal(direct.byAI, true);
+  const changing = T.journeyAlong(network, [{ mode: 'bus', route: '1' }, { mode: 'bus', route: '2' }], at('A'), at('F'), noon);
+  assert.deepEqual(changing.legs, T.search(network, at('A'), at('F'), noon)[0].legs);
+  // A wrong mode still finds the route by its number, and an MTR line goes by any of its names.
+  assert.equal(T.rides(T.journeyAlong(network, [{ mode: 'minibus', route: ' 1 ' }], at('A'), at('C'), noon))[0].op, 'kmb');
+  const rail = T.journeyAlong(network, [{ mode: 'mtr', route: 'xyl' }, { mode: 'mtr', route: 'ZZL' }], at('AAA'), at('CCC'), noon);
+  assert.equal(T.rides(rail)[1].transferMinutes, 3);
+  assert.equal(T.mtrLine('荃灣線'), 'TWL');
+  assert.equal(T.mtrLine('Tsuen Wan Line'), 'TWL');
+  assert.equal(T.mtrLine('twl'), 'TWL');
+  assert.equal(T.mtrLine('968'), null);
+});
+
+test('a plan is dropped when a line does not exist, is not running or does not meet the next', () => {
+  const along = (routes, from, to, when = noon) => T.journeyAlong(network, routes.map((route) => ({ mode: 'bus', route })), at(from), at(to), when);
+  assert.equal(along(['99'], 'A', 'C'), null);
+  assert.equal(along(['2', '1'], 'A', 'F'), null);
+  assert.equal(along(['1'], 'A', 'F'), null, 'route 1 ends too far from F');
+  assert.equal(along(['N1'], 'G', 'H'), null);
+  assert.ok(along(['N1'], 'G', 'H', Date.parse('2026-11-04T23:30:00+08:00')));
+  assert.equal(along([], 'A', 'C'), null);
+  assert.equal(along(['1', '1', '1', '1'], 'A', 'C'), null);
+});
+
+test('the AI\'s plans lead only when they hold up against the search', () => {
+  const slowRoute = { route: 'S9', co: ['kmb'], orig: { en: 'A', zh: '甲' }, dest: { en: 'C', zh: '丙' }, serviceType: '1', stops: { kmb: ['A', 'C'] }, bound: { kmb: 'O' }, jt: '90' };
+  const wider = T.buildNetwork(T.normalizeDB({ ...raw, routeList: { ...raw.routeList, slow: slowRoute } }));
+  const baseline = T.plan(wider, at('A'), at('C'), noon);
+  const propose = (...routes) => T.planProposed(wider, routes.map((route) => [{ mode: 'bus', route }]), at('A'), at('C'), { departure: noon, baseline });
+  assert.deepEqual(propose('1', '99').map((journey) => [T.rides(journey)[0].route, journey.byAI]), [['1', true]]);
+  assert.deepEqual(propose('S9'), [], 'real, but far slower than the search');
+  assert.deepEqual(propose('99'), []);
+  assert.equal(propose('S9', '1').length, 1);
+  // A short trip still offers the walk the search found.
+  const near = T.plan(network, at('B'), at('C'), noon);
+  const short = T.planProposed(network, [[{ mode: 'bus', route: '1' }]], at('B'), at('C'), { departure: noon, baseline: near });
+  assert.deepEqual(short.map(T.journeyID).sort(), near.map(T.journeyID).sort());
+  const arriveBy = noon + 3 * 3600_000;
+  const [timed] = T.planProposed(network, [[{ mode: 'bus', route: '1' }]], at('A'), at('C'), { departure: noon, arriveBy });
+  assert.equal(timed.arriveBy, arriveBy);
+  assert.ok(T.arrivalTime(timed) <= arriveBy && timed.departure > noon);
+});
+
+test('the AI is told names and line numbers near each end, never coordinates', () => {
+  const facts = T.tripFacts(network, db, at('A'), at('F'), noon);
+  assert.deepEqual(facts, { start: { stations: [], lines: { bus: ['1'] } }, end: { stations: [], lines: { bus: ['2'] } }, direct: {} });
+  assert.deepEqual(T.tripFacts(network, db, at('A'), at('C'), noon).direct, { bus: ['1'] });
+  const rail = T.tripFacts(network, db, at('AAA'), at('CCC'), noon);
+  assert.deepEqual(rail.start, { stations: ['站一'], lines: { mtr: ['XYL'] } });
+  assert.deepEqual(rail.end, { stations: ['站三'], lines: { mtr: ['ZZL'] } });
+  assert.deepEqual(T.tripFacts(network, db, at('G'), at('H'), noon).direct, {}, 'the night bus is not running at noon');
+  assert.deepEqual(T.tripFacts(network, db, at('G'), at('H'), Date.parse('2026-11-04T23:30:00+08:00')).direct, { bus: ['N1'] });
+  const message = A.routeMessage({ from: '我的位置', to: '站三', facts: rail, preference: 'fastest', when: 'Leaving: Wednesday 12:00' });
+  assert.match(message, /Start: 我的位置\nStations nearby: 站一\nLines nearby: MTR XYL\n/);
+  assert.match(message, /Direct lines: none\nLeaving: Wednesday 12:00\nPreference: fastest$/);
+  assert.doesNotMatch(message, /\d+\.\d/);
+});
+
+test('the AI\'s plans are read as lines only', async () => {
+  const reply = '```json\n{"plans":[{"legs":[{"mode":"bus","route":968,"to":"銅鑼灣"}]},{"legs":[{"mode":"mtr","route":" TWL "},{"mode":"mtr","route":"ISL"}]},{"legs":[]},{"legs":[{"mode":"bus"}]},{"legs":[{"route":"1"},{"route":"2"},{"route":"3"},{"route":"4"}]}]}\n```';
+  assert.deepEqual(A.decodePlans(reply), [[{ mode: 'bus', route: '968' }], [{ mode: 'mtr', route: 'TWL' }, { mode: 'mtr', route: 'ISL' }]]);
+  assert.deepEqual(A.decodePlans('{"plans": []}'), []);
+  assert.equal(A.decodePlans('I would take the MTR.'), null);
+  assert.equal(A.decodePlans('{"destination":"中環"}'), null);
+  const sent = [];
+  globalThis.fetch = async (url, options) => { sent.push(JSON.parse(options.body)); return { ok: true, status: 200, json: async () => ({ reply: '{"plans":[{"legs":[{"mode":"bus","route":"1"}]}]}' }) }; };
+  assert.deepEqual(await A.sharedAI().route('Start: 甲'), [[{ mode: 'bus', route: '1' }]]);
+  assert.deepEqual(sent, [{ task: 'route', message: 'Start: 甲' }]);
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ reply: '{"kind":"say","text":"hi"}' }) });
+  await assert.rejects(A.sharedAI().route('Start: 甲'));
+});
+
+test('places are suggested from the Government\'s map, each with where it is', async () => {
+  const asked = [];
+  let answer = { ok: false };
+  globalThis.fetch = async (url) => { asked.push(url); return answer; };
+  assert.deepEqual(await P.suggestPlaces('理工', null, 'zh'), []);
+  answer = { ok: true, json: async () => [{ nameZH: '香港理工大學', nameEN: 'PolyU', addressZH: '紅磡  育才道', x: 836694.05, y: 819069.8 }, { nameZH: '遠方', x: 0, y: 0 }] };
+  const [place, ...others] = await P.suggestPlaces('理工', { lat: 22.3, lng: 114.17 }, 'zh');
+  assert.equal(others.length, 0, 'outside Hong Kong');
+  assert.equal(place.name, '香港理工大學');
+  assert.equal(place.address, '紅磡 育才道');
+  assert.ok(P.inHongKong(place.location) && place.meters > 0);
+  assert.equal((await P.suggestPlaces('理工', null, 'en'))[0].name, 'PolyU');
+  assert.equal(asked.length, 2, 'a failed search is asked again, an answered one is not');
+  assert.ok(asked.every((url) => url.startsWith('https://www.map.gov.hk/')));
+});
