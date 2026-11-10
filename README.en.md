@@ -10,14 +10,15 @@ A Hong Kong public transport web app: trip planning, live arrivals, buses on the
 
 ### Trip planning
 
-- **Search places or stops**: suggestions list places first (the Government's map), then stops.
+- **Search places or stops**: suggestions list places and shops first (Google Maps), then stops.
 - **Routes at once**: the best route is drawn on the map as soon as you search, framed from end to end. Tap another option to switch.
 - **Plan a time**: leave now, leave at a time, or arrive by a time. Arrive-by plans allow for the longest wait, and say so if you can't make it.
 - **Three preferences**: fastest, fewer changes, less walking.
 - **Live correction**: estimates are replaced with the operators' real arrival times, and the options reordered.
 - **Navigation**: follows your position and tells you the next stop, how many are left and where to get off.
 - **The AI proposes, the route data checks**: from the stations and lines near each end, the AI says which lines to ride. The browser then checks that each line exists, is running and meets the next, picks the stops and works out the times. If no plan holds up, or the AI is unavailable, the built-in RAPTOR search takes over.
-- Trips are planned without Google: places come from the Government's map and OpenStreetMap, and walks are drawn as straight lines.
+- **Marked when the AI recommends it**: an option the AI proposed and the route data confirmed carries an "AI" tag.
+- **Real walking times**: walks follow Google's walking route, with its distance and time by the streets rather than a straight line. Only once Google's allowance runs out are walks estimated from a straight line.
 - Covers buses, minibuses, MTR and Light Rail, with up to three rides.
 
 ### Buses on the map
@@ -62,7 +63,7 @@ Type or speak. If the AI is unavailable, basic parsing and the built-in search t
 | --- | --- |
 | Web | Static PWA in plain ES modules, with no framework or build step |
 | Trip planning | The AI proposes lines, checked against the route data in a Web Worker, with the RAPTOR algorithm as the fallback and the yardstick |
-| Place search | The Government's map and OpenStreetMap (Photon); Google for shops |
+| Places and walks | Google's place search and walking routes, then Government GIS, OpenStreetMap and straight-line estimates after the allowance |
 | Arrivals | Straight from the browser to KMB/LWB, Citybus, NLB, green minibuses, MTR and Light Rail |
 | Map | Google Maps, moving to OpenFreeMap once the allowance runs out |
 | AI | DeepSeek, through [`server/ai_proxy.py`](server/ai_proxy.py) |

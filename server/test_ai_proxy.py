@@ -27,7 +27,7 @@ def spending(clock=None):
 
 
 def budget(**limits):
-    return ai_proxy.Budget(Path(tempfile.mkdtemp(), 'usage.json'), {'map': (9, 9, 9), 'places': (9, 9, 9), 'details': (9, 9, 9), **limits})
+    return ai_proxy.Budget(Path(tempfile.mkdtemp(), 'usage.json'), {'map': (9, 9, 9), 'places': (9, 9, 9), 'walk': (9, 9, 9), 'details': (9, 9, 9), 'suggest': (9, 9, 9), **limits})
 
 
 class BudgetTests(unittest.TestCase):
@@ -55,6 +55,31 @@ class BudgetTests(unittest.TestCase):
         self.assertFalse(ai_proxy.Budget(path, {'map': (9, 9, 9)}).spend('map', 'a'))
         unwritable = ai_proxy.Budget(Path(tempfile.mkdtemp(), 'missing', 'usage.json'), {'map': (9, 9, 9)})
         self.assertFalse(unwritable.spend('map', 'a'))
+
+
+class PolylineTests(unittest.TestCase):
+    def test_decodes_googles_example(self):
+        points = ai_proxy.decode_polyline('_p~iF~ps|U_ulLnnqC_mqNvxq`@')
+        self.assertEqual(points, [{'lat': 38.5, 'lng': -120.2}, {'lat': 40.7, 'lng': -120.95}, {'lat': 43.252, 'lng': -126.453}])
+
+    def test_a_walk_comes_with_its_distance_and_time(self):
+        answer = json.dumps({'routes': [{'polyline': {'encodedPolyline': '_p~iF~ps|U'}, 'distanceMeters': 412, 'duration': '338s'}]}).encode()
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, *args):
+                return answer
+
+        sent = []
+        with patch.object(ai_proxy.urllib.request, 'urlopen', lambda request, timeout: sent.append(request) or Response()):
+            walk = ai_proxy.walking_route({'lat': 22.28, 'lng': 114.15}, {'lat': 22.29, 'lng': 114.16})
+        self.assertEqual((walk['meters'], walk['seconds'], walk['points']), (412, 338, [{'lat': 38.5, 'lng': -120.2}]))
+        self.assertIn('routes.duration', sent[0].get_header('X-goog-fieldmask'))
 
 
 class SpendingTests(unittest.TestCase):
@@ -209,11 +234,37 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.post({**good, 'radius': 60000}, path='/api/places')[0], 400)
         self.assertEqual(self.post({**good, 'query': 'x' * 101}, path='/api/places')[0], 400)
 
+    def test_walking_route_stops_at_the_limit(self):
+        ai_proxy.budget = budget(walk=(1, 10, 10))
+        ai_proxy.walking_route = lambda start, end: {'points': [start, end], 'meters': 120, 'seconds': 95}
+        leg = {'from': {'lat': 22.28, 'lng': 114.15}, 'to': {'lat': 22.29, 'lng': 114.16}}
+        self.assertEqual(self.post({**leg, 'to': {'lat': 35, 'lng': 139}}, path='/api/walk')[0], 400)
+        self.assertEqual(self.post(leg, origin=False, path='/api/walk')[0], 403)
+        self.assertEqual(self.post(leg, path='/api/walk')[0], 200)
+        self.assertEqual(self.post(leg, path='/api/walk')[0], 429)
+
     def test_each_visitor_stops_at_their_daily_spend(self):
         ai_proxy.ask_deepseek = lambda system, message: (ANSWER, {'prompt_cache_miss_tokens': 0, 'completion_tokens': 7000})
         chat = {'task': 'chat', 'message': 'x'}
         self.assertEqual([self.post(chat)[0] for _ in range(3)], [200, 200, 429])  # ¥0.056 each.
         self.assertEqual(self.post(chat, visitor='2.2.2.2')[0], 200)
+
+    def test_suggestions_stop_at_the_limit(self):
+        ai_proxy.budget = budget(suggest=(1, 10, 10))
+        ai_proxy.suggest_places = lambda query, origin, language: [{'name': query}]
+        self.assertEqual(self.post({'query': 'x' * 61}, path='/api/suggest')[0], 400)
+        self.assertEqual(self.post({'query': '朗', 'from': {'lat': 35, 'lng': 139}}, path='/api/suggest')[0], 400)
+        self.assertEqual(self.post({'query': '朗'}, origin=False, path='/api/suggest')[0], 403)
+        self.assertEqual(self.post({'query': '朗'}, path='/api/suggest')[0], 200)
+        self.assertEqual(self.post({'query': '朗'}, path='/api/suggest')[0], 429)
+
+    def test_place_lookups_stop_at_the_limit(self):
+        ai_proxy.budget = budget(place=(1, 10, 10))
+        ai_proxy.place_location = lambda place_id: {'lat': 22.3, 'lng': 114.1}
+        self.assertEqual(self.post({'id': '../secret'}, path='/api/place')[0], 400)
+        self.assertEqual(self.post({'id': 'ChIJabc-_1'}, origin=False, path='/api/place')[0], 403)
+        self.assertEqual(self.post({'id': 'ChIJabc-_1'}, path='/api/place')[0], 200)
+        self.assertEqual(self.post({'id': 'ChIJabc-_1'}, path='/api/place')[0], 429)
 
     def test_upstream_errors_reveal_nothing(self):
         def fail(system, message):
@@ -224,8 +275,7 @@ class ProxyTests(unittest.TestCase):
         self.assertNotIn(SECRET, text)
 
     def test_only_short_json_goes_back(self):
-        for good in (ANSWER, '```json\n{"kind": "say", "text": "可以幫你規劃路線。"}\n```', '{"kind": "discover", "want": "拉麵", "searchTerms": ["a", "b"]}',
-                     '{"plans": [{"legs": [{"mode": "mtr", "route": "TWL"}, {"mode": "bus", "route": "968"}]}]}'):
+        for good in (ANSWER, '```json\n{"kind": "say", "text": "可以幫你規劃路線。"}\n```', '{"kind": "discover", "want": "拉麵", "searchTerms": ["a", "b"]}'):
             self.assertTrue(ai_proxy.is_app_reply(good), good)
         essay = '羅馬' * 200
         for bad in ('Rome was founded in 753 BC.', '[1, 2]', '{broken', f'{{"kind": "say", "text": "{essay}"}}',

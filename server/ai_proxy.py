@@ -5,18 +5,19 @@ Visitors can only pick one of the app's own tasks and send their text. The promp
 here, so this can't be used as a free general-purpose chatbot, and limits cap the cost.
 Nothing a visitor sends is logged or kept.
 
-It also holds Google use under the free allowance. Each map load and shop search is counted on
-disk, and at the limit the site quietly goes back to its free map and search. Trips are planned
-without Google: the AI proposes the lines, and the page checks them against the route data.
+It also holds Google use under the free allowance. Each map and place search is counted on
+disk, and at the limit the site quietly goes back to its free map and search.
 """
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -172,11 +173,11 @@ spending = Spending(
     DAILY_YUAN_PER_VISITOR, DAILY_YUAN_SITE,
 )
 
-# Free each month: 10,000 map loads, 5,000 searches and 1,000 searches with shop details. These stop
-# well short of all three.
+# Free each month: 10,000 map loads, 5,000 searches, 1,000 searches with shop details, 10,000 walking
+# routes, 10,000 suggestions and 10,000 place lookups. These stop well short of all six.
 budget = Budget(
     Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'usage.json',
-    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'details': (30, 900, 12)},
+    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 9000, 40), 'details': (30, 900, 12), 'suggest': (300, 9000, 60), 'place': (300, 9000, 60)},
 )
 
 
@@ -210,6 +211,10 @@ def embed_key():
 
 def places_key():
     return os.environ.get('GOOGLE_PLACES_KEY', '').strip()
+
+
+def routes_key():
+    return os.environ.get('GOOGLE_ROUTES_KEY', '').strip() or places_key()
 
 
 def ask_deepseek(system, message):
@@ -256,6 +261,88 @@ def search_places(query, lat, lng, radius, language, details=False):
         'price': place.get('priceLevel'), 'open': place.get('currentOpeningHours', {}).get('openNow'),
         'phone': place.get('nationalPhoneNumber'),
     } for place in found]
+
+
+def suggest_places(query, origin, language):
+    """Names as the rider types. With a position, Google also says how far each one is."""
+    body = {'input': query, 'languageCode': language, 'regionCode': 'hk', 'includedRegionCodes': ['hk']}
+    if origin:
+        point = {'latitude': origin['lat'], 'longitude': origin['lng']}
+        body.update(origin=point, locationBias={'circle': {'center': point, 'radius': 5000}})
+    request = urllib.request.Request(
+        'https://places.googleapis.com/v1/places:autocomplete',
+        data=json.dumps(body).encode(),
+        headers={
+            'Content-Type': 'application/json', 'X-Goog-Api-Key': places_key(),
+            'X-Goog-FieldMask': 'suggestions.placePrediction.placeId,suggestions.placePrediction.structuredFormat,suggestions.placePrediction.distanceMeters',
+        },
+    )
+    with urllib.request.urlopen(request, timeout=8) as response:
+        found = json.load(response).get('suggestions', [])
+    places = [item['placePrediction'] for item in found if 'placePrediction' in item]
+    return [{
+        'id': place['placeId'], 'name': place['structuredFormat']['mainText']['text'],
+        'address': place['structuredFormat'].get('secondaryText', {}).get('text'), 'meters': place.get('distanceMeters'),
+    } for place in places]
+
+
+def place_location(place_id):
+    """Where a suggested place is, as it was only named."""
+    request = urllib.request.Request(
+        f"https://places.googleapis.com/v1/places/{urllib.parse.quote(place_id, safe='')}",
+        headers={'X-Goog-Api-Key': places_key(), 'X-Goog-FieldMask': 'location'},
+    )
+    with urllib.request.urlopen(request, timeout=8) as response:
+        location = json.load(response)['location']
+    return {'lat': location['latitude'], 'lng': location['longitude']}
+
+
+def decode_polyline(encoded):
+    """Google's compact line format, as a list of points."""
+    points, index, lat, lng = [], 0, 0, 0
+    while index < len(encoded):
+        values = []
+        for _ in range(2):
+            shift = result = 0
+            while True:
+                byte = ord(encoded[index]) - 63
+                index += 1
+                result |= (byte & 0x1F) << shift
+                shift += 5
+                if byte < 0x20:
+                    break
+            values.append(~(result >> 1) if result & 1 else result >> 1)
+        lat, lng = lat + values[0], lng + values[1]
+        points.append({'lat': lat / 1e5, 'lng': lng / 1e5})
+    return points
+
+
+def walking_route(start, end):
+    """The line, how far and how long. These stay in the cheapest tier."""
+    place = lambda point: {'location': {'latLng': {'latitude': point['lat'], 'longitude': point['lng']}}}
+    request = urllib.request.Request(
+        'https://routes.googleapis.com/directions/v2:computeRoutes',
+        data=json.dumps({'origin': place(start), 'destination': place(end), 'travelMode': 'WALK'}).encode(),
+        headers={
+            'Content-Type': 'application/json', 'X-Goog-Api-Key': routes_key(),
+            'X-Goog-FieldMask': 'routes.polyline.encodedPolyline,routes.distanceMeters,routes.duration',
+        },
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        route = json.load(response)['routes'][0]
+    # Google writes the time as seconds with an "s", e.g. "523s".
+    return {
+        'points': decode_polyline(route['polyline']['encodedPolyline']),
+        'meters': route.get('distanceMeters'), 'seconds': int(route['duration'].rstrip('s')) if 'duration' in route else None,
+    }
+
+
+def in_hong_kong(point):
+    if not isinstance(point, dict):
+        return False
+    lat, lng = point.get('lat'), point.get('lng')
+    numbers = all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (lat, lng))
+    return numbers and 22.1 <= lat <= 22.6 and 113.8 <= lng <= 114.5
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -318,12 +405,58 @@ class Handler(BaseHTTPRequestHandler):
         return body
 
     def do_POST(self):
-        if self.path not in ('/api/ai', '/api/places'):
+        if self.path not in ('/api/ai', '/api/places', '/api/walk', '/api/suggest', '/api/place'):
             return self.send(404, {'error': 'Not found'})
         body = self.read_json()
         if body is None:
             return None
-        return (self.places if self.path == '/api/places' else self.ask)(body)
+        return {'/api/places': self.places, '/api/walk': self.walk, '/api/suggest': self.suggest, '/api/place': self.place}.get(self.path, self.ask)(body)
+
+    def suggest(self, body):
+        query, origin = body.get('query'), body.get('from')
+        if not isinstance(query, str) or not 0 < len(query.strip()) <= 60 or (origin is not None and not in_hong_kong(origin)):
+            return self.send(400, {'error': 'Bad request'})
+        if not places_key() or not budget.spend('suggest', self.visitor()):
+            return self.send(429, {'error': 'Limit reached'})
+        language = 'en' if body.get('lang') == 'en' else 'zh-HK'
+        try:
+            self.send(200, {'places': suggest_places(query.strip(), origin, language)})
+        except urllib.error.HTTPError as error:
+            print(f'Suggestions returned {error.code}', file=sys.stderr, flush=True)
+            self.send(502, {'error': 'Unavailable'})
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f'Suggestions failed: {type(error).__name__}', file=sys.stderr, flush=True)
+            self.send(502, {'error': 'Unavailable'})
+
+    def place(self, body):
+        place_id = body.get('id')
+        if not isinstance(place_id, str) or not re.fullmatch(r'[\w-]{1,512}', place_id):
+            return self.send(400, {'error': 'Bad request'})
+        if not places_key() or not budget.spend('place', self.visitor()):
+            return self.send(429, {'error': 'Limit reached'})
+        try:
+            self.send(200, {'location': place_location(place_id)})
+        except urllib.error.HTTPError as error:
+            print(f'Place returned {error.code}', file=sys.stderr, flush=True)
+            self.send(502, {'error': 'Unavailable'})
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f'Place failed: {type(error).__name__}', file=sys.stderr, flush=True)
+            self.send(502, {'error': 'Unavailable'})
+
+    def walk(self, body):
+        start, end = body.get('from'), body.get('to')
+        if not in_hong_kong(start) or not in_hong_kong(end):
+            return self.send(400, {'error': 'Bad request'})
+        if not routes_key() or not budget.spend('walk', self.visitor()):
+            return self.send(429, {'error': 'Limit reached'})
+        try:
+            self.send(200, walking_route(start, end))
+        except urllib.error.HTTPError as error:
+            print(f'Routes returned {error.code}', file=sys.stderr, flush=True)
+            self.send(502, {'error': 'Unavailable'})
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
+            print(f'Routes failed: {type(error).__name__}', file=sys.stderr, flush=True)
+            self.send(502, {'error': 'Unavailable'})
 
     def places(self, body):
         query, lat, lng, radius = body.get('query'), body.get('lat'), body.get('lng'), body.get('radius')

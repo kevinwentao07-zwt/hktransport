@@ -552,18 +552,20 @@ test('the AI\'s plans are read as lines only', async () => {
   await assert.rejects(A.sharedAI().route('Start: 甲'));
 });
 
-test('places are suggested from the Government\'s map, each with where it is', async () => {
-  const asked = [];
-  let answer = { ok: false };
-  globalThis.fetch = async (url) => { asked.push(url); return answer; };
-  assert.deepEqual(await P.suggestPlaces('理工', null, 'zh'), []);
-  answer = { ok: true, json: async () => [{ nameZH: '香港理工大學', nameEN: 'PolyU', addressZH: '紅磡  育才道', x: 836694.05, y: 819069.8 }, { nameZH: '遠方', x: 0, y: 0 }] };
-  const [place, ...others] = await P.suggestPlaces('理工', { lat: 22.3, lng: 114.17 }, 'zh');
-  assert.equal(others.length, 0, 'outside Hong Kong');
-  assert.equal(place.name, '香港理工大學');
-  assert.equal(place.address, '紅磡 育才道');
-  assert.ok(P.inHongKong(place.location) && place.meters > 0);
-  assert.equal((await P.suggestPlaces('理工', null, 'en'))[0].name, 'PolyU');
-  assert.equal(asked.length, 2, 'a failed search is asked again, an answered one is not');
-  assert.ok(asked.every((url) => url.startsWith('https://www.map.gov.hk/')));
+test('walks take Google\'s distance and time where it has them, and the rest keep the estimate', async () => {
+  const journey = T.search(network, at('A'), at('F'), noon)[0], origin = { lat: 22.299, lng: 114.17 }, destination = { lat: 22.351, lng: 114.17 };
+  const ends = T.walkEnds({ ...journey, legs: [{ type: 'walk', meters: 111, minutes: 1.9, to: 'A' }, ...journey.legs, { type: 'walk', meters: 111, minutes: 1.9, to: null }] }, origin, destination, db);
+  assert.deepEqual(ends, [[origin, at('A')], null, [at('C'), at('E')], null, [at('F'), destination]]);
+  globalThis.fetch = async (url, options) => {
+    const { from } = JSON.parse(options.body);
+    return from.lat === at('C').lat ? { ok: true, json: async () => ({ points: [], meters: 90, seconds: 150 }) } : { ok: false };
+  };
+  await Promise.all([P.googleWalk(at('C'), at('E')), P.googleWalk(at('F'), destination)]);
+  assert.deepEqual(P.knownWalkTime(at('C'), at('E')), { meters: 90, minutes: 2.5 });
+  assert.equal(P.knownWalkTime(at('F'), destination), null);
+  const walked = T.withWalkTimes(journey, T.walkEnds(journey, at('A'), at('F'), db), P.knownWalkTime);
+  assert.deepEqual([walked.legs[1].meters, walked.legs[1].minutes, walked.legs[1].walkFromMap], [90, 2.5, true]);
+  close(T.totalMinutes(walked) - T.totalMinutes(journey), 2.5 - journey.legs[1].minutes);
+  assert.equal(T.withWalkTimes(walked, T.walkEnds(walked, at('A'), at('F'), db), P.knownWalkTime), walked, 'nothing new, nothing changes');
+  assert.equal(T.withWalkTimes(journey, T.walkEnds(journey, at('A'), at('F'), db), () => null), journey);
 });

@@ -1037,6 +1037,37 @@ export function journeyPath(journey, origin, destination, db) {
   return { origin, destination, segments };
 }
 
+/** Where each walk in a journey starts and ends, as [from, to]; null for a ride or a walk with no known end. */
+export function walkEnds(journey, origin, destination, db) {
+  let cursor = origin;
+  return journey.legs.map((leg) => {
+    if (leg.type === 'ride') {
+      cursor = db.stops[leg.alightStopID]?.location ?? cursor;
+      return null;
+    }
+    const target = leg.to ? db.stops[leg.to]?.location : destination;
+    if (!target) return null;
+    const ends = [cursor, target];
+    cursor = target;
+    return ends;
+  });
+}
+
+/**
+ * The journey with real walking distances and times where `timeOf(from, to)` knows them, or the
+ * same journey when nothing changed. Times after a changed walk still need retiming.
+ */
+export function withWalkTimes(journey, ends, timeOf) {
+  let changed = false;
+  const legs = journey.legs.map((leg, index) => {
+    const time = ends[index] && timeOf(...ends[index]);
+    if (!time || (leg.walkFromMap && leg.minutes === time.minutes)) return leg;
+    changed = true;
+    return { ...leg, meters: time.meters, minutes: time.minutes, walkFromMap: true };
+  });
+  return changed ? { ...journey, legs } : journey;
+}
+
 function pathEdges(path) {
   return path.segments.flatMap((segment, index) => segment.points.slice(1).map((to, offset) => ({
     segment: index, toPoint: offset + 1, from: segment.points[offset], to,

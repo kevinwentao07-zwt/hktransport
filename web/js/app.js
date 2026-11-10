@@ -2,12 +2,12 @@
 import { meters,
   OP_COLORS, OP_LABELS, MODES, LIVE_AHEAD_MS, arrivalTime, arrivesLate, buildStopIndex, closestPosition, nextRouteKeys, planAdvice, routeFamily, routeWays, exactSite, instruction, journeyID, journeyPath, RETURN_COLOR, circularTurn, roadBetween, lineColor, lineName, matchingSites,
   nameText, normalizeDB, partialSite, pathAhead, placeOnTrack, primaryMode, progressAt, retime, rides, routeTrack, score, searchRoutes, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
-  totalMinutes, transfers, walkingMeters,
+  totalMinutes, transfers, walkEnds, walkingMeters, withWalkTimes,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache, routeArrivals } from './eta.js?v=dev';
 import { toSimplified } from './hans.js?v=dev';
 import { chatMessage, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, routeMessage, searchMessage } from './ai.js?v=dev';
-import { HONG_KONG, cleanArea, googleSearch, inHongKong, insideArea, isNearby, knownShape, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, suggestPlaces, withinArea } from './places.js?v=dev';
+import { HONG_KONG, cleanArea, googlePlaceLocation, googleSearch, googleSuggest, googleWalk, inHongKong, insideArea, isNearby, knownShape, knownWalk, knownWalkTime, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
 
 // MARK: Storage
 
@@ -815,17 +815,14 @@ const HK_WEEK_TIME = { timeZone: 'Asia/Hong_Kong', weekday: 'long', hour: '2-dig
 /** Places picked from a list, by name, as a search by name could land on another branch. */
 const pickedPlaces = new Map();
 
-/** Where a typed place is. A trip is planned on the free sources alone; only the stops tab asks Google. */
-async function resolvePlace(text, withGoogle = false) {
+async function resolvePlace(text) {
   if (pickedPlaces.has(text)) return pickedPlaces.get(text);
   const site = exactSite(text, siteIndex());
   if (site) return { name: nameText(site.name, state.lang), location: site.location };
-  if (withGoogle) {
-    // Google finds places while its free allowance lasts; the free sources take over after that.
-    const near = state.fix && inHongKong(state.fix);
-    const found = (await googleSearch(text, near ? state.fix : HONG_KONG, near ? 5000 : 50_000, state.lang))?.[0];
-    if (found) return { name: found.name, location: found.location };
-  }
+  // Google finds places while its free allowance lasts; the free sources take over after that.
+  const near = state.fix && inHongKong(state.fix);
+  const found = (await googleSearch(text, near ? state.fix : HONG_KONG, near ? 5000 : 50_000, state.lang))?.[0];
+  if (found) return { name: found.name, location: found.location };
   const place = await lookupPlace(text);
   if (place) return state.lang === 'zh' ? { name: text, location: place.location } : place;
   const partial = partialSite(text, siteIndex());
@@ -954,26 +951,13 @@ async function runPlan(request) {
   state.preference = intent.preference;
 
   setPhase('locating');
-  // The boxes hold places as typed, and a map reads 理大 as any name with those characters, so the AI
-  // spells out whatever is not already a stop or a place picked from the list.
-  const isLoose = (text) => !!text && !isCurrentLocation(text) && !pickedPlaces.has(text) && !exactSite(text, siteIndex());
-  const spelled = { origin: intent.origin, destination: intent.destination };
-  if (request.kind === 'search' && ai && (isLoose(intent.origin) || isLoose(intent.destination))) {
-    try {
-      const read = await ai.intent(searchMessage(intent.origin, intent.destination, intent.preference));
-      if (isLoose(intent.origin) && read.origin) spelled.origin = read.origin;
-      if (isLoose(intent.destination)) spelled.destination = read.destination;
-    } catch { /* Look for the words as typed. */ }
-    if (stale()) return;
-  }
-  const find = async (name, typed) => await resolvePlace(name) ?? (name === typed ? null : resolvePlace(typed));
   const noLocation = t('未能取得你的位置：請允許定位，或在上方輸入起點。', "Couldn't get your location: allow Location access, or type a start above.");
-  const start = intent.origin ? await find(spelled.origin, intent.origin) : await here();
+  const start = intent.origin ? await resolvePlace(intent.origin) : await here();
   if (stale()) return;
   if (!start) return setPhase('failed', intent.origin ? t(`找不到起點「${intent.origin}」。`, `Couldn't find the start "${intent.origin}".`) : noLocation);
   // A shop on screen is already known, so it needs no search.
   let end = request.place ?? request.shops?.find((shop) => shop.name === intent.destination);
-  if (!end) end = isCurrentLocation(intent.destination) ? await here() : await find(spelled.destination, intent.destination);
+  if (!end) end = isCurrentLocation(intent.destination) ? await here() : await resolvePlace(intent.destination);
   if (stale()) return;
   if (!end) return setPhase('failed', t(`找不到目的地「${intent.destination}」。`, `Couldn't find "${intent.destination}".`));
   state.from = start;
@@ -1025,10 +1009,12 @@ async function runPlan(request) {
   setPhase('checkingLive');
   fitPlanMap();
 
-  const arrivals = liveArrivalCache(state.db, state.lang);
+  const arrivals = state.arrivals = liveArrivalCache(state.db, state.lang);
   const live = await Promise.all(journeys.map((journey) => (journey.departure - now <= LIVE_AHEAD_MS ? retime(journey, arrivals) : journey)));
   if (stale()) return;
   state.journeys = live.sort((a, b) => score(a, state.preference) - score(b, state.preference));
+  // Walks Google answered while the arrivals were coming were left out of these.
+  useWalkTimes();
   writeAdvice();
   const moved = showBestJourney();
   setPhase('done');
@@ -1554,11 +1540,15 @@ function withLegs(segment) {
   return { ...segment, legs, dots: positions.map((position) => (position > turn ? RETURN_COLOR : out)) };
 }
 
-/** The path with real bus lines in place of straight ones, where they have arrived. Walks stay straight. */
+const SHORTEST_GOOGLE_WALK = 40;
+
+/** The path with real walking and bus lines in place of straight ones, where they have arrived. */
 function withRoads(path) {
   return path && {
     ...path,
     segments: path.segments.map((segment) => {
+      const first = segment.points[0], last = segment.points.at(-1);
+      if (segment.mode === 'walk') return { ...segment, points: knownWalk(first, last) ?? segment.points };
       if (!hasRealLine(segment)) return segment;
       const track = trackOf(state.db.routes[segment.routeKey], segment.op);
       if (!track || !segment.positions) return segment;
@@ -1567,12 +1557,40 @@ function withRoads(path) {
   };
 }
 
-/** Only the route on screen asks, and each line only once. */
+/**
+ * Only the route on screen asks, and each line only once. Bus lines are free; walks use Google's
+ * allowance, and bring how long they really take, which then goes into the journeys.
+ */
 function loadRoads(path) {
   if (!path) return Promise.resolve(false);
   const buses = path.segments.filter(hasRealLine).map((segment) => [state.db.routes[segment.routeKey], segment.op])
     .filter(([route, op]) => !knownShape(route, op));
-  return Promise.all(buses.map(([route, op]) => loadShape(route, op))).then(() => buses.some(([route, op]) => knownShape(route, op)));
+  const walks = path.segments.filter((segment) => segment.mode === 'walk')
+    .map((segment) => [segment.points[0], segment.points.at(-1)])
+    .filter(([from, to]) => meters(from, to) >= SHORTEST_GOOGLE_WALK && !knownWalk(from, to));
+  return Promise.all([...buses.map(([route, op]) => loadShape(route, op)), ...walks.map(([from, to]) => googleWalk(from, to))])
+    .then(async () => {
+      // Walks fetched for an earlier version of these journeys still need putting in.
+      const timed = path.segments.some((segment) => segment.mode === 'walk') && await useWalkTimes();
+      return timed || buses.some(([route, op]) => knownShape(route, op)) || walks.some(([from, to]) => knownWalk(from, to));
+    });
+}
+
+/**
+ * Puts Google's walking times into every journey that has one of the walks it knows, and works out
+ * the departures again from there. The order stays, as the rider may be reading it. Says whether anything changed.
+ */
+async function useWalkTimes() {
+  if (!state.journeys.length || !state.from || !state.to) return false;
+  const run = planRun, before = state.journeys;
+  const updated = before.map((journey) => withWalkTimes(journey, walkEnds(journey, state.from.location, state.to.location, state.db), knownWalkTime));
+  if (updated.every((journey, index) => journey === before[index])) return false;
+  const live = await Promise.all(updated.map((journey, index) => (journey === before[index] || !state.arrivals || journey.departure - Date.now() > LIVE_AHEAD_MS ? journey : retime(journey, state.arrivals))));
+  if (run !== planRun || state.journeys !== before) return false;
+  state.journeys = live;
+  writeAdvice();
+  renderSheet();
+  return true;
 }
 
 async function startNavigation(journey) {
@@ -1786,7 +1804,7 @@ function stopSuggestions() {
   }))];
 }
 
-let suggestTimer = null, suggestRun = 0, suggestedPlaces = [];
+let suggestTimer = null, suggestRun = 0, googlePlaces = [];
 
 /** Drops the suggestions still on their way, so none lands on top of a search already made. */
 function stopSuggesting() {
@@ -1796,19 +1814,19 @@ function stopSuggesting() {
 
 const showSuggestions = (field) => (state.routeView ? renderPlaceHistory(field) : renderSheet());
 
-/** Stops answer at once. Places wait for a pause in the typing, to spare the Government's map. */
-function suggestForField(field = 'destination') {
+/** Stops answer at once. Google waits for a pause in the typing, to keep within its allowance. */
+function suggestPlaces(field = 'destination') {
   stopSuggesting();
   const run = suggestRun, text = state[field].trim();
-  if (text.length < 2) suggestedPlaces = [];
+  if (text.length < 2) googlePlaces = [];
   showSuggestions(field);
   getFix();
   if (text.length < 2) return;
   suggestTimer = setTimeout(async () => {
     const near = state.fix && inHongKong(state.fix) ? state.fix : null;
-    const found = await suggestPlaces(text, near, state.lang);
+    const found = await googleSuggest(text, near, state.lang);
     if (run !== suggestRun) return;
-    suggestedPlaces = found;
+    googlePlaces = found;
     showSuggestions(field);
   }, 400);
 }
@@ -1817,10 +1835,11 @@ function suggestForField(field = 'destination') {
 const planToItem = (item) => (item.site ? planTo(item.site) : planToSuggestion(item));
 
 /** From a box on the route page it fills that box, and the trip plans once it has a destination. */
-function fillPlace(field, item) {
-  pickedPlaces.set(item.name, { name: item.name, location: (item.site ?? item).location });
+async function fillPlace(field, item) {
+  const location = item.site?.location ?? await googlePlaceLocation(item.id);
+  if (location) pickedPlaces.set(item.name, { name: item.name, location });
   state[field] = item.name;
-  suggestedPlaces = [];
+  googlePlaces = [];
   syncPlaceInputs();
   renderPlaceHistory(null);
   if (!state.destination.trim()) return $('destination-input')?.focus();
@@ -1832,7 +1851,7 @@ function fillPlace(field, item) {
 function placeSuggestions(field = 'destination', choose = planToItem) {
   const near = state.fix && inHongKong(state.fix) ? state.fix : null;
   const stops = matchingSites(state[field], siteIndex(), near, siteText).map(({ site, distance }) => ({ site, name: nameText(site.name, state.lang), meters: distance ?? undefined }));
-  const items = mergeSuggestions(stops, suggestedPlaces);
+  const items = mergeSuggestions(stops, googlePlaces);
   if (!items.length) return h('div', { class: 'small muted', style: 'padding:6px 4px' }, t('繼續輸入，或按搜尋。', 'Keep typing, or press search.'));
   return h('div', { class: 'list' }, items.map((item) => h('button', {
     class: 'item', onmousedown: (event) => event.preventDefault(),
@@ -1884,7 +1903,7 @@ async function searchStops(aroundMe = false, chosen = null) {
       // A map reads 理大 as any name containing those characters, so expand nicknames first.
       let full = text;
       try { full = (await client()?.intent(searchMessage(null, text, 'fastest')))?.destination ?? text; } catch { /* Search the text as typed. */ }
-      place = await resolvePlace(full, true);
+      place = await resolvePlace(full);
       if (place && full !== text) place = { ...place, name: full };
     }
     if (!place) state.stopError = t(`找不到「${text}」，請換個說法。`, `Couldn't find "${text}". Try another name.`);
@@ -1918,13 +1937,15 @@ function planToPlace(place) {
   runPlan({ kind: 'place', place });
 }
 
-/** Goes to the very place suggested, as a search by name could find another branch. */
-function planToSuggestion(item) {
+/** Goes to the very place Google suggested, as a search by name could find another branch. */
+async function planToSuggestion(item) {
   state.destination = item.name;
   syncPlaceInputs();
+  const location = await googlePlaceLocation(item.id);
+  if (!location) return search();
   history.add('destination', item.name);
   document.activeElement?.blur();
-  return planToPlace({ name: item.name, location: item.location });
+  return planToPlace({ name: item.name, location });
 }
 
 // MARK: Arrival widgets
@@ -2020,7 +2041,7 @@ function renderPlanTop() {
         id: 'destination-input', value: state.destination, placeholder: t('搜尋地點或站名', 'Search places or stops'), enterkeyhint: 'search', autocomplete: 'off',
         oninput: (event) => {
           state.destination = event.target.value;
-          suggestForField();
+          suggestPlaces();
         },
         onfocus: () => sheet.snap('full'),
         onkeydown: (event) => { if (event.key === 'Enter') search(); },
@@ -2033,10 +2054,10 @@ function renderPlanTop() {
       oninput: (event) => {
         state[field] = event.target.value;
         sheet.snap('full');
-        suggestForField(field);
+        suggestPlaces(field);
       },
       onfocus: () => {
-        suggestedPlaces = [];
+        googlePlaces = [];
         renderPlaceHistory(field);
       },
       onblur: () => setTimeout(() => { if (!document.activeElement?.id?.endsWith('-input')) renderPlaceHistory(null); }, 150),
@@ -2223,8 +2244,10 @@ function journeyCard(journey) {
 function legDetail(leg) {
   if (leg.type === 'walk') {
     const minutes = Math.max(1, Math.round(leg.minutes)), target = leg.to ? name(leg.to) : t('目的地', 'destination');
+    // Google's walks follow the streets; without one, the time is from the straight line.
+    const source = leg.walkFromMap ? t('（Google 步行路線）', ' (Google walking route)') : t('（按直線估算）', ' (estimated from the straight line)');
     return h('div', { class: 'leg walking' }, h('div', { class: 'track' }),
-      h('div', { class: 'body small muted' }, t(`步行約 ${minutes} 分鐘（${Math.round(leg.meters)} 米）到 ${target}`, `Walk about ${minutes} min (${Math.round(leg.meters)} m) to ${target}`)));
+      h('div', { class: 'body small muted' }, t(`步行約 ${minutes} 分鐘（${Math.round(leg.meters)} 米）到 ${target}`, `Walk about ${minutes} min (${Math.round(leg.meters)} m) to ${target}`) + source));
   }
   const wait = Math.round(leg.waitMinutes), platform = leg.livePlatform ? ` · ${nameText(leg.livePlatform, state.lang)}` : '';
   const when = !leg.liveDeparture ? t(`估算：等候約 ${wait} 分鐘（暫無實時資料）`, `Estimate: about ${wait} min wait (no live data)`)
@@ -2817,9 +2840,9 @@ function settingsSheet() {
     settingGroup(t('關於', 'About'),
       aboutItem(t('安裝到手機', 'Install on your phone'), t('iPhone：在 Safari 按分享，再選「加入主畫面」。Android：在 Chrome 選單按「安裝應用程式」。', 'iPhone: in Safari, tap Share, then Add to Home Screen. Android: in the Chrome menu, tap Install app.')),
       aboutItem(t('私隱', 'Privacy'), t(
-        '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會經本站伺服器傳送給 Google，或在額度用完時傳送給 OpenStreetMap 的 Photon 服務，用來搜尋你身邊 5 公里內的地點。AI 請求及店舖搜尋經本站伺服器轉送給 DeepSeek 及 Google，伺服器不會保存內容。傳送給 DeepSeek 的只有你輸入的文字、地區、站名、路線號碼及店舖資料，不包括座標；規劃路線時，AI 會收到起點和目的地的名稱，以及兩端步行範圍內的車站名稱和路線號碼，由「我的位置」出發時即你身邊的車站和路線。輸入地點時的聯想及地點搜尋使用政府地理資訊地圖及 OpenStreetMap 的 Photon 服務，只傳送你輸入的文字。Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
-        'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go through this site\'s server to Google, or to OpenStreetMap\'s Photon service once the allowance is used up, to search within 5 km of you. AI requests and shop searches pass through this site\'s server to DeepSeek and Google, and the server keeps none of it. DeepSeek only receives your text, the district, stop names, route numbers and shop details, never coordinates. To plan a route, the AI is given the names of the start and destination and the stations and route numbers within a walk of each, which from My location means the ones around you. Place suggestions and place searches use the Government\'s map and OpenStreetMap\'s Photon service, which only receive what you type. Google Maps loads straight into your browser under Google\'s privacy policy.')),
-      aboutItem(t('資料來源', 'Data sources'), t('路線資料來自 hkbus.app；到站時間來自各營辦商；路線由 AI（DeepSeek）提出，再以路線資料核實；地點來自政府地理資訊及 OpenStreetMap；地圖及店舖來自 Google，額度用完後改用 OpenFreeMap 及 OpenStreetMap。', 'Route data from hkbus.app; arrivals from the operators; routes proposed by AI (DeepSeek) and checked against the route data; places from Government GIS and OpenStreetMap; maps and shops from Google, and after the allowance, OpenFreeMap and OpenStreetMap.')),
+        '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會經本站伺服器傳送給 Google，或在額度用完時傳送給 OpenStreetMap 的 Photon 服務，用來搜尋你身邊 5 公里內的地點。AI 請求及店舖搜尋經本站伺服器轉送給 DeepSeek 及 Google，伺服器不會保存內容。傳送給 DeepSeek 的只有你輸入的文字、地區、站名、路線號碼及店舖資料，不包括座標；規劃路線時，AI 會收到起點和目的地的名稱，以及兩端步行範圍內的車站名稱和路線號碼，由「我的位置」出發時即你身邊的車站和路線。步行路段的起點和終點座標會經本站伺服器傳送給 Google，以取得實際步行路線及時間。Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
+        'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go through this site\'s server to Google, or to OpenStreetMap\'s Photon service once the allowance is used up, to search within 5 km of you. AI requests and shop searches pass through this site\'s server to DeepSeek and Google, and the server keeps none of it. DeepSeek only receives your text, the district, stop names, route numbers and shop details, never coordinates. To plan a route, the AI is given the names of the start and destination and the stations and route numbers within a walk of each, which from My location means the ones around you. The two ends of each walk go through this site\'s server to Google, for the real walking route and time. Google Maps loads straight into your browser under Google\'s privacy policy.')),
+      aboutItem(t('資料來源', 'Data sources'), t('路線資料來自 hkbus.app；到站時間來自各營辦商；路線由 AI（DeepSeek）提出，再以路線資料核實；地圖、地點、步行路線及店舖來自 Google，額度用完後改用 OpenFreeMap、OpenStreetMap 及政府地理資訊。', 'Route data from hkbus.app; arrivals from the operators; routes proposed by AI (DeepSeek) and checked against the route data; maps, places, walking routes and shops from Google, and after the allowance, OpenFreeMap, OpenStreetMap and Government GIS.')),
       h('a', { class: 'small link', href: 'https://github.com/kevinwentao07-zwt/hktransport', target: '_blank', rel: 'noopener' }, t('GitHub 原始碼（GPL-3.0）', 'Source on GitHub (GPL-3.0)'))),
   ];
 }
