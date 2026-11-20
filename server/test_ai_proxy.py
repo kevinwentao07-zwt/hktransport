@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 from pathlib import Path
 from shutil import copy
 from unittest.mock import patch
@@ -92,6 +93,26 @@ class PolylineTests(unittest.TestCase):
             'languageCode': 'zh-HK', 'regionCode': 'HK', 'transitPreferences': {'routingPreference': 'LESS_WALKING'},
             'arrivalTime': '2023-11-14T22:13:20.000Z',
         })
+
+
+    def test_transitous_sets_two_walking_limits_and_the_application_user_agent(self):
+        start, end = {'lat': 22.28, 'lng': 114.15}, {'lat': 22.29, 'lng': 114.16}
+        response = type('Response', (), {
+            '__enter__': lambda self: self,
+            '__exit__': lambda self, *args: False,
+            'read': lambda self: b'{"itineraries":[{"legs":[]}]}',
+        })()
+        with patch.object(ai_proxy.urllib.request, 'urlopen', return_value=response) as upstream:
+            self.assertEqual(ai_proxy.transitous_routes(start, end, 'zh-HK', 'arrive', 1_700_000_000_000), [{'legs': []}])
+        request = upstream.call_args.args[0]
+        url = urllib.parse.urlparse(request.full_url)
+        query = urllib.parse.parse_qs(url.query)
+        self.assertEqual((url.netloc, url.path), ('api.transitous.org', '/api/v6/plan'))
+        self.assertEqual(query['maxPreTransitTime'], ['600'])
+        self.assertEqual(query['maxPostTransitTime'], ['600'])
+        self.assertEqual(query['arriveBy'], ['true'])
+        self.assertEqual(query['time'], ['2023-11-14T22:13:20Z'])
+        self.assertIn('github.com/kevinwentao07-zwt/hktransport/issues', request.get_header('User-agent'))
 
 
 class SpendingTests(unittest.TestCase):
@@ -201,7 +222,7 @@ class ProxyTests(unittest.TestCase):
     def test_map_key_stops_at_the_limit_and_never_shares_secrets(self):
         ai_proxy.budget = budget(map=(1, 10, 10))
         text = self.get_status()
-        self.assertEqual(json.loads(text), {'available': True, 'mapKey': 'map-key', 'places': True})
+        self.assertEqual(json.loads(text), {'available': True, 'mapKey': 'map-key', 'places': True, 'transitous': True})
         self.assertNotIn(SECRET, text)
         self.assertNotIn('places-key', text)
         self.assertEqual(json.loads(self.get_status())['mapKey'], None)
@@ -257,6 +278,19 @@ class ProxyTests(unittest.TestCase):
             status, payload = self.post(trip, path='/api/transit')
             self.assertEqual((status, json.loads(payload)), (200, {'routes': [{'legs': []}]}))
             self.assertEqual(self.post(trip, path='/api/transit')[0], 429)
+            upstream.assert_called_once()
+
+    def test_transitous_has_its_own_quota_and_respects_the_trial_toggle(self):
+        ai_proxy.budget = budget(transitous=(1, 10, 10))
+        trip = {'from': {'lat': 22.28, 'lng': 114.15}, 'to': {'lat': 22.29, 'lng': 114.16}, 'preference': 'lessWalking'}
+        with patch.object(ai_proxy, 'transitous_routes', return_value=[{'legs': []}]) as upstream:
+            with patch.object(ai_proxy, 'TRANSITOUS_ENABLED', False):
+                self.assertEqual(self.post(trip, path='/api/transitous')[0], 429)
+            self.assertEqual(self.post(trip, origin=False, path='/api/transitous')[0], 403)
+            self.assertEqual(self.post({**trip, 'to': {'lat': 42, 'lng': 114.16}}, path='/api/transitous')[0], 400)
+            response = self.post(trip, path='/api/transitous')
+            self.assertEqual((response[0], json.loads(response[1])), (200, {'routes': [{'legs': []}]}))
+            self.assertEqual(self.post(trip, path='/api/transitous')[0], 429)
             upstream.assert_called_once()
 
     def test_walking_route_stops_at_the_limit(self):

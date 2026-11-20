@@ -10,6 +10,7 @@ import { chatMessage, sharedAI, isCurrentLocation, normalizedOrigin, parseFollow
 import { HONG_KONG, cleanArea, googlePlaceLocation, googleSearch, googleSuggest, googleWalk, inHongKong, insideArea, isNearby, knownShape, knownWalk, knownWalkTime, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
 
 import { googleJourneys, requestGoogleTransit } from './google-transit.js?v=dev';
+import { requestTransitous, transitousJourneys } from './transitous.js?v=dev';
 
 // MARK: Storage
 
@@ -711,7 +712,7 @@ function useFreeMap() {
   }
   leafletMap.useBase();
   if (wasGoogle) {
-    if (state.candidates.some((journey) => journey.byGoogle || journey.legs.some((leg) => leg.walkFromMap))) runPlan({ kind: 'replan' });
+    if (state.candidates.some((journey) => journey.provider === 'google' || (!journey.provider && journey.legs.some((leg) => leg.walkFromMap)))) runPlan({ kind: 'replan' });
     frameMap();
   }
 }
@@ -768,6 +769,7 @@ async function checkServer() {
     if (response.ok) shared = await response.json();
   } catch { /* The page works without it. */ }
   state.sharedAI = shared?.available === true;
+  state.transitous = shared?.transitous === true;
   spareEmbedKey = shared?.embedKey ?? null;
   if (state.sharedAI) renderTab();
   if (shared?.mapKey) useGoogleMap(shared);
@@ -995,31 +997,50 @@ async function runPlan(request) {
       return [];
     }
   };
-  let google = [];
-  if (mapView === googleMap) {
-    transitRequest = new AbortController();
-    const routes = await requestGoogleTransit(start.location, end.location, { preference, mode, at, lang: state.lang, signal: transitRequest.signal });
-    if (stale()) return;
-    if (mapView === googleMap) google = googleJourneys(routes, state.db, departure, arriveBy, now);
-  }
-  const ready = (journeys) => journeys.some((journey) => fitsWalkLimit(journey) && !arrivesLate(journey));
-  const useGoogle = ready(google);
-  let candidates = rankTripOptions(useGoogle ? google : [...await local(), ...google], preference, 8);
-  if (stale()) return;
-  if (!candidates.length) return setPhase('failed', t('找不到可搭乘的公共交通路線，請試另一個時間或上車地點。', 'No public transport route found. Try another time or boarding location.'));
-  showTripOptions(candidates);
-  setPhase('checkingLive');
-  fitPlanMap();
+  transitRequest = new AbortController();
+  const options = { preference, mode, at, lang: state.lang, signal: transitRequest.signal };
+  const providers = [];
+  if (state.transitous) providers.push(async () => transitousJourneys(
+    await requestTransitous(start.location, end.location, options), state.db, departure, arriveBy, now,
+  ));
+  if (mapView === googleMap) providers.push(async () => {
+    if (mapView !== googleMap) return [];
+    const routes = await requestGoogleTransit(start.location, end.location, options);
+    return mapView === googleMap ? googleJourneys(routes, state.db, departure, arriveBy, now) : [];
+  });
+  providers.push(local);
 
+  const ready = (journeys) => journeys.some((journey) => rides(journey).length && fitsWalkLimit(journey) && !arrivesLate(journey));
   const arrivals = state.arrivals = liveArrivalCache(state.db, state.lang);
-  const check = async (journeys) => (await Promise.all(journeys.map((journey) => (
-    journey.departure - now <= LIVE_AHEAD_MS ? retime(journey, arrivals) : journey
-  )))).filter((journey) => !journey.missedConnection);
-  candidates = await check(candidates);
-  if (stale()) return;
-  if (useGoogle && !ready(candidates)) candidates.push(...await check(await local()));
-  if (stale()) return;
-  if (!candidates.length) return setPhase('failed', t('這些班次已趕不上，請重新搜尋。', 'Those departures can no longer be reached. Search again.'));
+  const overflow = [];
+  let candidates = [], found = false;
+  for (const provider of providers) {
+    const routes = await provider();
+    if (stale()) return;
+    found ||= routes.length > 0;
+    if (provider !== local && !ready(routes)) {
+      overflow.push(...routes);
+      continue;
+    }
+    const provisional = rankTripOptions(ready(routes) ? routes : [...routes, ...overflow], preference, 8);
+    if (provisional.length) {
+      showTripOptions(provisional);
+      setPhase('checkingLive');
+      fitPlanMap();
+    }
+    candidates = (await Promise.all(provisional.map((journey) => (
+      journey.departure - now <= LIVE_AHEAD_MS ? retime(journey, arrivals) : journey
+    )))).filter((journey) => !journey.missedConnection);
+    if (stale()) return;
+    if (provider === local || ready(candidates)) break;
+    overflow.push(...candidates);
+  }
+  if (!candidates.length) {
+    showTripOptions([]);
+    return setPhase('failed', found
+      ? t('這些班次已趕不上，請重新搜尋。', 'Those departures can no longer be reached. Search again.')
+      : t('找不到可搭乘的公共交通路線，請試另一個時間或上車地點。', 'No public transport route found. Try another time or boarding location.'));
+  }
   const moved = showTripOptions(candidates, true);
   setPhase('done');
   if (moved && !mapTouched) fitPlanMap();
@@ -1529,7 +1550,7 @@ function glideFrame(now) {
   requestAnimationFrame(glideFrame);
 }
 
-const hasRealLine = (segment) => !segment.google && segment.mode === 'ride' && !['mtr', 'lightRail'].includes(segment.op);
+const hasRealLine = (segment) => !segment.providerShape && segment.mode === 'ride' && !['mtr', 'lightRail'].includes(segment.op);
 
 const tracks = new Map();
 
@@ -1567,14 +1588,14 @@ function withRoads(path) {
   return path && {
     ...path,
     segments: path.segments.map((segment) => {
-      if (segment.google) return segment;
+      if (segment.providerShape) return segment;
       const first = segment.points[0], last = segment.points.at(-1);
       if (segment.mode === 'walk') return mapView === googleMap ? { ...segment, points: knownWalk(first, last) ?? segment.points } : segment;
       if (!hasRealLine(segment)) return segment;
       const track = trackOf(state.db.routes[segment.routeKey], segment.op);
       if (!track || !segment.positions) return segment;
       return { ...segment, line: roadBetween(track, segment.positions[0], segment.positions.at(-1)), marks: segment.positions.map((position) => track.passes[position]?.location) };
-    }).map((segment) => (segment.google ? segment : withLegs(segment))),
+    }).map((segment) => (segment.providerShape ? segment : withLegs(segment))),
   };
 }
 
@@ -1586,7 +1607,7 @@ function loadRoads(path) {
   if (!path) return Promise.resolve(false);
   const buses = path.segments.filter(hasRealLine).map((segment) => [state.db.routes[segment.routeKey], segment.op])
     .filter(([route, op]) => !knownShape(route, op));
-  const walks = path.segments.filter((segment) => !segment.google && segment.mode === 'walk' && mapView === googleMap)
+  const walks = path.segments.filter((segment) => !segment.providerShape && segment.mode === 'walk' && mapView === googleMap)
     .map((segment) => [segment.points[0], segment.points.at(-1)])
     .filter(([from, to]) => meters(from, to) >= SHORTEST_GOOGLE_WALK && !knownWalk(from, to));
   return Promise.all([...buses.map(([route, op]) => loadShape(route, op)), ...walks.map(([from, to]) => googleWalk(from, to))])
@@ -1601,7 +1622,7 @@ function loadRoads(path) {
 async function useWalkTimes() {
   if (mapView !== googleMap || state.phase !== 'done' || !state.candidates.length || !state.from || !state.to) return false;
   const run = planRun, before = state.candidates;
-  const updated = before.map((journey) => (journey.byGoogle ? journey
+  const updated = before.map((journey) => (journey.provider ? journey
     : withWalkTimes(journey, walkEnds(journey, state.from.location, state.to.location, state.db), knownWalkTime)));
   if (updated.every((journey, index) => journey === before[index])) return false;
   const live = await Promise.all(updated.map((journey, index) => (journey === before[index] || !state.arrivals || journey.departure - Date.now() > LIVE_AHEAD_MS ? journey : retime(journey, state.arrivals))));
@@ -2233,7 +2254,7 @@ function journeyCard(journey) {
   const shown = journey.legs.filter((leg) => leg.type === 'ride' || leg.minutes >= 0.5);
   const changes = transfers(journey);
   const arrive = clock(arrivalTime(journey));
-  const canNavigate = rides(journey).every((ride) => ride.routeKey);
+  const canNavigate = rides(journey).every((ride) => ride.routeKey || ride.providerStops?.length >= 2);
   return h('div', { class: `card${isOpen ? ' open' : ''}${state.onMap === id ? ' on-map' : ''}${state.justOpened === id ? ' reveal' : ''}`, 'data-journey': id },
     h('button', {
       class: 'tap', 'aria-expanded': String(isOpen), onclick: () => {
@@ -2252,7 +2273,7 @@ function journeyCard(journey) {
         h('span', { class: 'minutes' }, Math.round(totalMinutes(journey))),
         h('span', { class: 'small muted' }, t('分鐘', 'min')),
         h('span', { class: 'grow' }),
-        journey.byGoogle && h('span', { class: 'tiny muted bold', lang: 'en' }, 'Google Maps'),
+        journey.provider && h('span', { class: 'tiny muted bold', lang: 'en' }, journey.provider === 'transitous' ? 'Transitous' : 'Google Maps'),
         rides(journey).some((ride) => ride.liveDeparture) && h('span', { class: 'row tiny live bold', style: 'gap:6px' }, h('i', { class: 'pulse' }), t('實時', 'Live')),
         h('span', { class: `small ${arrivesLate(journey) ? 'late' : 'muted'}` }, state.when ? `${clock(journey.departure)} – ${arrive}` : t(`${arrive} 到達`, `Arrive ${arrive}`))),
       h('div', { class: 'chips', style: 'margin-top:9px' }, shown.flatMap((leg, index) => [
@@ -2272,12 +2293,14 @@ function legDetail(leg) {
   if (leg.type === 'walk') {
     const minutes = Math.max(1, Math.round(leg.minutes)), target = leg.targetName ?? (leg.to ? name(leg.to) : t('目的地', 'destination'));
     // Google's walks follow the streets; without one, the time is from the straight line.
-    const source = leg.walkFromMap ? t('（Google 步行路線）', ' (Google walking route)') : t('（按直線估算）', ' (estimated from the straight line)');
+    const source = leg.walkSource === 'transitous' ? t('（Transitous 步行路線）', ' (Transitous walking route)')
+      : leg.walkFromMap ? t('（Google 步行路線）', ' (Google walking route)') : t('（按直線估算）', ' (estimated from the straight line)');
     return h('div', { class: 'leg walking' }, h('div', { class: 'track' }),
       h('div', { class: 'body small muted' }, t(`步行約 ${minutes} 分鐘（${Math.round(leg.meters)} 米）到 ${target}`, `Walk about ${minutes} min (${Math.round(leg.meters)} m) to ${target}`) + source));
   }
   const wait = Math.round(leg.waitMinutes), platform = leg.livePlatform ? ` · ${nameText(leg.livePlatform, state.lang)}` : '';
-  const when = !leg.liveDeparture && leg.googleDeparture != null ? t(`預計 ${clock(leg.googleDeparture)} 開出`, `Expected departure ${clock(leg.googleDeparture)}`)
+  const scheduledPlatform = leg.scheduledPlatform ? t(` · 月台 ${leg.scheduledPlatform}`, ` · Platform ${leg.scheduledPlatform}`) : '';
+  const when = !leg.liveDeparture && leg.scheduledDeparture != null ? t(`預計 ${clock(leg.scheduledDeparture)} 開出`, `Expected departure ${clock(leg.scheduledDeparture)}`) + scheduledPlatform
     : !leg.liveDeparture ? t(`估算：等候約 ${wait} 分鐘（暫無實時資料）`, `Estimate: about ${wait} min wait (no live data)`)
     : leg.isProjected ? t(`實時推算：約 ${clock(leg.liveDeparture)} 開出（等候約 ${wait} 分鐘）`, `Projected from live: about ${clock(leg.liveDeparture)} (${wait} min wait)`) + platform
       : t(`實時：${clock(leg.liveDeparture)} 開出（等候約 ${wait} 分鐘）`, `Live: departs ${clock(leg.liveDeparture)} (${wait} min wait)`) + platform;
@@ -2411,6 +2434,12 @@ function planSheet() {
     } else {
       items.push(suggestionList(state.discovery));
     }
+  }
+  if (state.journeys.some((journey) => journey.provider === 'transitous')) {
+    items.push(h('div', { class: 'tiny muted' },
+      h('a', { href: 'https://transitous.org/sources/', target: '_blank', rel: 'noopener' }, t('Transitous 資料來源', 'Transitous data sources')),
+      ' · ',
+      h('a', { href: 'https://www.openstreetmap.org/copyright', target: '_blank', rel: 'noopener' }, '© OpenStreetMap contributors')));
   }
   items.push(state.journeys.map(journeyCard));
   const isWaitingForAnswer = state.discovery?.stage === 'asking';
@@ -2861,7 +2890,7 @@ function settingsSheet() {
     settingGroup(t('AI 助手', 'AI assistant'),
       h('div', { class: 'setting inline' }, h('span', {}, t('狀態', 'Status')),
         h('span', { class: state.sharedAI ? 'ok' : 'muted' }, state.sharedAI ? t('已連接', 'Connected') : t('未連接', 'Not connected'))),
-      h('div', { class: 'tiny muted' }, t('AI 理解行程及地點要求。路線由 Google 地圖或內置演算法規劃。', 'The AI interprets trip and place requests. Routes come from Google Maps or the built-in planner.'))),
+      h('div', { class: 'tiny muted' }, t('AI 理解行程及地點要求。路線由 Transitous、Google 地圖或內置演算法規劃。', 'The AI interprets trip and place requests. Routes come from Transitous, Google Maps or the built-in planner.'))),
     settingGroup(t('我的資料', 'My data'),
       h('div', { class: 'setting inline' }, h('span', {}, t(`搜尋記錄（${searches}）`, `Search history (${searches})`)),
         clearButton(t('清除', 'Clear'), searches, () => {
@@ -2877,9 +2906,9 @@ function settingsSheet() {
     settingGroup(t('關於', 'About'),
       aboutItem(t('安裝到手機', 'Install on your phone'), t('iPhone：在 Safari 按分享，再選「加入主畫面」。Android：在 Chrome 選單按「安裝應用程式」。', 'iPhone: in Safari, tap Share, then Add to Home Screen. Android: in the Chrome menu, tap Install app.')),
       aboutItem(t('私隱', 'Privacy'), t(
-        '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會經本站伺服器傳送給 Google，或在額度用完時傳送給 OpenStreetMap 的 Photon 服務，用來搜尋你身邊 5 公里內的地點。AI 請求及店舖搜尋經本站伺服器轉送給 DeepSeek 及 Google，伺服器不會保存內容。傳送給 DeepSeek 的只有你輸入的文字、地區、站名、路線號碼及店舖資料，不包括座標。使用 Google 規劃交通及步行路線時，起終點座標及所選出發或到達時間會經本站伺服器傳送給 Google。Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
-        'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go through this site\'s server to Google, or to OpenStreetMap\'s Photon service once the allowance is used up, to search within 5 km of you. AI requests and shop searches pass through this site\'s server to DeepSeek and Google, and the server keeps none of it. DeepSeek only receives your text, the district, stop names, route numbers and shop details, never coordinates. For Google public transport and walking directions, the start and end coordinates and selected departure or arrival time go through this site\'s server to Google. Google Maps loads straight into your browser under Google\'s privacy policy.')),
-      aboutItem(t('資料來源', 'Data sources'), t('路線資料來自 hkbus.app；到站時間來自各營辦商；公共交通路線由 Google 地圖或內置演算法規劃；地圖、地點、步行路線及店舖來自 Google，額度用完後改用 OpenFreeMap、OpenStreetMap 及政府地理資訊。', 'Route data from hkbus.app; arrivals from the operators; public transport routes from Google Maps or the built-in planner; maps, places, walking routes and shops from Google, and after the allowance, OpenFreeMap, OpenStreetMap and Government GIS.')),
+        '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會經本站伺服器傳送給 Google，或在額度用完時傳送給 OpenStreetMap 的 Photon 服務，用來搜尋你身邊 5 公里內的地點。AI 請求及店舖搜尋經本站伺服器轉送給 DeepSeek 及 Google，伺服器不會保存內容。傳送給 DeepSeek 的只有你輸入的文字、地區、站名、路線號碼及店舖資料，不包括座標。規劃公共交通路線時，起終點座標及所選時間會經本站伺服器傳送給 Transitous 或 Google。Google 亦會收到步行路段兩端的座標。Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
+        'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go through this site\'s server to Google, or to OpenStreetMap\'s Photon service once the allowance is used up, to search within 5 km of you. AI requests and shop searches pass through this site\'s server to DeepSeek and Google, and the server keeps none of it. DeepSeek only receives your text, the district, stop names, route numbers and shop details, never coordinates. For public transport directions, the start and end coordinates and selected time go through this site\'s server to Transitous or Google. Google also receives the two ends of walking segments. Google Maps loads straight into your browser under Google\'s privacy policy.')),
+      aboutItem(t('資料來源', 'Data sources'), t('路線資料來自 hkbus.app；到站時間來自各營辦商；公共交通路線由 Transitous、Google 地圖或內置演算法規劃；地圖、地點、步行路線及店舖來自 Google，額度用完後改用 OpenFreeMap、OpenStreetMap 及政府地理資訊。', 'Route data from hkbus.app; arrivals from the operators; public transport routes from Transitous, Google Maps or the built-in planner; maps, places, walking routes and shops from Google, and after the allowance, OpenFreeMap, OpenStreetMap and Government GIS.')),
       h('a', { class: 'small link', href: 'https://www.google.com/help/terms_maps/', target: '_blank', rel: 'noopener' }, t('Google 地圖使用條款', 'Google Maps Terms of Service')),
       h('a', { class: 'small link', href: 'https://policies.google.com/privacy', target: '_blank', rel: 'noopener' }, t('Google 私隱政策', 'Google Privacy Policy')),
       h('a', { class: 'small link', href: 'https://github.com/kevinwentao07-zwt/hktransport', target: '_blank', rel: 'noopener' }, t('GitHub 原始碼（GPL-3.0）', 'Source on GitHub (GPL-3.0)'))),

@@ -590,7 +590,7 @@ test('Google transit joins adjacent walking instructions and matches the boardin
   assert.equal(T.rankTripOptions([long, short], 'lessWalking')[0], short);
   assert.deepEqual(T.rankTripOptions([short, { ...short }], 'lessWalking'), [short]);
   assert.equal(T.totalMinutes(short), 35);
-  assert.equal(T.journeyPath(short, at('A'), at('C'), db).segments[1].google, true);
+  assert.equal(T.journeyPath(short, at('A'), at('C'), db).segments[1].providerShape, true);
 });
 
 test('local planning expands a station search after a nearby stop gives no route', () => {
@@ -622,10 +622,37 @@ test('the default ranking prefers a shorter walk over saving a few minutes', () 
 
 test('a changed ETA that misses a Google connection invalidates the itinerary', async () => {
   const [first] = T.rides(T.plan(network, at('A'), at('C'), noon)[0]);
-  const second = { ...first, route: '2', googleDeparture: noon + 25 * 60_000 };
-  const journey = { departure: noon, byGoogle: true, legs: [
-    { ...first, googleDeparture: noon }, second,
+  const second = { ...first, route: '2', scheduledDeparture: noon + 25 * 60_000 };
+  const journey = { departure: noon, provider: 'google', legs: [
+    { ...first, scheduledDeparture: noon }, second,
   ] };
   const updated = await T.retime(journey, (ride) => Promise.resolve(ride.route === '1' ? [{ date: noon + 15 * 60_000 }] : null));
   assert.equal(updated.missedConnection, true);
+});
+
+test('Transitous preserves walk durations and matches a scheduled bus to operator stops', async () => {
+  const { transitousJourneys } = await import('../js/transitous.js');
+  const place = (id, name) => ({ name, lat: at(id).lat, lon: at(id).lng });
+  const board = place('A', '甲'), alight = place('C', '丙'), middle = place('B', '乙');
+  const walk = (duration) => ({ mode: 'WALK', from: board, to: board, duration, distance: 320 });
+  const ride = (number) => ({
+    mode: 'BUS', from: board, to: alight, intermediateStops: [middle], tripId: 'bus-trip',
+    agencyName: 'Kowloon Motor Bus', routeShortName: number, headsign: '丙',
+    startTime: new Date(noon + 15 * 60_000).toISOString(), endTime: new Date(noon + 35 * 60_000).toISOString(),
+  });
+  const cancelled = { ...ride('1'), cancelled: true };
+  const [matched, long, unmatched] = transitousJourneys([
+    { legs: [walk(300), ride('1')] },
+    { legs: [walk(330), walk(330), ride('1')] },
+    { legs: [walk(180), ride('99')] },
+    { legs: [walk(180), cancelled] },
+    { legs: [walk(180)] },
+  ], db, noon);
+  assert.equal(matched.provider, 'transitous');
+  assert.equal(T.totalMinutes(matched), 35);
+  assert.equal(T.rides(matched)[0].routeKey, 'r1');
+  assert.equal(T.fitsWalkLimit(long), false);
+  assert.equal(T.rides(unmatched)[0].routeKey, undefined);
+  assert.deepEqual(T.journeyPath(unmatched, at('A'), at('C'), db).segments[1].stopIDs, ['甲', '乙', '丙']);
+  assert.equal(transitousJourneys([{ legs: [cancelled] }, { legs: [walk(300)] }], db, noon).length, 0);
 });

@@ -179,7 +179,7 @@ spending = Spending(
 # budgeted space in Routes API usage.
 budget = Budget(
     Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'usage.json',
-    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 5000, 40), 'transit': (120, 4000, 25), 'details': (30, 900, 12), 'suggest': (300, 9000, 60), 'place': (300, 9000, 60)},
+    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 5000, 40), 'transit': (120, 4000, 25), 'transitous': (300, 9000, 30), 'details': (30, 900, 12), 'suggest': (300, 9000, 60), 'place': (300, 9000, 60)},
 )
 
 
@@ -367,6 +367,31 @@ def transit_routes(start, end, preference, language, mode=None, when=None):
     return compute_routes(start, end, TRANSIT_FIELDS, 5, **options)
 
 
+TRANSITOUS_ENABLED = os.environ.get('TRANSITOUS_ENABLED', '1') == '1'
+TRANSITOUS_AGENT = 'hktransport/1.1 (+https://github.com/kevinwentao07-zwt/hktransport/issues)'
+
+
+def transitous_routes(start, end, language, mode=None, when=None):
+    # Round departures up to a full minute so a suggested walk can still start after the request.
+    when = when if when is not None else int(time.time() * 1000)
+    if mode != 'arrive':
+        when = ((when + 59_999) // 60_000) * 60_000
+    parameters = {
+        'fromPlace': f"{start['lat']},{start['lng']}",
+        'toPlace': f"{end['lat']},{end['lng']}",
+        'time': datetime.fromtimestamp(when / 1000, timezone.utc).isoformat().replace('+00:00', 'Z'),
+        'arriveBy': 'true' if mode == 'arrive' else 'false',
+        'maxPreTransitTime': 600,
+        'maxPostTransitTime': 600,
+        'numItineraries': 6,
+        'locale': language,
+    }
+    url = 'https://api.transitous.org/api/v6/plan?' + urllib.parse.urlencode(parameters)
+    request = urllib.request.Request(url, headers={'User-Agent': TRANSITOUS_AGENT, 'Accept': 'application/json'})
+    with urllib.request.urlopen(request, timeout=4) as response:
+        return json.load(response).get('itineraries', [])
+
+
 def in_hong_kong(point):
     if not isinstance(point, dict):
         return False
@@ -399,7 +424,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path != '/api/ai':
             return self.send(404, {'error': 'Not found'})
-        body = {'available': bool(api_key()), 'mapKey': None, 'places': False}
+        body = {'available': bool(api_key()), 'mapKey': None, 'places': False, 'transitous': TRANSITOUS_ENABLED}
         # Handing out the key is what starts a billed map load, so this is where it is counted.
         # Only the page itself asks this way, and Google locks the key to this site.
         is_page = self.headers.get('Sec-Fetch-Site') == 'same-origin'
@@ -435,12 +460,12 @@ class Handler(BaseHTTPRequestHandler):
         return body
 
     def do_POST(self):
-        if self.path not in ('/api/ai', '/api/places', '/api/walk', '/api/transit', '/api/suggest', '/api/place'):
+        if self.path not in ('/api/ai', '/api/places', '/api/walk', '/api/transit', '/api/transitous', '/api/suggest', '/api/place'):
             return self.send(404, {'error': 'Not found'})
         body = self.read_json()
         if body is None:
             return None
-        return {'/api/places': self.places, '/api/walk': self.walk, '/api/transit': self.transit, '/api/suggest': self.suggest, '/api/place': self.place}.get(self.path, self.ask)(body)
+        return {'/api/places': self.places, '/api/walk': self.walk, '/api/transit': self.transit, '/api/transitous': self.transit, '/api/suggest': self.suggest, '/api/place': self.place}.get(self.path, self.ask)(body)
 
     def suggest(self, body):
         query, origin = body.get('query'), body.get('from')
@@ -499,16 +524,20 @@ class Handler(BaseHTTPRequestHandler):
             now = int(time.time() * 1000)
             if mode not in ('depart', 'arrive') or type(when) is not int or not now - 60_000 <= when <= now + 100 * 86_400_000:
                 return self.send(400, {'error': 'Bad request'})
-        if not routes_key() or not budget.spend('transit', self.visitor()):
+        community = self.path == '/api/transitous'
+        source = 'transitous' if community else 'transit'
+        available = TRANSITOUS_ENABLED if community else bool(routes_key())
+        if not available or not budget.spend(source, self.visitor()):
             return self.send(429, {'error': 'Limit reached'})
         language = 'en' if body.get('lang') == 'en' else 'zh-HK'
         try:
-            routes = transit_routes(start, end, preference, language, mode, when)
+            routes = (transitous_routes(start, end, language, mode, when) if community
+                      else transit_routes(start, end, preference, language, mode, when))
         except urllib.error.HTTPError as error:
-            print(f'Transit returned {error.code}', file=sys.stderr, flush=True)
+            print(f'{source} returned {error.code}', file=sys.stderr, flush=True)
             return self.send(502, {'error': 'Unavailable'})
         except (OSError, ValueError, KeyError, TypeError) as error:
-            print(f'Transit failed: {type(error).__name__}', file=sys.stderr, flush=True)
+            print(f'{source} failed: {type(error).__name__}', file=sys.stderr, flush=True)
             return self.send(502, {'error': 'Unavailable'})
         self.send(200, {'routes': routes})
 

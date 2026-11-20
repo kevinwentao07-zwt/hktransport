@@ -16,8 +16,8 @@ A Hong Kong public transport web app: trip planning, live arrivals, buses on the
 - **Three preferences**: fastest, fewer changes, less walking.
 - **Live correction**: estimates are replaced with the operators' real arrival times, and the options reordered.
 - **Navigation**: follows your position and tells you the next stop, how many are left and where to get off.
-- **Google transit directions**: with Google Maps active, the app asks for routes with less walking and alternatives. The built-in RAPTOR search looks for routes via stops near both ends when Google has no suitable result.
-- **Up to 10 minutes per walk**: longer walks are shown on request when needed. Google plans use street walking times. The built-in planner labels estimates where street data is unavailable.
+- **Transitous directions (trial)**: the app starts with Transitous, then tries Google Maps and the built-in RAPTOR search when it needs alternatives.
+- **Up to 10 minutes per walk**: longer walks are shown on request when needed. Transitous and Google plans use street walking times. The built-in planner labels estimates where street data is unavailable.
 - Covers buses, minibuses, MTR and Light Rail. The built-in planner searches up to three rides.
 
 ### Buses on the map
@@ -61,7 +61,7 @@ Type or speak. Basic parsing takes over if the AI is unavailable.
 | Part | Approach |
 | --- | --- |
 | Web | Static PWA in plain ES modules, with no framework or build step |
-| Trip planning | Google Routes API for transit, with RAPTOR in a Web Worker for fallback search |
+| Trip planning | Transitous for transit, with Google Routes API and RAPTOR in a Web Worker for fallback search |
 | Places and walks | Google's place search and walking routes, then Government GIS, OpenStreetMap and straight-line estimates after the allowance |
 | Arrivals | Straight from the browser to KMB/LWB, Citybus, NLB, green minibuses, MTR and Light Rail |
 | Map | Google Maps, moving to OpenFreeMap once the allowance runs out |

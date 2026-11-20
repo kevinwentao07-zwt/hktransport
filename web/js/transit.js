@@ -325,7 +325,7 @@ export function planAdvice(journeys, t, lineOf, now) {
     `建議第一個方案：全程 ${minutes} 分鐘，${changes ? `轉 ${changes} 次車` : '直達'}，步行 ${walk} 米。`,
     `Best option: ${minutes} min, ${changes ? `${changes} change${changes > 1 ? 's' : ''}` : 'direct'}, ${walk} m on foot.`,
   )];
-  if (!best.byGoogle && best.arriveBy != null && !arrivesLate(best)) lines.push(t('出發時間已預留最長的候車時間。', 'The start time allows for the longest wait.'));
+  if (!best.provider && best.arriveBy != null && !arrivesLate(best)) lines.push(t('出發時間已預留最長的候車時間。', 'The start time allows for the longest wait.'));
   const first = rides(best)[0];
   if (first?.liveDeparture && !first.isProjected) {
     const wait = Math.max(0, Math.floor((first.liveDeparture - now) / 60_000)), line = lineOf(first);
@@ -785,9 +785,9 @@ export async function retime(journey, arrivals) {
       ride.liveDeparture = null;
       ride.isProjected = false;
       ride.livePlatform = null;
-      if (ride.googleDeparture != null) {
-        if (ride.googleDeparture < atStop - 30_000) return { ...journey, missedConnection: true };
-        ride.waitMinutes = Math.max(0, (ride.googleDeparture - atStop) / 60_000);
+      if (ride.scheduledDeparture != null) {
+        if (ride.scheduledDeparture < atStop - 30_000) return { ...journey, missedConnection: true };
+        ride.waitMinutes = Math.max(0, (ride.scheduledDeparture - atStop) / 60_000);
       }
     }
     clock = atStop + (ride.waitMinutes + ride.rideMinutes) * 60_000;
@@ -1093,13 +1093,14 @@ export function journeyPath(journey, origin, destination, db) {
   for (const leg of journey.legs) {
     let segment;
     if (leg.type === 'walk') {
-      const target = leg.googlePoints?.at(-1) ?? (leg.to ? db.stops[leg.to]?.location : destination);
+      const target = leg.routePoints?.at(-1) ?? (leg.to ? db.stops[leg.to]?.location : destination);
       if (!target) continue;
-      segment = { mode: 'walk', points: leg.googlePoints?.length >= 2 ? leg.googlePoints : [cursor, target], stopIDs: [], google: !!leg.googlePoints };
+      segment = { mode: 'walk', points: leg.routePoints?.length >= 2 ? leg.routePoints : [cursor, target], stopIDs: [], providerShape: !!leg.routePoints };
     } else {
-      if (leg.googlePoints && !leg.routeKey) {
-        const points = [leg.boardLocation, leg.alightLocation];
-        segments.push({ mode: 'ride', route: leg.route, op: leg.op, points, stopIDs: [], line: leg.googlePoints.length >= 2 ? leg.googlePoints : points, google: true });
+      if (leg.routePoints && !leg.routeKey) {
+        const points = leg.providerStops?.map((stop) => stop.location) ?? [leg.boardLocation, leg.alightLocation];
+        const stopIDs = leg.providerStops?.map((stop) => stop.name) ?? [];
+        segments.push({ mode: 'ride', route: leg.route, op: leg.op, points, stopIDs, line: leg.routePoints.length >= 2 ? leg.routePoints : points, providerShape: true });
         cursor = leg.alightLocation;
         continue;
       }
@@ -1107,8 +1108,8 @@ export function journeyPath(journey, origin, destination, db) {
       const onRoute = ids.map((id, index) => [id, isWhole ? leg.boardPosition + index : index ? leg.alightPosition : leg.boardPosition])
         .filter(([id]) => validLocation(db.stops[id]?.location));
       const stops = onRoute.map(([id]) => id);
-      segment = { mode: 'ride', route: leg.route, routeKey: leg.routeKey, op: leg.op, points: stops.map((id) => db.stops[id].location), stopIDs: stops, positions: onRoute.map(([, position]) => position), google: !!leg.googlePoints,
-        line: leg.googlePoints?.length >= 2 ? leg.googlePoints : undefined };
+      segment = { mode: 'ride', route: leg.route, routeKey: leg.routeKey, op: leg.op, points: stops.map((id) => db.stops[id].location), stopIDs: stops, positions: onRoute.map(([, position]) => position), providerShape: !!leg.routePoints,
+        line: leg.routePoints?.length >= 2 ? leg.routePoints : undefined };
     }
     if (!segment.points.length) continue;
     segments.push(segment);
