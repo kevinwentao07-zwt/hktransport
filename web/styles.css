@@ -262,6 +262,27 @@ svg.icon.solid { fill: currentColor; }
 .bus-marker.other { opacity: .85; }
 .bus-marker.other .bus3d { --l: 32px; --w: 13px; --h: 19px; }
 .bus-marker.other .bus3d.minibus { --l: 24px; --w: 12px; --h: 12px; }
+.explore-pin, .explore-pin-drop { position: absolute; width: 0; height: 0; inset: 0 auto auto 0; pointer-events: none; }
+.explore-pin-drop { animation: explore-pin-land .64s var(--ease-out) var(--pin-delay, 0ms) both; }
+.explore-pin-arrow { position: absolute; width: 38px; height: 54px; left: -19px; bottom: 0; filter: drop-shadow(0 2px 3px #08285366); }
+.explore-pin-arrow i { position: absolute; inset: 0; }
+.explore-pin-arrow .top { clip-path: polygon(28% 9%, 43% 1%, 79% 1%, 64% 9%); background: #b8f3ff; }
+.explore-pin-arrow .side { clip-path: polygon(64% 9%, 79% 1%, 79% 45%, 64% 53%); background: linear-gradient(#5bb4ff, #1044a3); }
+.explore-pin-arrow .bevel { clip-path: polygon(64% 53%, 79% 45%, 100% 45%, 58% 93%, 50% 100%, 90% 53%); background: linear-gradient(140deg, #7dd8ff 35%, #0b3f96 80%); }
+.explore-pin-arrow .face { clip-path: polygon(28% 9%, 64% 9%, 64% 53%, 90% 53%, 50% 100%, 6% 53%, 28% 53%); background: linear-gradient(155deg, #9ee6ff 4%, #2c8eff 43%, #0347c0 95%); }
+.explore-pin-ground { position: absolute; top: -5px; left: -13px; width: 26px; height: 10px; border-radius: 50%; background: #0875fa36; border: 1px solid #257cec; animation: explore-pin-ground .44s var(--ease-out) calc(var(--pin-delay, 0ms) + 390ms) both; }
+.explore-pin-name { position: absolute; bottom: 60px; left: 0; transform: translateX(-50%); max-width: min(180px, 66vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 8px; border-radius: 8px; font-size: 12px; font-weight: 650; color: var(--ink); background: var(--surface); box-shadow: var(--shadow); }
+@keyframes explore-pin-land {
+  0% { opacity: 0; transform: translateY(-82px) scale(.86); }
+  18% { opacity: 1; }
+  64% { transform: translateY(0) scale(1.06, .94); }
+  81% { transform: translateY(-7px) scale(.99, 1.02); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes explore-pin-ground {
+  from { opacity: 0; transform: scale(.75); }
+  to { opacity: 1; transform: none; }
+}
 .bus-note:empty { display: none; }
 .bus-note { position: absolute; left: 0; top: 22px; transform: translateX(-50%); padding: 2px 7px; border-radius: 8px; background: var(--surface); color: var(--ink); box-shadow: 0 1px 4px rgba(0, 0, 0, .3); font-size: 11px; font-weight: 600; white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .bus3d { transition: none; } .bus-marker { animation: none; } }
@@ -280,10 +301,13 @@ svg.icon.solid { fill: currentColor; }
 #near-stops { display: flex; flex-wrap: wrap; gap: 6px; }
 #near-stops:empty { display: none; }
 #panel:has(#explore-panel) :is(#top, #bottom) { display: none; }
+#app #sheet:has(#explore-panel) { touch-action: pan-y; }
 #explore-panel { display: flex; flex-direction: column; gap: 10px; }
 .explore-ai-button { gap: 6px; color: var(--ai); background: var(--ai-soft); }
 .explore-ai-results { display: flex; flex-direction: column; gap: 8px; }
 .explore-ai-card { gap: 6px; }
+.explore-ai-place { display: flex; flex-direction: column; gap: 3px; }
+.explore-ai-place .row { width: 100%; }
 .explore-facts { display: block; margin-top: 3px; }
 .explore-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .explore-evidence { border-inline-start: 2px solid var(--line); padding-inline-start: 9px; }

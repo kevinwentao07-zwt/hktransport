@@ -232,6 +232,15 @@ function busMarker() {
   return h('div', { class: 'bus-marker' }, h('div', { class: 'bus3d' }, faces), h('span', { class: 'bus-note' }));
 }
 
+/** Both map engines put this element's origin at the selected coordinate. */
+function explorePin(place, delay) {
+  return h('div', { class: 'explore-pin', style: `--pin-delay:${delay}ms`, 'aria-hidden': 'true' },
+    h('i', { class: 'explore-pin-ground' }),
+    h('div', { class: 'explore-pin-drop' },
+      h('div', { class: 'explore-pin-arrow' }, ['top', 'side', 'bevel', 'face'].map((face) => h('i', { class: face }))),
+      h('span', { class: 'explore-pin-name' }, place.name)));
+}
+
 /** A stop still ahead of the coming bus, kept quieter than the stops on the rider's own trip. */
 function upcomingStop(text) {
   const element = document.createElement('div');
@@ -263,7 +272,7 @@ function dressBus(element, vehicle) {
 }
 
 const leafletMap = (() => {
-  let map, content, base, buses = new Map(), tag = null, chosen = null, approach = null, approachStops = [], approachKey = '', lastFit = '', flying = false;
+  let map, content, base, preview = null, buses = new Map(), tag = null, chosen = null, approach = null, approachStops = [], approachKey = '', lastFit = '', flying = false;
   const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
   const style = () => `https://tiles.openfreemap.org/styles/${darkMode.matches ? 'dark' : 'liberty'}`;
   /** The maps label everything in both languages; show just the one being read. */
@@ -307,6 +316,7 @@ const leafletMap = (() => {
     destroy() {
       map.remove();
       map = base = null;
+      preview = null;
       const element = $('map');
       element.classList.remove('far', ...[...element.classList].filter((name) => name.startsWith('leaflet-')));
     },
@@ -320,6 +330,13 @@ const leafletMap = (() => {
       approach = null;
       approachStops = [];
       approachKey = '';
+    },
+    previewPlace(place, delay = 0) {
+      preview?.remove();
+      preview = place ? L.marker(point(place.location), {
+        icon: L.divIcon({ html: explorePin(place, delay), className: '', iconSize: [0, 0] }),
+        interactive: false, keyboard: false, zIndexOffset: 1500,
+      }).addTo(map) : null;
     },
     /** The chosen stop's pin, moved rather than redrawn. */
     chosen(place) {
@@ -394,11 +411,17 @@ const leafletMap = (() => {
       else map.flyToBounds(bounds, { ...options, duration: 0.9, easeLinearity: 0.2 });
       flying = true;
     },
-    follow(location, zoom = 16, isExact = false) {
+    follow(location, zoom = 16, isExact = false, offset = [0, sheet.targetHeight() / 2]) {
       // Centred in the part of the map the sheet leaves showing.
       const level = isExact ? zoom : Math.max(map.getZoom(), zoom);
-      const target = map.unproject(map.project(point(location), level).add([0, sheet.targetHeight() / 2]), level);
-      if (map.getCenter().distanceTo(target) > 1 || map.getZoom() !== level) map.flyTo(target, level, { duration: calm.matches ? 0 : 0.8 });
+      const target = map.unproject(map.project(point(location), level).add(offset), level);
+      if (map.getCenter().distanceTo(target) <= 1 && map.getZoom() === level) return 0;
+      if (calm.matches) {
+        map.setView(target, level, { animate: false });
+        return 0;
+      }
+      map.flyTo(target, level, { duration: 0.8 });
+      return 800;
     },
     ends(from, to) {
       if (from) L.marker(point(from.location), { icon: pin('', 'pin start'), title: from.name }).addTo(content);
@@ -459,7 +482,7 @@ const leafletMap = (() => {
 
 /** The same map on Google's tiles, used while the server has allowance left. */
 const googleMap = (() => {
-  let map, Marker, buses = new Map(), tag = null, chosen = null, glide = 0, hasFramed = false, approach = null, approachStops = [], approachKey = '', items = [];
+  let map, Marker, preview = null, buses = new Map(), tag = null, chosen = null, glide = 0, hasFramed = false, approach = null, approachStops = [], approachKey = '', items = [];
   const padding = () => {
     const wide = window.matchMedia('(min-width: 820px)').matches;
     return { top: wide ? 30 : 50, left: wide ? 440 : 24, right: wide ? 30 : 24, bottom: wide ? 30 : sheet.targetHeight() + 32 };
@@ -497,10 +520,12 @@ const googleMap = (() => {
     const run = ++glide;
     if (calm.matches || !hasFramed) {
       hasFramed = true;
-      return map.moveCamera({ center, zoom });
+      map.moveCamera({ center, zoom });
+      return 0;
     }
     const from = map.getCenter(), fromZoom = map.getZoom(), started = performance.now();
     const fromLat = from.lat(), fromLng = from.lng();
+    if (fromZoom === zoom && meters({ lat: fromLat, lng: fromLng }, center) <= 1) return 0;
     const step = (now) => {
       if (run !== glide) return;
       const part = Math.max(0, Math.min(1, (now - started) / 750)), eased = 1 - (1 - part) ** 3;
@@ -511,6 +536,7 @@ const googleMap = (() => {
       if (part < 1) requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
+    return 750;
   };
   return {
     init() {
@@ -525,6 +551,8 @@ const googleMap = (() => {
       markZoom();
     },
     destroy() {
+      this.previewPlace(null);
+      glide += 1;
       this.clear();
       $('map').replaceChildren();
     },
@@ -542,6 +570,16 @@ const googleMap = (() => {
       approach = null;
       approachStops = [];
       approachKey = '';
+    },
+    previewPlace(place, delay = 0) {
+      if (preview) preview.map = null;
+      if (!place) {
+        preview = null;
+        return;
+      }
+      const anchor = div('g-anchor');
+      anchor.append(explorePin(place, delay));
+      preview = new Marker({ map, position: place.location, content: anchor, zIndex: 1500 });
     },
     /** The chosen stop's pin, moved rather than redrawn. */
     chosen(place) {
@@ -632,10 +670,13 @@ const googleMap = (() => {
       const center = { lat: (Math.atan(Math.exp((0.5 - y) * 2 * Math.PI)) * 360) / Math.PI - 90, lng: x * 360 - 180 };
       moveSmoothly(center, zoom);
     },
-    follow(location, zoom = 16, isExact = false) {
+    follow(location, zoom = 16, isExact = false, offset = [0, sheet.targetHeight() / 2]) {
       const level = isExact ? zoom : Math.max(map.getZoom(), zoom), world = 256 * 2 ** level;
-      const y = 0.5 - Math.log(Math.tan(Math.PI / 4 + (location.lat * Math.PI) / 360)) / (2 * Math.PI) + sheet.targetHeight() / 2 / world;
-      moveSmoothly({ lat: (Math.atan(Math.exp((0.5 - y) * 2 * Math.PI)) * 360) / Math.PI - 90, lng: location.lng }, level);
+      const y = 0.5 - Math.log(Math.tan(Math.PI / 4 + (location.lat * Math.PI) / 360)) / (2 * Math.PI) + offset[1] / world;
+      return moveSmoothly({
+        lat: (Math.atan(Math.exp((0.5 - y) * 2 * Math.PI)) * 360) / Math.PI - 90,
+        lng: location.lng + offset[0] * 360 / world,
+      }, level);
     },
     ends(from, to) {
       if (from) mark(from.location, div('pin start'), { title: from.name, zIndex: 400 });
@@ -704,7 +745,9 @@ function loadGoogle(key) {
 /** Puts the map where the rider expects it after the map underneath changes. */
 function frameMap() {
   drawMap();
-  if (state.tab === 'plan' && (state.from || state.to)) fitPlanMap();
+  const view = state.explore;
+  if (view?.preview) void focusExploredPlace(view, view.preview.item, view.preview.kind);
+  else if (state.tab === 'plan' && (state.from || state.to)) fitPlanMap();
   else showHomeMap();
 }
 
@@ -1181,7 +1224,7 @@ async function discover(wish, run = ++planRun) {
   else mapView.fit(suggestions.map((suggestion) => suggestion.place.location));
 }
 
-const showsEmbed = () => embedShops() && state.tab === 'plan' && state.discovery?.stage === 'choosing' && !state.journeys.length
+const showsEmbed = () => embedShops() && state.tab === 'plan' && !state.explore && state.discovery?.stage === 'choosing' && !state.journeys.length
   && state.phase === 'idle' && state.discovery.suggestions.some((suggestion) => suggestion.isGoogle);
 
 function showEmbed() {
@@ -2294,7 +2337,14 @@ function showStopsNear(place) {
 function clearExplore() {
   state.explore?.request?.abort();
   state.explore?.ai?.request.abort();
+  clearExplorePreview(state.explore);
   state.explore = null;
+}
+
+function clearExplorePreview(view) {
+  if (!view?.preview) return;
+  view.preview = null;
+  mapView.previewPlace(null);
 }
 
 function openExplore() {
@@ -2308,16 +2358,19 @@ function openExplore() {
 function closeExplore() {
   const view = state.explore;
   if (!view) return;
+  const refocus = !!view.preview;
   clearExplore();
   renderSheet();
   $('sheet').scrollTop = view.scroll;
   sheet.snap(view.snap);
+  if (refocus) fitPlanMap();
   $('explore-destination')?.focus({ preventScroll: true });
 }
 
 async function searchExplore(category, radius) {
   const view = state.explore;
   view.request?.abort();
+  clearExplorePreview(view);
   if (category !== view.category) {
     view.ai?.request.abort();
     view.ai = null;
@@ -2339,6 +2392,7 @@ async function showExploreAI(view) {
   if (view.ai?.busy) return;
   if (view.ai?.suggestions.length) {
     view.ai.open = !view.ai.open;
+    if (!view.ai.open && view.preview?.kind === 'ai') clearExplorePreview(view);
     return renderSheet();
   }
   const request = new AbortController();
@@ -2355,12 +2409,56 @@ function showExplorePlace(view, place) {
   if (view.choosing) return;
   view.selected = view.selected === place ? null : place;
   view.notice = null;
-  renderSheet();
-  if (view.selected && mapView === googleMap) {
+  if (!view.selected) {
+    clearExplorePreview(view);
+    return renderSheet();
+  }
+  void focusExploredPlace(view, place, 'map');
+  if (mapView === googleMap) {
     googleWalk(view.destination.location, place.location).then(() => {
       if (state.explore === view && view.selected === place) renderSheet();
     });
   }
+}
+
+const explorePlaceKey = (text) => normalizePlace(toSimplified(text ?? ''));
+const exploreAddressKey = (text) => explorePlaceKey(text).normalize('NFKC').replace(/[\s,]+/g, '');
+
+/** Margin moves the geographic target into the portion of the map beside or above the panel. */
+function exploreMapOffset() {
+  const height = $('map').clientHeight, panel = $('panel');
+  if (window.matchMedia('(min-width: 820px)').matches) return [-panel.getBoundingClientRect().right / 2, 0];
+  const visible = Math.max(0, height - sheet.targetHeight() - (parseFloat(getComputedStyle(panel).bottom) || 0));
+  return [0, height / 2 - visible * 0.6];
+}
+
+async function focusExploredPlace(view, item, kind) {
+  const previous = view.preview;
+  const engine = mapView;
+  if (previous?.item === item && previous.engine === engine && previous.pending) return;
+  const target = previous?.item === item && previous.engine === engine ? previous.target : null;
+  clearExplorePreview(view);
+  const preview = view.preview = { item, kind, engine, pending: true, target: null };
+  sheet.snap('half');
+  renderSheet();
+
+  preview.target = target ?? await (kind === 'ai' ? resolveExploreAI(view, item) : resolveExplorePlace(view, item))
+    .catch(() => null);
+  if (state.explore !== view || view.preview !== preview || mapView !== engine) return;
+  preview.pending = false;
+  if (preview.target) {
+    const location = preview.target.location;
+    const delay = engine.follow(location, 17, true, exploreMapOffset());
+    engine.previewPlace({ name: item.name, location }, delay);
+  }
+  renderSheet();
+}
+
+async function resolveExplorePlace(view, place) {
+  if (view.provider !== 'google' || mapView === googleMap) return place;
+  const [government, osm] = await Promise.all([governmentSearch(place.name), photonSearch(place.name, place.location, 180)]);
+  return withinArea([...government, ...osm], { center: place.location, radius: 180 })
+    .find((candidate) => [candidate.name, candidate.nameEn].some((name) => explorePlaceKey(name) === explorePlaceKey(place.name)));
 }
 
 async function planToExplorePlace(view, place) {
@@ -2368,14 +2466,8 @@ async function planToExplorePlace(view, place) {
   view.choosing = true;
   view.notice = null;
   renderSheet();
-  let target = place;
-  if (view.provider === 'google' && mapView !== googleMap) {
-    const [government, osm] = await Promise.all([governmentSearch(place.name), photonSearch(place.name, place.location, 180)]);
-    if (state.explore !== view || view.selected !== place) return;
-    const key = (name) => normalizePlace(toSimplified(name ?? ''));
-    target = withinArea([...government, ...osm], { center: place.location, radius: 180 })
-      .find((candidate) => [candidate.name, candidate.nameEn].some((name) => key(name) === key(place.name)));
-  }
+  const cached = view.preview?.item === place && view.preview.engine === mapView ? view.preview.target : null;
+  const target = cached ?? await resolveExplorePlace(view, place);
   if (state.explore !== view || view.selected !== place) return;
   view.choosing = false;
   if (!target) {
@@ -2393,35 +2485,38 @@ function routeToExploredPlace(name, location) {
   runPlan({ kind: 'place', place: { name, location }, start });
 }
 
+async function resolveExploreAI(view, item) {
+  const key = explorePlaceKey;
+  const center = view.destination.location, radius = 1500;
+  const match = (places) => {
+    const nearby = withinArea(places.filter((place) => [place.name, place.nameEn].some((name) => key(name) === key(item.name))),
+      { center, radius });
+    const address = exploreAddressKey(item.address);
+    if (address) return nearby.find((place) => {
+      const candidate = exploreAddressKey(place.address);
+      return candidate.length >= 6 && address.length >= 6 && (candidate.includes(address) || address.includes(candidate));
+    });
+    return nearby.length && nearby.every((place) => meters(nearby[0].location, place.location) < 40) ? nearby[0] : null;
+  };
+  const known = match(view.provider !== 'google' || mapView === googleMap ? view.places : []);
+  if (known) return known;
+  const [google, government, osm] = await Promise.all([
+    mapView === googleMap ? googleSearch([item.name, item.address].filter(Boolean).join(' '), center, radius, state.lang) : null,
+    governmentSearch(item.name),
+    photonSearch(item.name, center, radius),
+  ]);
+  return match([...(mapView === googleMap ? (google ?? []) : []), ...government, ...osm]);
+}
+
 async function planToExploreAI(view, item) {
   const ai = view.ai;
   if (ai.choosing) return;
   ai.choosing = item;
   ai.unmatched = null;
   renderSheet();
-
-  const key = (text) => normalizePlace(toSimplified(text ?? ''));
-  const center = view.destination.location, radius = 1500;
-  const match = (places) => {
-    const nearby = withinArea(places.filter((place) => [place.name, place.nameEn].some((name) => key(name) === key(item.name))),
-      { center, radius });
-    const address = key(item.address);
-    if (address) return nearby.find((place) => {
-      const candidate = key(place.address);
-      return candidate.length >= 6 && address.length >= 6 && (candidate.includes(address) || address.includes(candidate));
-    });
-    return nearby.length && nearby.every((place) => meters(nearby[0].location, place.location) < 40) ? nearby[0] : null;
-  };
-  let target = match(view.provider !== 'google' || mapView === googleMap ? view.places : []);
-  if (!target) {
-    const [google, government, osm] = await Promise.all([
-      mapView === googleMap ? googleSearch([item.name, item.address].filter(Boolean).join(' '), center, radius, state.lang) : null,
-      governmentSearch(item.name),
-      photonSearch(item.name, center, radius),
-    ]);
-    if (state.explore !== view || view.ai !== ai) return;
-    target = match([...(mapView === googleMap ? (google ?? []) : []), ...government, ...osm]);
-  }
+  const cached = view.preview?.item === item && view.preview.engine === mapView ? view.preview.target : null;
+  const target = cached ?? await resolveExploreAI(view, item);
+  if (state.explore !== view || view.ai !== ai) return;
   ai.choosing = null;
   if (target) return routeToExploredPlace(item.name, target.location);
   ai.unmatched = item;
@@ -2542,15 +2637,31 @@ const EXPLORE_KINDS = {
   gallery: ['藝廊', 'Gallery'], park: ['公園', 'Park'], monument: ['古蹟', 'Monument'],
 };
 
+function explorePreviewStatus(view, item) {
+  const preview = view.preview;
+  if (preview?.item !== item || preview.target) return null;
+  return h('div', { class: 'tiny muted', role: 'status' }, preview.pending
+    ? t('正在確認地圖位置…', 'Finding the map location…')
+    : t('暫時未能確認地圖位置。', 'The map location could not be confirmed.'));
+}
+
 function exploreAISection(view) {
   const ai = view.ai;
   const cards = ai?.suggestions.map((item) => {
     const query = [item.name, item.address, 'Hong Kong'].filter(Boolean).join(' ');
     const maps = new URLSearchParams({ api: '1', query });
-    return h('article', { class: 'card explore-ai-card' },
-      h('strong', {}, item.name),
-      item.address && h('div', { class: 'tiny muted' }, item.address),
-      h('div', { class: 'small' }, item.reason),
+    const focused = view.preview?.item === item;
+    return h('article', { class: `card explore-ai-card${focused ? ' on-map' : ''}` },
+      h('button', {
+        class: 'tap explore-ai-place', 'aria-pressed': String(focused), onclick: () => {
+          view.selected = null;
+          void focusExploredPlace(view, item, 'ai');
+        },
+      },
+      h('span', { class: 'row' }, h('strong', { class: 'grow' }, item.name), icon('pin', 15)),
+      item.address && h('span', { class: 'tiny muted' }, item.address),
+      h('span', { class: 'small' }, item.reason)),
+      explorePreviewStatus(view, item),
       ai.unmatched === item && h('div', { class: 'tiny muted', role: 'status' }, t('未能確認地點，可先在地圖查看。', "Couldn't confirm the location. You can check it on a map.")),
       h('div', { class: 'explore-actions tiny' },
         h('button', { class: 'link', disabled: !!ai.choosing, onclick: () => planToExploreAI(view, item) },
@@ -2585,13 +2696,14 @@ function exploreSheet(view) {
     const open = selected === place;
     const walk = open && knownWalkTime(destination.location, place.location);
     const kind = EXPLORE_KINDS[place.kind];
-    return h('article', { class: 'card explore-place' },
+    return h('article', { class: `card explore-place${view.preview?.item === place ? ' on-map' : ''}` },
       h('button', { class: 'tap', disabled: view.choosing, 'aria-expanded': String(open), onclick: () => showExplorePlace(view, place) },
         h('span', { class: 'row' }, h('span', { class: 'bold grow' }, place.name), icon(open ? 'down' : 'next', 14)),
         h('span', { class: 'explore-facts tiny muted' }, [
           kind ? t(...kind) : place.kind, t(`直線 ${distanceText(place.meters)}`, `${distanceText(place.meters)} straight-line`),
         ].filter(Boolean).join(' · '))),
       open && h('div', { class: 'stack small' },
+        explorePreviewStatus(view, place),
         place.address && h('div', { class: 'muted' }, place.address),
         walk && h('div', { class: 'muted' }, t(`由目的地步行約 ${Math.max(1, Math.round(walk.minutes))} 分鐘 · Google Maps`, `About ${Math.max(1, Math.round(walk.minutes))} min on foot from the destination · Google Maps`)),
         place.source && h('div', { class: 'explore-evidence tiny' }, h('p', {}, place.source.snippet), sourceLink(place.source)),
@@ -3259,7 +3371,7 @@ const sheet = {
     panel.addEventListener('pointerdown', (event) => {
       swallowClick = false;
       if (event.button !== 0 || !grabber.offsetParent || event.target === document.activeElement || event.target.closest?.('.no-drag')) return;
-      if (this.current === 'full' && list.contains(event.target)) return;
+      if ((this.current === 'full' || state.explore) && list.contains(event.target)) return;
       fromGrabber = grabber.contains(event.target);
       startX = event.clientX;
       startY = lastY = event.clientY;
@@ -3417,6 +3529,7 @@ let mapTouched = false;
 for (const gesture of ['pointerdown', 'wheel']) $('map').addEventListener(gesture, () => { mapTouched = true; }, { passive: true });
 
 function fitPlanMap() {
+  if (state.explore?.preview) return;
   mapTouched = false;
   const path = selectedPath();
   const points = path ? withRoads(path).segments.flatMap((s) => s.line ?? s.points) : [state.from?.location, state.to?.location].filter(Boolean);
