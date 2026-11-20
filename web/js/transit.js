@@ -278,11 +278,25 @@ export function fitsWalkLimit(journey) {
   return true;
 }
 
+function mostlyUsesMode(journey, mode) {
+  let preferred = 0, other = 0;
+  for (const ride of rides(journey)) {
+    // Provider legs can identify the vehicle without matching a local operator.
+    const matches = MODES[mode](ride) || (ride.op === 'transit' && (mode === 'mtr'
+      ? ride.vehicleType === 'SUBWAY'
+      : ['BUS', 'INTERCITY_BUS', 'TROLLEYBUS'].includes(ride.vehicleType)));
+    if (matches) preferred += ride.rideMinutes;
+    else other += ride.rideMinutes;
+  }
+  return preferred > 0 && preferred >= other;
+}
+
 /** Practical picks compare time once walking and transfers are nearly equivalent. */
-export function rankTripOptions(journeys, preference, limit = 5, identity = journeyID) {
+export function rankTripOptions(journeys, preference, limit = 5, identity = journeyID, preferredMode = 'all') {
   const walkByGroup = new Map();
   const options = journeys.map((journey) => {
     const group = [Number(!fitsWalkLimit(journey)), Number(arrivesLate(journey))];
+    if (preferredMode !== 'all') group.push(Number(!mostlyUsesMode(journey, preferredMode)));
     const duration = totalMinutes(journey);
     if (preference === 'fastest') return { journey, group, duration };
     group.push(Number(!rides(journey).length));
@@ -312,7 +326,7 @@ export function rankTripOptions(journeys, preference, limit = 5, identity = jour
 const combinedTripID = (journey) => rides(journey).every((ride) => ride.routeKey) ? routeSequence(journey) : journeyID(journey);
 
 /** Keep one version of an itinerary when different sources match the same local boarding and alighting stops. */
-export function rankCombinedTripOptions(journeys, preference, limit = 8) {
+export function rankCombinedTripOptions(journeys, preference, limit = 8, preferredMode = 'all') {
   const grouped = new Map();
   for (const journey of journeys) {
     if (journey.missedConnection) continue;
@@ -328,7 +342,7 @@ export function rankCombinedTripOptions(journeys, preference, limit = 8) {
     });
     return measured.length ? measured : group;
   });
-  return rankTripOptions(comparable, preference, limit, combinedTripID);
+  return rankTripOptions(comparable, preference, limit, combinedTripID, preferredMode);
 }
 
 const LATE_PENALTY = 100_000;
@@ -426,12 +440,14 @@ export function search(network, origin, destination, departure, bannedFirstRoute
   };
 
   const journeys = [];
+  const acceptsPattern = MODES[options.onlyMode ?? 'all'];
   for (let k = 1; k <= rounds && marked.length; k++) {
     // Each pattern is scanned once, from its earliest marked stop.
     const queue = new Map();
     for (const stop of new Set(marked)) {
       for (const visit of network.patternsAtStop[stop]) {
-        if (k === 1 && bannedFirstRoutes.has(network.patterns[visit.pattern].routeID)) continue;
+        const pattern = network.patterns[visit.pattern];
+        if (!acceptsPattern(pattern) || (k === 1 && bannedFirstRoutes.has(pattern.routeID))) continue;
         const existing = queue.get(visit.pattern);
         if (existing === undefined || visit.position < existing) queue.set(visit.pattern, visit.position);
       }
@@ -559,12 +575,12 @@ export function plan(network, origin, destination, departure, preference = 'fast
   return rank(found, preference, limit);
 }
 
-export function planLocal(network, origin, destination, departure, preference) {
+export function planLocal(network, origin, destination, departure, preference, preferredMode = 'all') {
   const comfortableRadius = MAX_WALK_LEG_MINUTES * SETTINGS.walkMetersPerMinute / SETTINGS.walkDetour;
-  const scan = (radius) => {
+  const scan = (radius, onlyMode) => {
     const found = [], banned = new Set();
     for (let i = 0; i < 4; i++) {
-      const journeys = search(network, origin, destination, departure, banned, { radius, keepAlternatives: true, preference });
+      const journeys = search(network, origin, destination, departure, banned, { radius, keepAlternatives: true, preference, onlyMode });
       if (!journeys.length) break;
       found.push(...journeys);
       for (const journey of journeys) {
@@ -575,12 +591,13 @@ export function planLocal(network, origin, destination, departure, preference) {
     return found;
   };
   const found = scan(comfortableRadius);
+  if (preferredMode !== 'all') found.push(...scan(comfortableRadius, preferredMode));
   if (!found.some(fitsWalkLimit)) found.push(...scan(SETTINGS.fallbackAccessRadius));
   const distance = meters(origin, destination);
   if (distance <= SETTINGS.walkOnlyRadius) {
     found.push({ legs: [{ type: 'walk', meters: distance, minutes: walkMinutes(distance), to: null }], departure });
   }
-  return rankTripOptions(found, preference, 8);
+  return rankTripOptions(found, preference, 8, journeyID, preferredMode);
 }
 
 /**

@@ -57,7 +57,7 @@ export function transitousJourneys(itineraries, db, departure, arriveBy = null, 
       const number = leg.routeShortName || leg.routeLongName;
       const op = routeOperator(leg.agencyName ?? '', number, leg.mode);
       const ride = scheduledRide(db, {
-        op, route: (op === 'mtr' && mtrLine(number)) || number, board: stop(leg.from), alight: stop(leg.to),
+        op, vehicleType: leg.mode, route: (op === 'mtr' && mtrLine(number)) || number, board: stop(leg.from), alight: stop(leg.to),
         departure: Date.parse(leg.startTime), arrival: Date.parse(leg.endTime), headsign: leg.headsign,
         count: stops.length - 1, points: points(leg), stops, platform: leg.from?.track,
       });

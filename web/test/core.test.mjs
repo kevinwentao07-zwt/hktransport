@@ -622,6 +622,24 @@ test('local planning expands a station search after a nearby stop gives no route
   assert.equal(T.fitsWalkLimit(result), false);
 });
 
+test('local planning searches for a preferred MTR route pruned by faster buses', () => {
+  const routes = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`bus${i}`, {
+    route: String(i), operators: ['kmb'], stops: { kmb: ['A', 'C'] }, journeyMinutes: 6 + i,
+  }]));
+  routes.rail = { route: 'TWL', operators: ['mtr'], stops: { mtr: ['A', 'C'] }, journeyMinutes: 38 };
+  const local = T.buildNetwork({ ...db, routes });
+  const options = (mode) => T.planLocal(local, at('A'), at('C'), noon, 'lessWalking', mode);
+  assert.ok(options('all').every((trip) => T.rides(trip)[0].op === 'kmb'));
+  const preferred = options('mtr');
+  assert.equal(T.rides(preferred[0])[0].op, 'mtr');
+  assert.ok(preferred.some((trip) => T.rides(trip)[0].op === 'kmb'));
+  assert.equal(T.rides(options('bus')[0])[0].op, 'kmb');
+  assert.deepEqual(
+    T.planLocal(network, at('A'), at('C'), noon, 'lessWalking', 'mtr'),
+    T.planLocal(network, at('A'), at('C'), noon, 'lessWalking'),
+  );
+});
+
 test('the default ranking prefers a shorter walk over saving a few minutes', () => {
   const [base] = T.plan(network, at('A'), at('C'), noon);
   const option = (id, walk, ride) => ({ ...base, id, legs: [
@@ -712,6 +730,19 @@ test('combined planning ranks across sources and keeps one version of matching s
   assert.deepEqual(options, [googleShort, googleLong]);
   assert.deepEqual(options.filter(T.fitsWalkLimit), [googleShort]);
   assert.deepEqual(T.rankCombinedTripOptions([estimated], 'lessWalking'), [estimated]);
+});
+
+test('mode preference compares the main ride across providers, keeping short walks and on-time arrivals first', () => {
+  const ride = (op, vehicleType, rideMinutes) => ({ type: 'ride', op, vehicleType, rideMinutes, waitMinutes: 0, transferMinutes: 0 });
+  const trip = (id, legs) => ({ id, departure: noon, arriveBy: noon + 40 * 60_000, legs });
+  const metro = ride('transit', 'SUBWAY', 20), bus = ride('transit', 'BUS', 12);
+  const busTrip = trip('google:bus', [bus]);
+  const mixed = trip('transitous:mixed', [ride('gmb', 'BUS', 3), metro]);
+  const longWalk = trip('local:walk', [{ type: 'walk', minutes: 11 }, ride('mtr', null, 5)]);
+  const late = trip('local:late', [ride('mtr', null, 41)]);
+  const options = [busTrip, mixed, longWalk, late];
+  assert.deepEqual(T.rankCombinedTripOptions(options, 'lessWalking', 5, 'mtr'), [mixed, busTrip, late, longWalk]);
+  assert.deepEqual(T.rankCombinedTripOptions(options, 'lessWalking', 5, 'bus'), [busTrip, mixed, late, longWalk]);
 });
 
 test('sharing the boarding ETA across candidates still checks each train destination', async () => {

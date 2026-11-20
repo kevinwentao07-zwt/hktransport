@@ -10,9 +10,11 @@ self.onmessage = ({ data }) => {
       network = buildNetwork(db);
       self.postMessage({ id: data.id, ready: true });
     } else if (data.type === 'plan') {
-      const journeys = data.arriveBy
-        ? planArriving(network, data.from, data.to, data.arriveBy, data.departure, data.preference, 8, planLocal)
-        : planLocal(network, data.from, data.to, data.departure, data.preference);
+      const { from, to, arriveBy, departure, preference, preferredMode } = data;
+      const plan = (net, origin, destination, time, ranking) => planLocal(net, origin, destination, time, ranking, preferredMode);
+      const journeys = arriveBy
+        ? planArriving(network, from, to, arriveBy, departure, preference, 8, plan)
+        : plan(network, from, to, departure, preference);
       self.postMessage({ id: data.id, journeys });
     }
   } catch (error) {

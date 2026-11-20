@@ -23,7 +23,7 @@ function rideStep(step, db) {
   const op = routeOperator(agency, number, line.vehicle?.type);
   const route = (op === 'mtr' && mtrLine(number)) || number;
   return scheduledRide(db, {
-    op, route, board: stop(times?.departureStop), alight: stop(times?.arrivalStop),
+    op, vehicleType: line.vehicle?.type, route, board: stop(times?.departureStop), alight: stop(times?.arrivalStop),
     departure: Date.parse(times?.departureTime), arrival: Date.parse(times?.arrivalTime),
     headsign: details.headsign, count: details.stopCount, points: points(step),
   });

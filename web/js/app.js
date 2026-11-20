@@ -47,9 +47,11 @@ const history = {
 
 // MARK: State
 
+const savedTransitMode = store.get('transitMode', 'all');
 const state = {
   lang: store.get('lang', 'zh'), script: store.get('script', 'hant'), tab: 'plan', db: null, dbError: null, index: null,
   origin: '', destination: '', when: null, chat: '', preference: store.get('preference', 'lessWalking'), phase: 'idle', error: null,
+  transitMode: ['mtr', 'bus'].includes(savedTransitMode) ? savedTransitMode : 'all',
   from: null, to: null, journeys: [], candidates: [], allowLongWalk: false, onMap: null, expanded: null, explanation: null, aiNotice: null, lastChat: null,
   discovery: null,
   stopQuery: '', stopPlace: null, stops: [], stopMode: 'all', stopRadius: 500, stopBusy: false, stopError: null, stopOpen: null,
@@ -819,7 +821,7 @@ async function loadDB() {
 
 // MARK: Planning
 
-let planRun = 0, transitRequest;
+let planRun = 0, transitRequest, plannedInputs;
 const SAME_PLACE_METERS = 30;
 
 /** Places picked from a list, by name, as a search by name could land on another branch. */
@@ -898,7 +900,7 @@ function currentTrip() {
   return destination ? { origin: normalizedOrigin(state.origin), destination, preference: state.preference } : null;
 }
 
-/** `request` is {kind: 'search'}, {kind: 'chat', text} or {kind: 'place', place}. */
+/** Replanning reuses the resolved places from the current trip. */
 async function runPlan(request) {
   const run = ++planRun, ai = client(), stale = () => run !== planRun, isChat = request.kind === 'chat', phaseBefore = state.phase;
   const previous = request.kind === 'replan' ? { start: state.from, end: state.to } : null;
@@ -962,6 +964,7 @@ async function runPlan(request) {
   syncPlaceInputs();
   state.preference = intent.preference;
 
+  const inputs = [state.origin, state.destination];
   setPhase('locating');
   const noLocation = t('未能取得你的位置：請允許定位，或在上方輸入起點。', "Couldn't get your location: allow Location access, or type a start above.");
   const start = previous?.start ?? (intent.origin ? await resolvePlace(intent.origin) : await here());
@@ -977,10 +980,11 @@ async function runPlan(request) {
   renderNearStops();
   // A search can land somewhere other than the words typed, so the boxes say where it went.
   if (request.kind === 'search') {
-    if (intent.origin) state.origin = start.name;
-    state.destination = end.name;
+    if (intent.origin && state.origin === inputs[0]) state.origin = inputs[0] = start.name;
+    if (state.destination === inputs[1]) state.destination = inputs[1] = end.name;
     syncPlaceInputs();
   }
+  plannedInputs = inputs;
   mapView.fit([start.location, end.location]);
   if (!inHongKong(start.location) || !inHongKong(end.location)) return setPhase('failed', t('起點及目的地須在香港範圍內。', 'The start and destination must be in Hong Kong.'));
   if (meters(start.location, end.location) < SAME_PLACE_METERS) return setPhase('failed', t('出發地和目的地是同一個地方。', 'The start and destination are the same place.'));
@@ -996,7 +1000,7 @@ async function runPlan(request) {
   const preference = state.preference;
   const departure = mode === 'depart' ? at : now, arriveBy = mode === 'arrive' ? at : null;
   const local = async () => (await ask({
-    type: 'plan', from: start.location, to: end.location, preference, departure, arriveBy,
+    type: 'plan', from: start.location, to: end.location, preference, preferredMode: state.transitMode, departure, arriveBy,
   }, 6000)).journeys;
   transitRequest = new AbortController();
   const options = { preference, mode, at, lang: state.lang, signal: transitRequest.signal };
@@ -1049,7 +1053,7 @@ async function runPlan(request) {
 
 function showTripOptions(candidates, keepSelection = false) {
   state.candidates = candidates;
-  const ranked = rankCombinedTripOptions(candidates, state.preference);
+  const ranked = rankCombinedTripOptions(candidates, state.preference, 8, state.transitMode);
   state.journeys = (state.allowLongWalk ? ranked : ranked.filter(fitsWalkLimit)).slice(0, 5);
   const selected = (state.expanded || state.nav?.id) && state.journeys.find((journey) => journeyID(journey) === state.onMap);
   const id = keepSelection && selected ? state.onMap : state.journeys[0] ? journeyID(state.journeys[0]) : null;
@@ -2062,6 +2066,24 @@ function renderChatHistory(show) {
   }));
 }
 
+function transitModePicker() {
+  const options = [
+    ['all', t('交通工具不限', 'Any transport')],
+    ['mtr', t('優先港鐵', 'Prefer MTR')],
+    ['bus', t('優先巴士', 'Prefer buses')],
+  ];
+  return h('select', {
+    class: 'when-chip transit-mode no-drag', 'aria-label': t('交通工具偏好', 'Transport preference'),
+    onchange: (event) => {
+      state.transitMode = event.target.value;
+      store.set('transitMode', state.transitMode);
+      if (state.from && state.to && plannedInputs?.[0] === state.origin && plannedInputs[1] === state.destination) {
+        runPlan({ kind: 'replan' });
+      }
+    },
+  }, options.map(([value, label]) => h('option', { value, selected: value === state.transitMode }, label)));
+}
+
 function renderPlanTop() {
   if (!state.routeView) {
     clear($('top'), h('div', { class: 'row' },
@@ -2073,7 +2095,7 @@ function renderPlanTop() {
         },
         onfocus: () => sheet.snap('full'),
         onkeydown: (event) => { if (event.key === 'Enter') search(); },
-      }))));
+      }))), transitModePicker());
     return;
   }
   const place = (field, placeholder, trailing) => h('label', { class: 'place' },
@@ -2212,6 +2234,7 @@ function renderWhen() {
       class: 'when-chip', 'aria-expanded': String(whenOpen),
       onclick: () => { showWhen(!whenOpen); renderWhen(); },
     }, icon('clock', 15), h('span', { id: 'when-label' }, whenLabel()), icon('down', 12)),
+    transitModePicker(),
     h('span', { id: 'near-stops' }),
     whenOpen && h('div', { class: 'when-panel' },
       segments([['now', t('現在出發', 'Leave now')], ['depart', t('出發時間', 'Leave at')], ['arrive', t('抵達時間', 'Arrive by')]], state.when?.mode ?? 'now', chooseWhen),
