@@ -277,8 +277,6 @@ svg.icon.solid { fill: currentColor; }
 .when-chip { display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600; transition: transform .35s var(--pop); }
 .when-chip:active { transform: scale(.95); }
 .when-chip[aria-expanded="true"] .icon:last-child { transform: rotate(180deg); }
-.transit-mode { align-self: flex-start; border: 0; font-family: inherit; cursor: pointer; }
-.transit-mode option { color: var(--ink); background: var(--surface); }
 .when-panel { flex-basis: 100%; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .days { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding: 1px; }
 .days button { flex: none; padding: 6px 13px; border-radius: 999px; background: var(--raised); font-size: 13px; font-weight: 500; white-space: nowrap; transition: transform .35s var(--pop); }

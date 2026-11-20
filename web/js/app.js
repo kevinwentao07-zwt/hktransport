@@ -2083,20 +2083,25 @@ function renderChatHistory(show) {
 
 function transitModePicker() {
   const options = [
-    ['all', t('交通工具不限', 'Any transport')],
+    ['all', t('不限', 'Any transport')],
     ['mtr', t('優先港鐵', 'Prefer MTR')],
     ['bus', t('優先巴士', 'Prefer buses')],
   ];
-  return h('select', {
-    class: 'when-chip transit-mode no-drag', 'aria-label': t('交通工具偏好', 'Transport preference'),
-    onchange: (event) => {
-      state.transitMode = event.target.value;
-      store.set('transitMode', state.transitMode);
-      if (state.from && state.to && plannedInputs?.[0] === state.origin && plannedInputs[1] === state.destination) {
-        runPlan({ kind: 'replan' });
-      }
-    },
-  }, options.map(([value, label]) => h('option', { value, selected: value === state.transitMode }, label)));
+  const picker = segments(options, state.transitMode, (mode) => {
+    if (mode === state.transitMode) return;
+    state.transitMode = mode;
+    store.set('transitMode', mode);
+    const hadFocus = picker.contains(document.activeElement);
+    const updated = transitModePicker();
+    picker.replaceWith(updated);
+    if (hadFocus) updated.querySelector('[aria-pressed="true"]').focus({ preventScroll: true });
+    if (state.from && state.to && plannedInputs?.[0] === state.origin && plannedInputs[1] === state.destination) {
+      runPlan({ kind: 'replan' });
+    }
+  });
+  picker.setAttribute('role', 'group');
+  picker.setAttribute('aria-label', t('交通工具偏好', 'Transport preference'));
+  return picker;
 }
 
 function renderPlanTop() {
@@ -2110,7 +2115,7 @@ function renderPlanTop() {
         },
         onfocus: () => sheet.snap('full'),
         onkeydown: (event) => { if (event.key === 'Enter') search(); },
-      }))), transitModePicker());
+      }))));
     return;
   }
   const place = (field, placeholder, trailing) => h('label', { class: 'place' },
@@ -2143,6 +2148,7 @@ function renderPlanTop() {
       h('div', { class: 'stack', style: 'align-items:center' },
         h('button', { class: 'icon-button', 'aria-label': t('對調起點及目的地', 'Swap start and destination'), onclick: swapEnds }, icon('swap', 19)),
         h('button', { class: 'go', 'aria-label': t('搜尋', 'Search'), onclick: search }, icon('search', 19)))),
+    transitModePicker(),
     h('div', { id: 'plan-when' }),
     h('div', { id: 'place-history' }));
   renderWhen();
@@ -2249,7 +2255,6 @@ function renderWhen() {
       class: 'when-chip', 'aria-expanded': String(whenOpen),
       onclick: () => { showWhen(!whenOpen); renderWhen(); },
     }, icon('clock', 15), h('span', { id: 'when-label' }, whenLabel()), icon('down', 12)),
-    transitModePicker(),
     h('span', { id: 'near-stops' }),
     whenOpen && h('div', { class: 'when-panel' },
       segments([['now', t('現在出發', 'Leave now')], ['depart', t('出發時間', 'Leave at')], ['arrive', t('抵達時間', 'Arrive by')]], state.when?.mode ?? 'now', chooseWhen),
