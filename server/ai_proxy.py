@@ -8,6 +8,8 @@ Nothing a visitor sends is logged or kept.
 It also holds Google use under the free allowance. Each map and place search is counted on
 disk, and at the limit the site quietly goes back to its free map and search.
 """
+import csv
+import io
 import json
 import os
 import re
@@ -16,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import urllib.error
 import urllib.parse
@@ -347,7 +350,7 @@ def walking_route(start, end):
 
 
 TRANSIT_PREFERENCES = {'lessWalking': 'LESS_WALKING', 'fewerTransfers': 'FEWER_TRANSFERS', 'fastest': None}
-TRANSIT_FIELDS = ','.join(f'routes.legs.steps.{field}' for field in (
+TRANSIT_FIELDS = 'routes.travelAdvisory.transitFare,' + ','.join(f'routes.legs.steps.{field}' for field in (
     'travelMode', 'staticDuration', 'distanceMeters', 'startLocation', 'endLocation',
     'polyline.geoJsonLinestring', 'transitDetails.stopDetails', 'transitDetails.headsign',
     'transitDetails.stopCount', 'transitDetails.transitLine',
@@ -365,6 +368,68 @@ def transit_routes(start, end, preference, language, mode=None, when=None):
         field = 'arrivalTime' if mode == 'arrive' else 'departureTime'
         options[field] = datetime.fromtimestamp(when / 1000, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
     return compute_routes(start, end, TRANSIT_FIELDS, 5, **options)
+
+
+# MTR open data, via the same origin because the CSV server doesn't allow browser CORS.
+MTR_DATA = 'https://opendata.mtr.com.hk/data/'
+MTR_FARE_SOURCE = 'https://data.gov.hk/en-data/dataset/mtr-data-routes-fares-barrier-free-facilities'
+RAIL_FILES = {
+    'stations': 'mtr_lines_and_stations.csv',
+    'mtr': 'mtr_lines_fares.csv',
+    'airportExpress': 'airport_express_fares.csv',
+    'lightRail': 'light_rail_fares.csv',
+}
+rail_fare_lock = threading.Lock()
+rail_fare_tables = {}
+rail_fare_refresh_at = 0
+
+
+def rail_fare_rows(filename):
+    try:
+        with urllib.request.urlopen(MTR_DATA + filename, timeout=5) as response:
+            data = response.read(2_000_001)
+        if len(data) <= 2_000_000:
+            return list(csv.DictReader(io.StringIO(data.decode('utf-8-sig'))))
+    except (OSError, ValueError, csv.Error) as error:
+        print(f'MTR fare data failed: {type(error).__name__}', file=sys.stderr, flush=True)
+    return []
+
+
+def rail_fares():
+    global rail_fare_refresh_at
+    with rail_fare_lock:
+        if time.monotonic() < rail_fare_refresh_at:
+            return dict(rail_fare_tables)
+        with ThreadPoolExecutor(max_workers=len(RAIL_FILES)) as pool:
+            rows = dict(zip(RAIL_FILES, pool.map(rail_fare_rows, RAIL_FILES.values())))
+        stations = {row.get('Station ID'): row.get('Station Code') for row in rows['stations']}
+        tables = (
+            ('mtr', 'SRC_STATION_ID', 'DEST_STATION_ID', 'OCT_ADT_FARE'),
+            ('airportExpress', 'ST_FROM_ID', 'ST_TO_ID', 'OCT_ADT_FARE'),
+            ('lightRail', 'from_station_id', 'to_station_id', 'fare_octo_adult'),
+        )
+        updated = 0
+        for mode, start_key, end_key, fare_key in tables:
+            fares = {}
+            for row in rows[mode]:
+                start, end = row.get(start_key), row.get(end_key)
+                if mode == 'lightRail':
+                    if not start or not end:
+                        continue
+                    start, end = f'LR{start}', f'LR{end}'
+                else:
+                    start, end = stations.get(start), stations.get(end)
+                try:
+                    cents = round(float(row.get(fare_key)) * 100)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if start and end and start != end and cents >= 0:
+                    fares[f'{start}>{end}'] = cents
+            if fares:
+                rail_fare_tables[mode] = fares
+                updated += 1
+        rail_fare_refresh_at = time.monotonic() + (86400 if updated == len(tables) else 300)
+        return dict(rail_fare_tables)
 
 
 TRANSITOUS_ENABLED = os.environ.get('TRANSITOUS_ENABLED', '1') == '1'
@@ -408,12 +473,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-    def send(self, status, body):
+    def send(self, status, body, cache='no-store'):
         data = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(data)))
-        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Cache-Control', cache)
         self.end_headers()
         self.wfile.write(data)
 
@@ -422,6 +487,11 @@ class Handler(BaseHTTPRequestHandler):
         return self.headers.get('X-Forwarded-For', '').split(',')[-1].strip() or self.client_address[0]
 
     def do_GET(self):
+        if self.path == '/api/fares':
+            fares = rail_fares()
+            if not fares:
+                return self.send(503, {'error': 'Unavailable'})
+            return self.send(200, {'fares': fares, 'source': MTR_FARE_SOURCE, 'owner': 'MTR Corporation Limited'}, 'public, max-age=300')
         if self.path != '/api/ai':
             return self.send(404, {'error': 'Not found'})
         body = {'available': bool(api_key()), 'mapKey': None, 'places': False, 'transitous': TRANSITOUS_ENABLED}

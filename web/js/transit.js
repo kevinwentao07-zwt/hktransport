@@ -94,6 +94,7 @@ export function normalizeDB(raw) {
       gtfsId: route.gtfsId == null ? null : String(route.gtfsId),
       nlbId: route.nlbId == null ? null : String(route.nlbId),
       journeyMinutes: jt > 0 ? jt : null, frequency: parseFrequency(route.freq),
+      fares: route.fares, holidayFares: route.faresHoliday,
     };
   }
   return { routes, stops: raw.stopList ?? {}, serviceDayMap: raw.serviceDayMap ?? {}, holidays: raw.holidays ?? [] };
@@ -267,6 +268,62 @@ export const arrivesLate = (journey) => journey.arriveBy != null && arrivalTime(
 const routeSequence = (journey) => rides(journey).map((ride) =>
   `${ride.op}|${ride.route}@${ride.boardStopID}>${ride.alightStopID}`).join(',') || 'walk';
 export const journeyID = (journey) => journey.id ?? routeSequence(journey);
+
+function busFare(ride, db, at, holidays) {
+  const route = db.routes[ride.routeKey], stops = route?.stops[ride.op];
+  if (!stops || stops[ride.boardPosition] !== ride.boardStopID) return null;
+  const useHolidayFare = Array.isArray(route.holidayFares) && serviceClock(new Date(at), holidays).weekday === 0;
+  const fares = useHolidayFare ? route.holidayFares : route.fares;
+  if (!Array.isArray(fares) || fares.length !== stops.length - 1) return null;
+  const amount = fares[ride.boardPosition];
+  return /^\d+(\.\d{1,2})?$/.test(amount) ? Math.round(Number(amount) * 100) : null;
+}
+
+/** Adult fare in HK cents. Only return a total if every paid part has a fare. */
+export function journeyFare(journey, db, railFares) {
+  const holidays = new Set(db.holidays);
+  let total = 0, at = journey.departure, railTrip = null;
+  const finishRail = () => {
+    if (!railTrip) return true;
+    const fare = railFares?.[railTrip.mode]?.[`${railTrip.from}>${railTrip.to}`];
+    railTrip = null;
+    if (fare == null) return false;
+    total += fare;
+    return true;
+  };
+
+  for (const leg of journey.legs) {
+    if (leg.type === 'walk') {
+      at += leg.minutes * 60_000;
+      continue;
+    }
+    const readyAt = at + leg.transferMinutes * 60_000;
+    const boardAt = readyAt + leg.waitMinutes * 60_000;
+    at = boardAt + leg.rideMinutes * 60_000;
+    const mode = leg.op === 'mtr' ? (leg.route === 'AEL' ? 'airportExpress' : 'mtr')
+      : leg.op === 'lightRail' ? 'lightRail' : null;
+    if (mode) {
+      const { boardStopID: from, alightStopID: to } = leg;
+      const transfer = [railTrip?.to, from].sort().join('|');
+      const throughMTR = railTrip?.mode === 'mtr' && mode === 'mtr' && (
+        transfer === 'CEN|HOK' || (transfer === 'ETS|TST' && readyAt - railTrip.alightAt <= 30 * 60_000)
+      );
+      if (railTrip?.mode === mode && (railTrip.to === from || throughMTR)) {
+        railTrip.to = to;
+        railTrip.alightAt = at;
+      } else {
+        if (!finishRail()) return journey.fareCents ?? null;
+        railTrip = { mode, from, to, alightAt: at };
+      }
+    } else {
+      if (!finishRail()) return journey.fareCents ?? null;
+      const fare = busFare(leg, db, leg.liveDeparture ?? leg.scheduledDeparture ?? boardAt, holidays);
+      if (fare == null) return journey.fareCents ?? null;
+      total += fare;
+    }
+  }
+  return finishRail() ? total : journey.fareCents ?? null;
+}
 
 export const MAX_WALK_LEG_MINUTES = 10;
 export function fitsWalkLimit(journey) {

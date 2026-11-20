@@ -29,6 +29,14 @@ function rideStep(step, db) {
   });
 }
 
+function fareCents(route) {
+  const money = route.travelAdvisory?.transitFare;
+  if (money?.currencyCode !== 'HKD') return null;
+  const units = Number(money.units ?? 0), nanos = money.nanos ?? 0;
+  return Number.isSafeInteger(units) && units >= 0 && Number.isInteger(nanos) && nanos >= 0 && nanos < 1_000_000_000
+    ? Math.round(units * 100 + nanos / 10_000_000) : null;
+}
+
 export function googleJourneys(routes, db, departure, arriveBy = null, now = departure) {
   return routes.flatMap((route) => {
     const legs = [];
@@ -43,7 +51,8 @@ export function googleJourneys(routes, db, departure, arriveBy = null, now = dep
         return [];
       }
     }
-    return scheduledJourney(legs, { departure, arriveBy, now, provider: 'google' });
+    return scheduledJourney(legs, { departure, arriveBy, now, provider: 'google' })
+      .map((journey) => ({ ...journey, fareCents: fareCents(route) }));
   });
 }
 

@@ -83,11 +83,33 @@ class PolylineTests(unittest.TestCase):
         self.assertIn('routes.duration', sent[0].get_header('X-goog-fieldmask'))
 
 
+    def test_rail_tables_use_station_codes_and_adult_octopus_fares(self):
+        rows = {
+            'mtr_lines_and_stations.csv': [
+                {'Station ID': '1', 'Station Code': 'CEN'}, {'Station ID': '2', 'Station Code': 'ADM'},
+            ],
+            'mtr_lines_fares.csv': [
+                {'SRC_STATION_ID': '1', 'DEST_STATION_ID': '2', 'OCT_ADT_FARE': '4.90', 'SINGLE_ADT_FARE': '5.00'},
+                {'SRC_STATION_ID': '2', 'DEST_STATION_ID': '1', 'OCT_ADT_FARE': 'N/A'},
+            ],
+            'light_rail_fares.csv': [
+                {'from_station_id': '920', 'to_station_id': '265', 'fare_octo_adult': '5.10'},
+            ],
+        }
+        with patch.multiple(ai_proxy, rail_fare_tables={}, rail_fare_refresh_at=0), \
+                patch.object(ai_proxy, 'rail_fare_rows', side_effect=lambda filename: rows.get(filename, [])) as upstream:
+            fares = {'mtr': {'CEN>ADM': 490}, 'lightRail': {'LR920>LR265': 510}}
+            self.assertEqual(ai_proxy.rail_fares(), fares)
+            self.assertEqual(ai_proxy.rail_fares(), fares)
+            self.assertEqual(upstream.call_count, 4)
+
+
     def test_transit_uses_the_google_alternatives_and_arrival_time(self):
         start, end = {'lat': 22.28, 'lng': 114.15}, {'lat': 22.29, 'lng': 114.16}
         with patch.object(ai_proxy, 'compute_routes', return_value=[{'legs': []}]) as upstream:
             self.assertEqual(ai_proxy.transit_routes(start, end, 'lessWalking', 'zh-HK', 'arrive', 1_700_000_000_000), [{'legs': []}])
         self.assertIn('routes.legs.steps.staticDuration', upstream.call_args.args[2])
+        self.assertIn('routes.travelAdvisory.transitFare', upstream.call_args.args[2])
         self.assertEqual(upstream.call_args.kwargs, {
             'travelMode': 'TRANSIT', 'computeAlternativeRoutes': True, 'polylineEncoding': 'GEO_JSON_LINESTRING',
             'languageCode': 'zh-HK', 'regionCode': 'HK', 'transitPreferences': {'routingPreference': 'LESS_WALKING'},

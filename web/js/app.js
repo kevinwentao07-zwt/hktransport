@@ -1,7 +1,7 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
 import { meters,
   OP_COLORS, OP_LABELS, MODES, LIVE_AHEAD_MS, arrivalTime, arrivesLate, buildStopIndex, closestPosition, nextRouteKeys, planAdvice, routeFamily, routeWays, exactSite, instruction, journeyID, journeyPath, RETURN_COLOR, circularTurn, roadBetween, lineColor, lineName, matchingSites,
-  nameText, normalizeDB, partialSite, pathAhead, glideOnTrack, primaryMode, progressAt, retime, rides, routeTrack, fitsWalkLimit, MAX_WALK_LEG_MINUTES, rankCombinedTripOptions, searchRoutes, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
+  nameText, normalizeDB, partialSite, pathAhead, glideOnTrack, primaryMode, progressAt, retime, rides, routeTrack, fitsWalkLimit, journeyFare, MAX_WALK_LEG_MINUTES, rankCombinedTripOptions, searchRoutes, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
   totalMinutes, transfers, walkEnds, walkingMeters, withWalkTimes,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache, routeArrivals } from './eta.js?v=dev';
@@ -823,6 +823,20 @@ async function loadDB() {
 
 let planRun = 0, transitRequest, plannedInputs;
 const SAME_PLACE_METERS = 30;
+let railFares, railFareRequest;
+const usesRail = (journey) => rides(journey).some((ride) => ride.op === 'mtr' || ride.op === 'lightRail');
+
+function loadRailFares() {
+  if (railFares || railFareRequest) return;
+  railFareRequest = fetch('api/fares', { signal: AbortSignal.timeout(8000) })
+    .then((response) => response.ok ? response.json() : null)
+    .then((data) => { railFares = data?.fares; })
+    .catch(() => {})
+    .finally(() => {
+      railFareRequest = null;
+      if (state.tab === 'plan' && state.journeys.some(usesRail)) renderSheet();
+    });
+}
 
 /** Places picked from a list, by name, as a search by name could land on another branch. */
 const pickedPlaces = new Map();
@@ -1022,6 +1036,7 @@ async function runPlan(request) {
   if (!found.length) {
     return setPhase('failed', t('找不到可搭乘的公共交通路線，請試另一個時間或上車地點。', 'No public transport route found. Try another time or boarding location.'));
   }
+  if (found.some(usesRail)) loadRailFares();
   showTripOptions(found);
   setPhase('checkingLive');
   fitPlanMap();
@@ -2265,6 +2280,11 @@ function journeyCard(journey) {
   const shown = journey.legs.filter((leg) => leg.type === 'ride' || leg.minutes >= 0.5);
   const changes = transfers(journey);
   const arrive = clock(arrivalTime(journey));
+  const cents = journeyFare(journey, state.db, railFares);
+  const money = cents == null ? null : `HK$${(cents / 100).toFixed(2)}`;
+  const fare = money ? (cents === 0 ? t(`全程車費 ${money}`, `Total fare ${money}`) : t(`全程車費約 ${money}`, `Est. fare ${money}`))
+    : railFareRequest && usesRail(journey) ? t('正在查詢車費…', 'Checking fare…')
+      : t('全程車費暫缺資料', 'Total fare unavailable');
   const canNavigate = rides(journey).every((ride) => ride.routeKey || ride.providerStops?.length >= 2);
   return h('div', { class: `card${isOpen ? ' open' : ''}${state.onMap === id ? ' on-map' : ''}${state.justOpened === id ? ' reveal' : ''}`, 'data-journey': id },
     h('button', {
@@ -2291,8 +2311,12 @@ function journeyCard(journey) {
         index > 0 && icon('next', 13),
         leg.type === 'walk' ? h('span', { class: 'walk' }, icon('walk', 15), Math.max(1, Math.round(leg.minutes))) : badge(leg.op, leg.route),
       ])),
-      h('div', { class: 'tiny muted', style: 'margin-top:7px' }, `${changes ? t(`轉 ${changes} 次`, `${changes} change${changes > 1 ? 's' : ''}`) : t('直達', 'Direct')} · ${t(`步行 ${Math.round(walkingMeters(journey))} 米`, `walk ${Math.round(walkingMeters(journey))} m`)}`)),
+      h('div', { class: 'journey-summary tiny muted' },
+        h('span', {}, `${changes ? t(`轉 ${changes} 次`, `${changes} change${changes > 1 ? 's' : ''}`) : t('直達', 'Direct')} · ${t(`步行 ${Math.round(walkingMeters(journey))} 米`, `walk ${Math.round(walkingMeters(journey))} m`)}`),
+        h('span', { class: cents == null ? 'journey-fare' : 'journey-fare bold' }, fare))),
     isOpen && h('div', { class: 'timeline' }, journey.legs.map(legDetail)),
+    isOpen && cents > 0 && h('div', { class: 'tiny muted' },
+      t('成人車費估算，實付金額視乎付款方式及優惠。', 'Estimated adult fare. Payment method and discounts may change the actual fare.')),
     isOpen && !canNavigate && h('a', { class: 'link', href: googleDirections(), target: '_blank', rel: 'noopener' }, t('在 Google 地圖查看', 'View in Google Maps')),
     isOpen && canNavigate && h('button', {
       class: `primary wide${isNavigating ? ' danger' : ''}`,
@@ -2920,6 +2944,8 @@ function settingsSheet() {
         '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會經本站伺服器傳送給 Google，或在額度用完時傳送給 OpenStreetMap 的 Photon 服務，用來搜尋你身邊 5 公里內的地點。AI 請求及店舖搜尋經本站伺服器轉送給 DeepSeek 及 Google，伺服器不會保存內容。傳送給 DeepSeek 的只有你輸入的文字、地區、站名、路線號碼及店舖資料，不包括座標。規劃公共交通路線時，起終點座標及所選時間會經本站伺服器傳送給 Transitous 或 Google。Google 亦會收到步行路段兩端的座標。Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
         'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go through this site\'s server to Google, or to OpenStreetMap\'s Photon service once the allowance is used up, to search within 5 km of you. AI requests and shop searches pass through this site\'s server to DeepSeek and Google, and the server keeps none of it. DeepSeek only receives your text, the district, stop names, route numbers and shop details, never coordinates. For public transport directions, the start and end coordinates and selected time go through this site\'s server to Transitous or Google. Google also receives the two ends of walking segments. Google Maps loads straight into your browser under Google\'s privacy policy.')),
       aboutItem(t('資料來源', 'Data sources'), t('路線資料來自 hkbus.app；到站時間來自各營辦商；公共交通路線由 Transitous、Google 地圖或內置演算法規劃；地圖、地點、步行路線及店舖來自 Google，額度用完後改用 OpenFreeMap、OpenStreetMap 及政府地理資訊。', 'Route data from hkbus.app; arrivals from the operators; public transport routes from Transitous, Google Maps or the built-in planner; maps, places, walking routes and shops from Google, and after the allowance, OpenFreeMap, OpenStreetMap and Government GIS.')),
+      h('a', { class: 'small link', href: 'https://data.gov.hk/en-data/dataset/mtr-data-routes-fares-barrier-free-facilities', target: '_blank', rel: 'noopener' },
+        t('成人八達通鐵路車費 © 港鐵公司（資料來自 DATA.GOV.HK）', 'Adult Octopus rail fares © MTR Corporation Limited via DATA.GOV.HK')),
       h('a', { class: 'small link', href: 'https://www.google.com/help/terms_maps/', target: '_blank', rel: 'noopener' }, t('Google 地圖使用條款', 'Google Maps Terms of Service')),
       h('a', { class: 'small link', href: 'https://policies.google.com/privacy', target: '_blank', rel: 'noopener' }, t('Google 私隱政策', 'Google Privacy Policy')),
       h('a', { class: 'small link', href: 'https://github.com/kevinwentao07-zwt/hktransport', target: '_blank', rel: 'noopener' }, t('GitHub 原始碼（GPL-3.0）', 'Source on GitHub (GPL-3.0)'))),

@@ -606,6 +606,30 @@ test('Google transit joins adjacent walking instructions and matches the boardin
   assert.deepEqual(T.rankTripOptions([short, { ...short }], 'lessWalking'), [short]);
   assert.equal(T.totalMinutes(short), 35);
   assert.equal(T.journeyPath(short, at('A'), at('C'), db).segments[1].providerShape, true);
+  const [withPrice] = googleJourneys([{
+    legs: [{ steps: [trip] }],
+    travelAdvisory: { transitFare: { currencyCode: 'HKD', units: '13', nanos: 600_000_000 } },
+  }], db, noon);
+  assert.equal(T.journeyFare(withPrice, db), 1360);
+  assert.equal(T.journeyFare(short, db), null);
+});
+
+test('journey fare uses the boarding stop and day and combines rail within the same interchange', () => {
+  const faresDB = T.normalizeDB({
+    ...raw, holidays: ['20261104'],
+    routeList: { r1: { ...raw.routeList.r1, fares: ['8.1', '6.2'], faresHoliday: ['12.4', '9.7'] } },
+  });
+  const ride = (op, route, boardStopID, alightStopID) => ({
+    type: 'ride', op, route, boardStopID, alightStopID, rideMinutes: 8, waitMinutes: 0, transferMinutes: 0,
+  });
+  const bus = { ...ride('kmb', '1', 'B', 'C'), routeKey: 'r1', boardPosition: 1 };
+  const railFares = { mtr: { 'CEN>MOK': 1360, 'CEN>ADM': 490, 'ADM>MOK': 1230 } };
+  const train = ride('mtr', 'ISL', 'CEN', 'ADM'), change = ride('mtr', 'TWL', 'ADM', 'MOK');
+  const trip = (legs, departure = noon) => ({ legs, departure });
+  assert.equal(T.journeyFare(trip([bus, train, change]), faresDB, railFares), 2330);
+  assert.equal(T.journeyFare(trip([bus], noon + 86_400_000), faresDB), 620);
+  assert.equal(T.journeyFare(trip([bus, train]), faresDB), null);
+  assert.equal(T.journeyFare(trip([{ type: 'walk', minutes: 8 }]), faresDB), 0);
 });
 
 test('local planning expands a station search after a nearby stop gives no route', () => {
