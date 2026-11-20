@@ -1,7 +1,7 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
 import { meters,
   OP_COLORS, OP_LABELS, MODES, LIVE_AHEAD_MS, arrivalTime, arrivesLate, buildStopIndex, closestPosition, nextRouteKeys, planAdvice, routeFamily, routeWays, exactSite, instruction, journeyID, journeyPath, RETURN_COLOR, circularTurn, roadBetween, lineColor, lineName, matchingSites,
-  nameText, normalizeDB, partialSite, pathAhead, placeOnTrack, primaryMode, progressAt, retime, rides, routeTrack, fitsWalkLimit, MAX_WALK_LEG_MINUTES, rankTripOptions, searchRoutes, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
+  nameText, normalizeDB, partialSite, pathAhead, placeOnTrack, primaryMode, progressAt, retime, rides, routeTrack, fitsWalkLimit, MAX_WALK_LEG_MINUTES, rankCombinedTripOptions, searchRoutes, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
   totalMinutes, transfers, walkEnds, walkingMeters, withWalkTimes,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache, routeArrivals } from './eta.js?v=dev';
@@ -785,12 +785,17 @@ const pending = new Map();
 worker.onmessage = ({ data }) => {
   const done = pending.get(data.id);
   pending.delete(data.id);
+  clearTimeout(done?.timeout);
   if (data.error) done?.reject(new Error(data.error));
   else done?.resolve(data);
 };
-const ask = (message) => new Promise((resolve, reject) => {
+const ask = (message, patience) => new Promise((resolve, reject) => {
   const id = ++requestID;
-  pending.set(id, { resolve, reject });
+  const timeout = patience && setTimeout(() => {
+    pending.delete(id);
+    reject(new Error('Built-in planner timed out'));
+  }, patience);
+  pending.set(id, { resolve, reject, timeout });
   worker.postMessage({ ...message, id });
 });
 
@@ -990,13 +995,9 @@ async function runPlan(request) {
   const { mode, at } = state.when ?? {};
   const preference = state.preference;
   const departure = mode === 'depart' ? at : now, arriveBy = mode === 'arrive' ? at : null;
-  const local = async () => {
-    try {
-      return (await ask({ type: 'plan', from: start.location, to: end.location, preference, departure, arriveBy })).journeys;
-    } catch {
-      return [];
-    }
-  };
+  const local = async () => (await ask({
+    type: 'plan', from: start.location, to: end.location, preference, departure, arriveBy,
+  }, 6000)).journeys;
   transitRequest = new AbortController();
   const options = { preference, mode, at, lang: state.lang, signal: transitRequest.signal };
   const providers = [];
@@ -1010,36 +1011,25 @@ async function runPlan(request) {
   });
   providers.push(local);
 
-  const ready = (journeys) => journeys.some((journey) => rides(journey).length && fitsWalkLimit(journey) && !arrivesLate(journey));
-  const arrivals = state.arrivals = liveArrivalCache(state.db, state.lang);
-  const overflow = [];
-  let candidates = [], found = false;
-  for (const provider of providers) {
-    const routes = await provider();
-    if (stale()) return;
-    found ||= routes.length > 0;
-    if (provider !== local && !ready(routes)) {
-      overflow.push(...routes);
-      continue;
-    }
-    const provisional = rankTripOptions(ready(routes) ? routes : [...routes, ...overflow], preference, 8);
-    if (provisional.length) {
-      showTripOptions(provisional);
-      setPhase('checkingLive');
-      fitPlanMap();
-    }
-    candidates = (await Promise.all(provisional.map((journey) => (
-      journey.departure - now <= LIVE_AHEAD_MS ? retime(journey, arrivals) : journey
-    )))).filter((journey) => !journey.missedConnection);
-    if (stale()) return;
-    if (provider === local || ready(candidates)) break;
-    overflow.push(...candidates);
+  const batches = await Promise.allSettled(providers.map((provider) => provider()));
+  if (stale()) return;
+  const found = batches.flatMap((batch) => batch.status === 'fulfilled' ? batch.value : [])
+    .filter((journey) => journey.provider !== 'google' || mapView === googleMap);
+  if (!found.length) {
+    return setPhase('failed', t('找不到可搭乘的公共交通路線，請試另一個時間或上車地點。', 'No public transport route found. Try another time or boarding location.'));
   }
+  showTripOptions(found);
+  setPhase('checkingLive');
+  fitPlanMap();
+
+  const arrivals = state.arrivals = liveArrivalCache(state.db, state.lang);
+  const candidates = (await Promise.all(found.map((journey) => (
+    journey.departure - now <= LIVE_AHEAD_MS ? retime(journey, arrivals) : journey
+  )))).filter((journey) => !journey.missedConnection);
+  if (stale()) return;
   if (!candidates.length) {
     showTripOptions([]);
-    return setPhase('failed', found
-      ? t('這些班次已趕不上，請重新搜尋。', 'Those departures can no longer be reached. Search again.')
-      : t('找不到可搭乘的公共交通路線，請試另一個時間或上車地點。', 'No public transport route found. Try another time or boarding location.'));
+    return setPhase('failed', t('這些班次已趕不上，請重新搜尋。', 'Those departures can no longer be reached. Search again.'));
   }
   const moved = showTripOptions(candidates, true);
   setPhase('done');
@@ -1058,9 +1048,9 @@ async function runPlan(request) {
 }
 
 function showTripOptions(candidates, keepSelection = false) {
-  state.candidates = rankTripOptions(candidates, state.preference, 8);
-  const withinLimit = state.candidates.filter(fitsWalkLimit);
-  state.journeys = state.allowLongWalk ? state.candidates.slice(0, 5) : withinLimit.slice(0, 5);
+  state.candidates = candidates;
+  const ranked = rankCombinedTripOptions(candidates, state.preference);
+  state.journeys = (state.allowLongWalk ? ranked : ranked.filter(fitsWalkLimit)).slice(0, 5);
   const selected = (state.expanded || state.nav?.id) && state.journeys.find((journey) => journeyID(journey) === state.onMap);
   const id = keepSelection && selected ? state.onMap : state.journeys[0] ? journeyID(state.journeys[0]) : null;
   const changed = id !== state.onMap;
@@ -2273,7 +2263,7 @@ function journeyCard(journey) {
         h('span', { class: 'minutes' }, Math.round(totalMinutes(journey))),
         h('span', { class: 'small muted' }, t('分鐘', 'min')),
         h('span', { class: 'grow' }),
-        journey.provider && h('span', { class: 'tiny muted bold', lang: 'en' }, journey.provider === 'transitous' ? 'Transitous' : 'Google Maps'),
+        h('span', { class: 'tiny muted bold' }, journey.provider === 'transitous' ? 'Transitous' : journey.provider === 'google' ? 'Google Maps' : t('內置規劃', 'Built-in planner')),
         rides(journey).some((ride) => ride.liveDeparture) && h('span', { class: 'row tiny live bold', style: 'gap:6px' }, h('i', { class: 'pulse' }), t('實時', 'Live')),
         h('span', { class: `small ${arrivesLate(journey) ? 'late' : 'muted'}` }, state.when ? `${clock(journey.departure)} – ${arrive}` : t(`${arrive} 到達`, `Arrive ${arrive}`))),
       h('div', { class: 'chips', style: 'margin-top:9px' }, shown.flatMap((leg, index) => [
@@ -2391,7 +2381,7 @@ const PHASES = {
   understanding: () => (client() ? t('AI 正在分析你的要求…', 'AI is analysing your request…') : t('理解要求…', 'Reading your request…')),
   findingPlaces: () => (googleShops() ? t('正在 Google 地圖搜尋…', 'Searching Google Maps…') : t('正在搜尋地點…', 'Searching for places…')),
   locating: () => t('正在尋找起點及目的地…', 'Finding places…'),
-  planning: () => t('正在尋找公共交通路線…', 'Finding public transport routes…'),
+  planning: () => t('正在比較公共交通路線…', 'Comparing public transport routes…'),
   checkingLive: () => t('正在核對實時到站時間…', 'Checking live arrivals…'),
 };
 
@@ -2435,7 +2425,7 @@ function planSheet() {
       items.push(suggestionList(state.discovery));
     }
   }
-  if (state.journeys.some((journey) => journey.provider === 'transitous')) {
+  if (state.candidates.some((journey) => journey.provider === 'transitous')) {
     items.push(h('div', { class: 'tiny muted' },
       h('a', { href: 'https://transitous.org/sources/', target: '_blank', rel: 'noopener' }, t('Transitous 資料來源', 'Transitous data sources')),
       ' · ',
@@ -2890,7 +2880,7 @@ function settingsSheet() {
     settingGroup(t('AI 助手', 'AI assistant'),
       h('div', { class: 'setting inline' }, h('span', {}, t('狀態', 'Status')),
         h('span', { class: state.sharedAI ? 'ok' : 'muted' }, state.sharedAI ? t('已連接', 'Connected') : t('未連接', 'Not connected'))),
-      h('div', { class: 'tiny muted' }, t('AI 理解行程及地點要求。路線由 Transitous、Google 地圖或內置演算法規劃。', 'The AI interprets trip and place requests. Routes come from Transitous, Google Maps or the built-in planner.'))),
+      h('div', { class: 'tiny muted' }, t('AI 理解行程及地點要求。路線會綜合比較 Transitous、Google 地圖及內置演算法的方案。', 'The AI interprets trip and place requests. Route planning compares options from Transitous, Google Maps and the built-in planner.'))),
     settingGroup(t('我的資料', 'My data'),
       h('div', { class: 'setting inline' }, h('span', {}, t(`搜尋記錄（${searches}）`, `Search history (${searches})`)),
         clearButton(t('清除', 'Clear'), searches, () => {

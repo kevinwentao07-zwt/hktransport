@@ -264,13 +264,15 @@ const walkingMinutes = (journey) => journey.legs.reduce((total, leg) => total + 
 export const transfers = (journey) => Math.max(0, rides(journey).length - 1);
 export const arrivalTime = (journey) => journey.departure + totalMinutes(journey) * 60_000;
 export const arrivesLate = (journey) => journey.arriveBy != null && arrivalTime(journey) > journey.arriveBy;
-export const journeyID = (journey) => journey.id ?? (rides(journey).map((r) => `${r.op}|${r.route}@${r.boardStopID}>${r.alightStopID}`).join(',') || 'walk');
+const routeSequence = (journey) => rides(journey).map((ride) =>
+  `${ride.op}|${ride.route}@${ride.boardStopID}>${ride.alightStopID}`).join(',') || 'walk';
+export const journeyID = (journey) => journey.id ?? routeSequence(journey);
 
 export const MAX_WALK_LEG_MINUTES = 10;
 export const fitsWalkLimit = (journey) => journey.legs.every((leg) => leg.type !== 'walk' || leg.minutes <= MAX_WALK_LEG_MINUTES);
 
 /** Practical picks compare time once walking and transfers are nearly equivalent. */
-export function rankTripOptions(journeys, preference, limit = 5) {
+export function rankTripOptions(journeys, preference, limit = 5, identity = journeyID) {
   const walkByGroup = new Map();
   const options = journeys.map((journey) => {
     const group = [Number(!fitsWalkLimit(journey)), Number(arrivesLate(journey))];
@@ -293,11 +295,33 @@ export function rankTripOptions(journeys, preference, limit = 5) {
     }
     return 0;
   }).map(({ journey }) => journey).filter((journey) => {
-    const id = journeyID(journey);
+    const id = identity(journey);
     if (seen.has(id)) return false;
     seen.add(id);
     return true;
   }).slice(0, limit);
+}
+
+const combinedTripID = (journey) => rides(journey).every((ride) => ride.routeKey) ? routeSequence(journey) : journeyID(journey);
+
+/** Keep one version of an itinerary when different sources match the same local boarding and alighting stops. */
+export function rankCombinedTripOptions(journeys, preference, limit = 8) {
+  const grouped = new Map();
+  for (const journey of journeys) {
+    if (journey.missedConnection) continue;
+    const key = combinedTripID(journey);
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(journey);
+  }
+  const comparable = [...grouped.values()].flatMap((group) => {
+    // A straight-line estimate should not make the same itinerary appear to have a shorter walk.
+    const measured = group.filter(({ legs }) => {
+      const walks = legs.filter((leg) => leg.type === 'walk');
+      return walks.length > 0 && walks.every((walk) => walk.walkFromMap);
+    });
+    return measured.length ? measured : group;
+  });
+  return rankTripOptions(comparable, preference, limit, combinedTripID);
 }
 
 const LATE_PENALTY = 100_000;

@@ -194,25 +194,19 @@ export async function routeArrivals(route, op, db, lang) {
   return answers;
 }
 
-/** Live departures for a planned ride; shared per plan so a stop is only asked once. */
+/** Fetch a boarding stop once per search while checking each ride's destination separately. */
 export function liveArrivalCache(db, lang) {
   const tasks = new Map();
-  return (ride) => {
-    const key = `${ride.routeKey}|${ride.op}|${ride.boardPosition}|${ride.alightPosition}`;
+  return async (ride) => {
+    const route = db.routes[ride.routeKey];
+    if (!route) return null;
+    const key = `${ride.routeKey}|${ride.op}|${ride.boardPosition}`;
     if (!tasks.has(key)) {
-      tasks.set(key, (async () => {
-        const route = db.routes[ride.routeKey];
-        if (!route) return null;
-        try {
-          const etas = await fetchETA(route, ride.boardPosition, db, lang, ride.op);
-          const departures = etas.filter((eta) => eta.date != null && trainServes(eta.dest, ride, db))
-            .map((eta) => ({ date: eta.date, platform: ride.op === 'mtr' ? eta.remark : null }));
-          return departures.length ? departures : null;
-        } catch {
-          return null;
-        }
-      })());
+      tasks.set(key, fetchETA(route, ride.boardPosition, db, lang, ride.op).catch(() => []));
     }
-    return tasks.get(key);
+    const etas = await tasks.get(key);
+    const departures = etas.filter((eta) => eta.date != null && trainServes(eta.dest, ride, db))
+      .map((eta) => ({ date: eta.date, platform: ride.op === 'mtr' ? eta.remark : null }));
+    return departures.length ? departures : null;
   };
 }

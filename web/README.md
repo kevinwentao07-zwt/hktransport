@@ -3,8 +3,8 @@
 The web app: a static page, live at <https://hk.52-220-124-215.sslip.io/>.
 
 Route data comes from hkbus.app and arrivals come straight from the operators. The site's server
-handles Transitous, Google and DeepSeek requests. The planner tries Transitous first, then Google
-when Google Maps is active, then its built-in RAPTOR search. The app defaults to less walking and only shows walks over 10
+handles Transitous, Google and DeepSeek requests. The planner compares the results of Transitous,
+RAPTOR and Google (when Google Maps is active) for the same search. The app defaults to less walking and only shows walks over 10
 minutes on request. On a static host such as GitHub Pages, the built-in planner and free map are
 available without the server.
 
@@ -33,7 +33,7 @@ Google's map and place keys. The server caps usage at 5,000 walking requests and
 requests per month. Google transit runs with Google Maps active. Browsers can see the map key, so
 limit it to your domain and set daily quotas in Google Cloud.
 
-Transitous is enabled on the server by default for the trial. Set `TRANSITOUS_ENABLED=0`
+Transitous is enabled on the server by default. Set `TRANSITOUS_ENABLED=0`
 in the service environment to disable it. The proxy identifies the application to Transitous
 and caps usage at 300 requests per day across the site.
 

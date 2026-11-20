@@ -70,9 +70,10 @@ export function appendWalk(legs, line, distance, duration, source) {
   if (previous?.type === 'walk') {
     previous.meters += metersWalked;
     previous.minutes += walking;
+    previous.walkFromMap &&= duration != null;
     previous.routePoints.push(...line);
   } else {
-    legs.push({ type: 'walk', meters: metersWalked, minutes: walking, walkFromMap: true, walkSource: source, routePoints: [...line] });
+    legs.push({ type: 'walk', meters: metersWalked, minutes: walking, walkFromMap: duration != null, walkSource: source, routePoints: [...line] });
   }
 }
 

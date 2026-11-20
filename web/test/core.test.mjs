@@ -668,3 +668,52 @@ test('Transitous preserves walk durations and matches a scheduled bus to operato
   assert.deepEqual(T.journeyPath(unmatched, at('A'), at('C'), db).segments[1].stopIDs, ['甲', '乙', '丙']);
   assert.equal(transitousJourneys([{ legs: [cancelled] }, { legs: [walk(300)] }], db, noon).length, 0);
 });
+
+test('combined planning ranks across sources and keeps one version of matching stops', () => {
+  const [base] = T.plan(network, at('A'), at('C'), noon);
+  const [ride] = T.rides(base);
+  const trip = (id, provider, boardStopID, walk, rideMinutes, measured = true) => ({
+    ...base, id, provider, legs: [
+      { type: 'walk', minutes: walk, meters: walk * 70, walkFromMap: measured },
+      { ...ride, boardStopID, rideMinutes },
+    ],
+  });
+  const googleLong = trip('google:long', 'google', 'A', 11, 10);
+  const transitousLong = trip('transitous:long', 'transitous', 'A', 12, 9);
+  const estimated = trip('local', null, 'A', 1, 9, false);
+  const googleShort = trip('google:short', 'google', 'B', 5, 10);
+  const transitousShort = trip('transitous:short', 'transitous', 'B', 4, 20);
+  const missed = { ...trip('missed', 'transitous', 'C', 0, 2), missedConnection: true };
+  const options = T.rankCombinedTripOptions([transitousLong, transitousShort, estimated, missed, googleLong, googleShort], 'lessWalking');
+  assert.deepEqual(options, [googleShort, googleLong]);
+  assert.deepEqual(options.filter(T.fitsWalkLimit), [googleShort]);
+  assert.deepEqual(T.rankCombinedTripOptions([estimated], 'lessWalking'), [estimated]);
+});
+
+test('sharing the boarding ETA across candidates still checks each train destination', async () => {
+  const stop = (id, lat) => ({ name: { en: id, zh: id }, location: { lat, lng: 114.17 } });
+  const route = (stops) => ({ route: 'EAL', co: ['mtr'], stops: { mtr: stops }, bound: { mtr: 'UT' } });
+  const db = T.normalizeDB({
+    stopList: { A: stop('A', 22.3), B: stop('B', 22.31), C: stop('C', 22.32), D: stop('D', 22.33) },
+    routeList: { main: route(['A', 'B', 'C']), branch: route(['A', 'B', 'D']) },
+  });
+  const previousFetch = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    return { ok: true, json: async () => ({ status: 1, data: { 'EAL-A': { UP: [
+      { dest: 'D', plat: '1', time: '2026-11-04 12:01:00' },
+      { dest: 'C', plat: '1', time: '2026-11-04 12:03:00' },
+    ] } } }) };
+  };
+  try {
+    const arrivals = E.liveArrivalCache(db, 'zh');
+    const board = { routeKey: 'main', op: 'mtr', route: 'EAL', boardPosition: 0, boardStopID: 'A' };
+    const [toB, toC] = await Promise.all([arrivals({ ...board, alightStopID: 'B' }), arrivals({ ...board, alightStopID: 'C' })]);
+    assert.equal(requests, 1);
+    assert.deepEqual(toB.map(({ date }) => date), [noon + 60_000, noon + 180_000]);
+    assert.deepEqual(toC.map(({ date }) => date), [noon + 180_000]);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
