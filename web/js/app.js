@@ -3475,6 +3475,7 @@ function aiSettings() {
 
 function settingsSheet() {
   const searches = Object.values(store.get('history', {})).flat().length + state.recentRoutes.length;
+  const simplified = state.script === 'hans';
   return [
     settingGroup(t('一般', 'General'),
       setting(t('語言', 'Language'), segments([['hant', '繁體中文'], ['hans', '简体中文'], ['en', 'English']], state.lang === 'en' ? 'en' : state.script, (choice) => {
@@ -3519,10 +3520,14 @@ function settingsSheet() {
     settingGroup(t('關於', 'About'),
       aboutItem(t('關於作者', 'About the author'),
         h('p', {}, t(
-          '你好，我係 Kevin，hktransport 係我整嘅。我想喺香港搭車嗰陣，可以快啲睇到下班車幾時到，又可以一眼睇清楚成程點行，所以就整咗呢個工具。',
+          simplified
+            ? '你好，我是 Kevin，hktransport 的作者。我做这个工具，是希望大家在香港乘坐公共交通时，能更快查到下一班车什么时候到，也能一眼看清整段路线。'
+            : '你好，我係 Kevin，hktransport 係我整嘅。我想喺香港搭車嗰陣，可以快啲睇到下班車幾時到，又可以一眼睇清楚成程點行，所以就整咗呢個工具。',
           'Hi, I’m Kevin, the creator of hktransport. I built it so I could quickly see when the next ride is due and how the whole trip fits together when getting around Hong Kong.')),
         h('p', {}, t(
-          '多謝你用 hktransport！亦都多謝每一位肯花時間同我講邊度好用、邊度仲可以改嘅朋友。希望呢個工具可以幫你搭車嗰陣少啲估、少啲等。',
+          simplified
+            ? '感谢你使用 hktransport！也谢谢每一位愿意花时间告诉我哪些地方好用、哪些地方还能改进的朋友。希望这个工具能让你出行时少一点猜测，少一点等待。'
+            : '多謝你用 hktransport！亦都多謝每一位肯花時間同我講邊度好用、邊度仲可以改嘅朋友。希望呢個工具可以幫你搭車嗰陣少啲估、少啲等。',
           'Thanks for using hktransport! And thanks to everyone who has taken the time to tell me what works well and what I could improve. I hope it makes your trips a little easier, with less guesswork and less waiting.')),
         'Kevin · ',
         h('a', { class: 'link', href: 'https://github.com/kevinwentao07-zwt', target: '_blank', rel: 'noopener' }, 'GitHub @kevinwentao07-zwt')),
