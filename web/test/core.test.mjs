@@ -304,6 +304,21 @@ test('the advice on a plan comes from its own numbers', () => {
   assert.equal(T.planAdvice([quick], t, line, 0).includes('Against'), false);
   assert.equal(T.planAdvice([], t, line, 0), null);
 });
+test('the bus glides around a corner and turns to follow the road', () => {
+  const start = { lat: 22.30, lng: 114.17 }, corner = { lat: 22.30, lng: 114.175 };
+  const finish = { lat: 22.305, lng: 114.175 };
+  const track = T.routeTrack([start, corner, finish], [start, finish]);
+  const current = { position: 0, ...T.placeOnTrack(track, 0) };
+  const target = { position: 1, ...T.placeOnTrack(track, 1) };
+  const incoming = T.glideOnTrack(track, current, target, 0.25);
+  const outgoing = T.glideOnTrack(track, current, target, 0.75);
+  close(incoming.location.lat, start.lat);
+  close(incoming.heading, 90);
+  close(outgoing.location.lng, finish.lng);
+  close(outgoing.heading, 0);
+  assert.ok(T.meters(incoming.location, { lat: start.lat + (finish.lat - start.lat) * 0.25, lng: start.lng + (finish.lng - start.lng) * 0.25 }) > 100);
+});
+
 test('a route is followed by progress along it, even over the same road twice', () => {
   const at = (lat, lng) => ({ lat, lng });
   // Out along a road and back along the same road: a circular route.

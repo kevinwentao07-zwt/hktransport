@@ -908,8 +908,9 @@ export function routeTrack(line, stops) {
     passes[index] = { location: pass.location, at: reached };
   });
   // A line missing much of the route is the wrong one: straight between the stops at least shows it all.
-  const placed = passes.filter(Boolean).length;
-  return placed >= 2 && placed >= known.length * LEAST_STOPS_ON_LINE ? { line, along, passes, stops } : null;
+  const placed = passes.flatMap((pass, index) => (pass ? [index] : []));
+  return placed.length >= 2 && placed.length >= known.length * LEAST_STOPS_ON_LINE
+    ? { line, along, passes, stops, firstStop: placed[0], lastStop: placed.at(-1) } : null;
 }
 
 /** How far along the line a fractional stop number is, between the stops that were placed. */
@@ -945,6 +946,14 @@ export function placeOnTrack(track, position) {
   };
 }
 
+/** Ease along the route so the marker follows bends and faces the current part of the road. */
+export function glideOnTrack(track, current, target, share) {
+  const position = current.position + (target.position - current.position) * share;
+  const { location, heading } = placeOnTrack(track, position);
+  const turn = ((heading - current.heading + 180) % 360 + 360) % 360 - 180;
+  return { ...target, position, location, heading: current.heading + turn };
+}
+
 /** The road between two fractional stop numbers. */
 export function trackBetween(track, from, to) {
   const start = stretchAt(track, distanceAt(track, from)), end = stretchAt(track, distanceAt(track, to));
@@ -953,9 +962,8 @@ export function trackBetween(track, from, to) {
 
 /** The road between two stops, with any stop the line stops short of joined on straight, so none is left off. */
 export function roadBetween(track, from, to) {
-  const placed = track.passes.flatMap((pass, index) => (pass ? [index] : []));
   const spare = (start, end) => track.stops.slice(start, end).filter(validLocation);
-  return [...spare(from, placed[0]), ...trackBetween(track, from, to), ...spare(placed.at(-1) + 1, to + 1)];
+  return [...spare(from, track.firstStop), ...trackBetween(track, from, to), ...spare(track.lastStop + 1, to + 1)];
 }
 
 const SECONDS_PER_STOP = 90;
@@ -1088,7 +1096,7 @@ function arrivalAt(stops, position, gaps) {
  * timetabled are not followed. `arrivals` is [{position, times, planned}]; `boardPosition`, if any,
  * is where the rider gets on, and the bus that reaches it first is the next one.
  */
-export function vehiclesOnRoute(arrivals, ride, db, now) {
+export function vehiclesOnRoute(arrivals, ride, db, now, track = null) {
   const route = db.routes[ride.routeKey], stops = route?.stops[ride.op];
   if (!stops || stops.length < 2) return [];
   const byStop = stops.map(() => []);
@@ -1101,7 +1109,8 @@ export function vehiclesOnRoute(arrivals, ride, db, now) {
   const vehicles = busTimetables(byStop, gaps, now).flatMap((bus) => {
     if (bus.stops.every((stop) => stop.isPlanned)) return [];
     const position = positionOf(bus.stops, gaps, now);
-    const place = position == null ? null : placeOnStops(stops, position, db);
+    if (position == null || (track && (position < track.firstStop || position > track.lastStop))) return [];
+    const place = track ? placeOnTrack(track, position) : placeOnStops(stops, position, db);
     if (!place) return [];
     const due = board != null && position < board ? arrivalAt(bus.stops, board, gaps) : { arrival: null, isLive: false };
     return [{ ...place, position, ...due, minutes: due.arrival == null ? null : Math.max(0, Math.floor((due.arrival - now) / 60_000)), color: lineColor(ride.op, ride.route), isMinibus: ride.op === 'gmb', isNext: false }];

@@ -1,7 +1,7 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
 import { meters,
   OP_COLORS, OP_LABELS, MODES, LIVE_AHEAD_MS, arrivalTime, arrivesLate, buildStopIndex, closestPosition, nextRouteKeys, planAdvice, routeFamily, routeWays, exactSite, instruction, journeyID, journeyPath, RETURN_COLOR, circularTurn, roadBetween, lineColor, lineName, matchingSites,
-  nameText, normalizeDB, partialSite, pathAhead, placeOnTrack, primaryMode, progressAt, retime, rides, routeTrack, fitsWalkLimit, MAX_WALK_LEG_MINUTES, rankCombinedTripOptions, searchRoutes, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
+  nameText, normalizeDB, partialSite, pathAhead, glideOnTrack, primaryMode, progressAt, retime, rides, routeTrack, fitsWalkLimit, MAX_WALK_LEG_MINUTES, rankCombinedTripOptions, searchRoutes, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
   totalMinutes, transfers, walkEnds, walkingMeters, withWalkTimes,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache, routeArrivals } from './eta.js?v=dev';
@@ -1212,7 +1212,7 @@ function selectedPath() {
 
 const VEHICLE_REFRESH = 30_000, SAME_ARRIVAL_MS = 90_000;
 let shownVehicles = [], gliding = false, lastGlide = 0, lastBusID = 0;
-let vehicleRide = null, vehicleList = [], vehicleKey = '', vehicleArrivals = [], vehicleFetched = 0, vehicleFetching = '';
+let vehicleTrack = null, vehicleList = [], vehicleKey = '', vehicleArrivals = [], vehicleFetched = 0, vehicleFetching = '';
 const arrivalsSeen = new Map();
 
 /**
@@ -1238,6 +1238,7 @@ function moveVehicles() {
   const ride = rideOnScreen(), route = ride && state.db.routes[ride.routeKey];
   if (!route) {
     vehicleKey = '';
+    vehicleTrack = null;
     vehicleList = [];
     shownVehicles = [];
     mapView.approach(null);
@@ -1253,7 +1254,12 @@ function moveVehicles() {
     // Coming back to a route shows its buses at once, as the times are still good.
     ({ arrivals: vehicleArrivals, at: vehicleFetched } = arrivalsSeen.get(key) ?? { arrivals: [], at: 0 });
   }
-  vehicleRide = ride;
+  vehicleTrack = trackOf(route, ride.op);
+  if (!vehicleTrack) {
+    // A provider's trip line may start at the boarding stop, past the approach.
+    void loadShape(route, ride.op);
+    return mapView.approach(null);
+  }
   if (vehicleFetching !== key && Date.now() - vehicleFetched > VEHICLE_REFRESH) {
     vehicleFetching = key;
     routeArrivals(route, ride.op, state.db, state.lang).then((arrivals) => {
@@ -1266,26 +1272,23 @@ function moveVehicles() {
       moveVehicles();
     });
   }
-  const track = trackOf(route, ride.op);
-  const previous = vehicleList;
   const shownTime = state.tab === 'plan' ? ride.liveDeparture : chosenStopArrival();
-  vehicleList = vehiclesOnRoute(vehicleArrivals, vehicleRide, state.db, Date.now()).map((vehicle) => {
-    // On the real road when that has arrived, by how far along the route it is.
-    const placed = track ? { ...vehicle, ...placeOnTrack(track, vehicle.position) } : vehicle;
+  vehicleList = vehiclesOnRoute(vehicleArrivals, ride, state.db, Date.now(), vehicleTrack).map((vehicle) => {
     // The two answers can be up to a refresh apart; the stop, the sheet and the bus say the same.
     const isShownBus = vehicle.isNext && shownTime && Math.abs(shownTime - vehicle.arrival) < SAME_ARRIVAL_MS;
-    return isShownBus ? { ...placed, minutes: minutesUntil(shownTime), isLive: true } : placed;
+    return isShownBus ? { ...vehicle, minutes: minutesUntil(shownTime), isLive: true } : vehicle;
   });
-  if (previous !== vehicleList) glideVehicles();
-  const coming = vehicleList.find((vehicle) => vehicle.isNext);
-  if (state.tab !== 'plan') return mapView.approach(null);
-  const ids = route.stops[ride.op], stop = stopOnRoad(route, ride.op, ride.boardPosition);
-  const ahead = coming ? ids.slice(Math.ceil(coming.position), ride.boardPosition).flatMap((id, index) => {
-    const location = stopOnRoad(route, ride.op, Math.ceil(coming.position) + index);
+  glideVehicles();
+  const coming = shownVehicles.find((vehicle) => vehicle.isNext);
+  if (state.tab !== 'plan' || !coming || !vehicleTrack.passes[ride.boardPosition] || coming.position >= ride.boardPosition) {
+    return mapView.approach(null);
+  }
+  const firstStop = Math.ceil(coming.position), ids = route.stops[ride.op];
+  const ahead = ids.slice(firstStop, ride.boardPosition).flatMap((id, index) => {
+    const location = stopOnRoad(route, ride.op, firstStop + index);
     return location ? [{ id, location, name: name(id) }] : [];
-  }) : [];
-  const road = coming && stop && (track ? trackBetween(track, coming.position, ride.boardPosition) : [coming.location, stop]);
-  mapView.approach(road || null, coming?.color, ahead);
+  });
+  mapView.approach(trackBetween(vehicleTrack, coming.position, ride.boardPosition), coming.color, ahead);
 }
 
 let tagKey = '', tagArrivals, tagFetched = 0, tagShown = '';
@@ -1509,7 +1512,7 @@ function glideVehicles() {
     const same = shownVehicles.find(({ id, position }) => !taken.has(id) && Math.abs(position - vehicle.position) < SAME_BUS_STOPS);
     vehicle.id = same?.id ?? ++lastBusID;
     taken.add(vehicle.id);
-    return { ...vehicle, location: same?.location ?? vehicle.location };
+    return same ? glideOnTrack(vehicleTrack, same, vehicle, 0) : vehicle;
   });
   if (calm.matches) {
     shownVehicles = vehicleList;
@@ -1518,29 +1521,24 @@ function glideVehicles() {
   mapView.vehicles(shownVehicles);
   if (gliding || !shownVehicles.length) return;
   gliding = true;
+  lastGlide = performance.now();
   requestAnimationFrame(glideFrame);
 }
 
 function glideFrame(now) {
-  if (!vehicleList.length) {
+  if (!vehicleTrack || !vehicleList.length || calm.matches) {
     gliding = false;
     return;
   }
-  // The eased share of the way there, so a corrected position slides rather than jumps.
-  const share = 1 - Math.exp(-(now - lastGlide) / 700);
+  // Ease the position along the road, then sample the location and heading there.
+  const share = 1 - Math.exp(-Math.max(0, now - lastGlide) / 700);
   lastGlide = now;
-  shownVehicles = shownVehicles.map((vehicle, index) => {
-    const target = vehicleList[index]?.location ?? vehicle.location;
-    return {
-      ...(vehicleList[index] ?? vehicle),
-      location: { lat: vehicle.location.lat + (target.lat - vehicle.location.lat) * share, lng: vehicle.location.lng + (target.lng - vehicle.location.lng) * share },
-    };
-  });
+  shownVehicles = shownVehicles.map((vehicle, index) => glideOnTrack(vehicleTrack, vehicle, vehicleList[index], share));
   mapView.vehicles(shownVehicles);
   requestAnimationFrame(glideFrame);
 }
 
-const hasRealLine = (segment) => !segment.providerShape && segment.mode === 'ride' && !['mtr', 'lightRail'].includes(segment.op);
+const hasRealLine = (segment) => !segment.providerShape && segment.mode === 'ride' && segment.routeKey && !['mtr', 'lightRail'].includes(segment.op);
 
 const tracks = new Map();
 
