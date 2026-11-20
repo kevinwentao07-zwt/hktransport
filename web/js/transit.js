@@ -269,7 +269,14 @@ const routeSequence = (journey) => rides(journey).map((ride) =>
 export const journeyID = (journey) => journey.id ?? routeSequence(journey);
 
 export const MAX_WALK_LEG_MINUTES = 10;
-export const fitsWalkLimit = (journey) => journey.legs.every((leg) => leg.type !== 'walk' || leg.minutes <= MAX_WALK_LEG_MINUTES);
+export function fitsWalkLimit(journey) {
+  let continuous = 0;
+  for (const leg of journey.legs) {
+    continuous = leg.type === 'walk' ? continuous + leg.minutes : 0;
+    if (continuous > MAX_WALK_LEG_MINUTES) return false;
+  }
+  return true;
+}
 
 /** Practical picks compare time once walking and transfers are nearly equivalent. */
 export function rankTripOptions(journeys, preference, limit = 5, identity = journeyID) {

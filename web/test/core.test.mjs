@@ -669,6 +669,15 @@ test('Transitous preserves walk durations and matches a scheduled bus to operato
   assert.equal(transitousJourneys([{ legs: [cancelled] }, { legs: [walk(300)] }], db, noon).length, 0);
 });
 
+test('the walking cap counts adjacent walk legs together across all planning sources', () => {
+  const walk = (minutes) => ({ type: 'walk', minutes, meters: minutes * 75 });
+  const [base] = T.plan(network, at('A'), at('C'), noon);
+  const [ride] = T.rides(base);
+  assert.equal(T.fitsWalkLimit({ ...base, legs: [walk(2), ride, walk(4), walk(9)] }), false);
+  assert.equal(T.fitsWalkLimit({ ...base, legs: [walk(4), ride, walk(9)] }), true);
+  assert.equal(T.fitsWalkLimit({ ...base, legs: [walk(4), walk(6), ride] }), true);
+});
+
 test('combined planning ranks across sources and keeps one version of matching stops', () => {
   const [base] = T.plan(network, at('A'), at('C'), noon);
   const [ride] = T.rides(base);
