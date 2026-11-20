@@ -620,6 +620,18 @@ test('the default ranking prefers a shorter walk over saving a few minutes', () 
   assert.deepEqual(T.rankTripOptions([short, sameEffort], 'lessWalking'), [sameEffort, short]);
 });
 
+test('less walking can rank a short station transfer ahead of a longer direct trip', () => {
+  const [base] = T.plan(network, at('A'), at('C'), noon);
+  const [ride] = T.rides(base);
+  const walk = (minutes) => ({ type: 'walk', minutes, meters: minutes * 75 });
+  const direct = { ...base, id: 'direct', legs: [walk(6), { ...ride, rideMinutes: 40 }, walk(1)] };
+  const transfer = { ...base, id: 'transfer', legs: [
+    walk(2), { ...ride, rideMinutes: 5 }, walk(2), { ...ride, rideMinutes: 5 }, walk(1),
+  ] };
+  assert.deepEqual(T.rankTripOptions([direct, transfer], 'lessWalking'), [transfer, direct]);
+  assert.deepEqual(T.rankTripOptions([direct, transfer], 'fewerTransfers'), [direct, transfer]);
+});
+
 test('a changed ETA that misses a Google connection invalidates the itinerary', async () => {
   const [first] = T.rides(T.plan(network, at('A'), at('C'), noon)[0]);
   const second = { ...first, route: '2', scheduledDeparture: noon + 25 * 60_000 };

@@ -50,11 +50,12 @@ export function scheduledRide(db, { op, route, board, alight, departure, arrival
   if (!board || !alight || !route || !Number.isFinite(departure) || !Number.isFinite(arrival) || arrival < departure) return null;
   const local = matchRide(db, op, route, board, alight, count);
   const direction = headsign || alight.name;
-  const last = local && db.routes[local.routeKey].dest;
+  const localRoute = local && db.routes[local.routeKey];
+  const last = localRoute?.dest;
   const localDirection = last && (normalizePlace(direction) === normalizePlace(last.en ?? '') || normalizePlace(direction) === normalizePlace(last.zh ?? '')) ? last : null;
   const stopKey = (place) => place.id ?? `${place.name}@${place.location.lat},${place.location.lng}`;
   return {
-    type: 'ride', op, route, dest: localDirection ?? { zh: direction, en: direction }, stopCount: count,
+    type: 'ride', op, route: localRoute?.route ?? route, dest: localDirection ?? { zh: direction, en: direction }, stopCount: count,
     boardName: board.name, alightName: alight.name, boardStopID: stopKey(board), alightStopID: stopKey(alight),
     boardLocation: board.location, alightLocation: alight.location, routePoints: points,
     providerStops: stops, scheduledPlatform: platform,

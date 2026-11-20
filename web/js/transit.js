@@ -279,13 +279,12 @@ export function rankTripOptions(journeys, preference, limit = 5) {
     group.push(Number(!rides(journey).length));
     const changes = transfers(journey), walk = walkingMinutes(journey);
     if (preference === 'fewerTransfers') group.push(changes);
-    const effort = preference === 'fewerTransfers' ? walk : walk + changes * 4;
     const key = group.join();
-    walkByGroup.set(key, Math.min(walkByGroup.get(key) ?? Infinity, effort));
-    return { journey, group, duration, effort, key };
+    walkByGroup.set(key, Math.min(walkByGroup.get(key) ?? Infinity, walk));
+    return { journey, group, duration, walk, changes, key };
   });
-  const criteria = ({ group, duration, effort, key }) => key == null ? [...group, duration]
-    : [...group, Math.floor((effort - walkByGroup.get(key)) / 2), duration, effort];
+  const criteria = ({ group, duration, walk, changes, key }) => key == null ? [...group, duration]
+    : [...group, Math.floor((walk - walkByGroup.get(key)) / 2), duration + changes * 2, walk];
   const seen = new Set();
   return options.map((option) => ({ journey: option.journey, values: criteria(option) })).sort((a, b) => {
     for (const [i, value] of a.values.entries()) {
