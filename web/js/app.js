@@ -81,7 +81,7 @@ const t = (zh, en) => (state.lang === 'zh' ? zh : en);
 const name = (id) => stopName(id, state.db, state.lang);
 // Everything is written in Traditional, as stop names and replies are, so Simplified converts what
 // lands on the page rather than each string on its way there.
-const TEXT_ATTRIBUTES = ['placeholder', 'title', 'aria-label'];
+const TEXT_ATTRIBUTES = ['placeholder', 'title', 'aria-label', 'aria-valuetext'];
 
 function simplify(node) {
   if (node.nodeType === Node.TEXT_NODE) {
@@ -217,6 +217,14 @@ const $ = (id) => document.getElementById(id);
 const calm = window.matchMedia('(prefers-reduced-motion: reduce)');
 // Far enough out for the longest trips across Hong Kong to fit on a phone.
 const MIN_ZOOM = 9, SNUG_MARGIN = 56;
+const wideLayout = window.matchMedia('(min-width: 820px)');
+
+function mapPadding() {
+  const wide = wideLayout.matches;
+  const bottom = sheet.mapOnly ? $('app').clientHeight - $('open-panel').offsetTop + 10
+    : wide ? 30 : sheet.targetHeight() + 32;
+  return { top: wide ? 30 : 50, left: wide && !sheet.mapOnly ? 440 : 24, right: wide ? 30 : 24, bottom };
+}
 /** Legs the rider hasn't reached yet are drawn this faint while navigating. */
 const UPCOMING_OPACITY = 0.4;
 
@@ -487,14 +495,14 @@ const leafletMap = (() => {
     fit(points, maxZoom = 16, isSnug = false) {
       if (!points.length) return;
       // Frame the part of the map the search card and panel leave uncovered.
-      const wide = window.matchMedia('(min-width: 820px)').matches, margin = isSnug ? SNUG_MARGIN : 0;
+      const { top, left, right, bottom } = mapPadding(), margin = isSnug ? SNUG_MARGIN : 0;
       const options = {
-        maxZoom, paddingTopLeft: [(wide ? 440 : 24) + margin, (wide ? 30 : 50) + margin / 2],
-        paddingBottomRight: [(wide ? 30 : 24) + margin, wide ? 30 : sheet.targetHeight() + 32],
+        maxZoom, paddingTopLeft: [left + margin, top + margin / 2],
+        paddingBottomRight: [right + margin, bottom],
       };
       const bounds = L.latLngBounds(points.map(point));
       // Leaflet can't fly to where it already is: its path works out to NaN.
-      const fit = `${bounds.toBBoxString()}|${options.paddingBottomRight}`, still = fit === lastFit;
+      const fit = `${bounds.toBBoxString()}|${options.paddingTopLeft}|${options.paddingBottomRight}`, still = fit === lastFit;
       lastFit = fit;
       if (calm.matches || !flying || still) map.fitBounds(bounds, { ...options, animate: false });
       else map.flyToBounds(bounds, { ...options, duration: 0.9, easeLinearity: 0.2 });
@@ -572,10 +580,6 @@ const leafletMap = (() => {
 /** The same map on Google's tiles, used while the server has allowance left. */
 const googleMap = (() => {
   let map, Marker, preview = null, buses = new Map(), tag = null, chosen = null, glide = 0, hasFramed = false, approach = null, approachStops = [], approachKey = '', items = [];
-  const padding = () => {
-    const wide = window.matchMedia('(min-width: 820px)').matches;
-    return { top: wide ? 30 : 50, left: wide ? 440 : 24, right: wide ? 30 : 24, bottom: wide ? 30 : sheet.targetHeight() + 32 };
-  };
   const keep = (item) => { items.push(item); return item; };
   const div = (className, text, color) => {
     const element = document.createElement('div');
@@ -741,7 +745,7 @@ const googleMap = (() => {
       if (points.length === 1) return this.follow(points[0], maxZoom);
       // Worked out here, as Google's fitBounds lands the route under a sheet this tall.
       // Labels hang off a snug view's stops and buses, so it keeps clear of the sides.
-      const margin = isSnug ? SNUG_MARGIN : 0, { top: topEdge, bottom, left: leftEdge, right: rightEdge } = padding(), box = $('map');
+      const margin = isSnug ? SNUG_MARGIN : 0, { top: topEdge, bottom, left: leftEdge, right: rightEdge } = mapPadding(), box = $('map');
       const left = leftEdge + margin, right = rightEdge + margin, top = topEdge + margin / 2;
       const toX = (lng) => (lng + 180) / 360;
       const toY = (lat) => 0.5 - Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360)) / (2 * Math.PI);
@@ -2518,6 +2522,7 @@ const exploreAddressKey = (text) => explorePlaceKey(text).normalize('NFKC').repl
 
 /** Margin moves the geographic target into the portion of the map beside or above the panel. */
 function exploreMapOffset() {
+  if (sheet.mapOnly) return [0, 0];
   const height = $('map').clientHeight, panel = $('panel');
   if (window.matchMedia('(min-width: 820px)').matches) return [-panel.getBoundingClientRect().right / 2, 0];
   const visible = Math.max(0, height - sheet.targetHeight() - (parseFloat(getComputedStyle(panel).bottom) || 0));
@@ -3528,41 +3533,76 @@ function settingsSheet() {
 
 // MARK: Bottom sheet
 
-/** The panel over the map: dragged between peek, half and full. */
+const PANEL_SIZES = ['map', 'peek', 'half', 'full'];
+
+/** Keep the last menu size while the panel is hidden. */
 const sheet = {
   current: 'half',
+  mapOnly: false,
   heights() {
     const app = $('app').clientHeight;
     const peek = $('grabber').offsetHeight + $('top').offsetHeight + $('bottom').offsetHeight + 6;
     const full = app - 54;
-    return { peek: Math.min(peek, full), half: Math.max(peek, Math.min(full, Math.round(app * 0.52))), full };
+    return { map: 0, peek: Math.min(peek, full), half: Math.max(peek, Math.min(full, Math.round(app * 0.52))), full };
   },
   measure() {
-    this.apply(this.heights()[this.current]);
+    if ($('panel').classList.contains('dragging')) return;
+    this.apply(this.targetHeight());
   },
   apply(height) {
     $('app').style.setProperty('--panel-h', `${height}px`);
   },
   /** Where the sheet is heading, which the map must clear even mid-animation. */
   targetHeight() {
-    return this.heights()[this.current];
+    return this.mapOnly ? 0 : this.heights()[this.current];
   },
   snap(name) {
     this.current = name;
-    this.apply(this.heights()[name]);
-    $('app').classList.toggle('sheet-full', name === 'full');
-    $('grabber').setAttribute('aria-valuetext', name);
+    this.measure();
+    this.updateControls();
+  },
+  updateControls() {
+    const size = this.mapOnly ? 'map' : this.current;
+    $('app').classList.toggle('sheet-full', size === 'full');
+    $('grabber').setAttribute('aria-valuenow', PANEL_SIZES.indexOf(size));
+    $('grabber').setAttribute('aria-valuetext', {
+      map: t('只看地圖', 'Map only'), peek: t('部分展開', 'Compact'), half: t('半開', 'Half open'), full: t('完全展開', 'Fully open'),
+    }[size]);
+  },
+  setMapOnly(on) {
+    this.mapOnly = on;
+    const panel = $('panel'), open = $('open-panel');
+    if (on && panel.contains(document.activeElement)) document.activeElement.blur();
+    $('app').classList.toggle('sheet-hidden', on);
+    panel.inert = on;
+    open.hidden = !on;
+    this.measure();
+    this.updateControls();
+    (on ? open : wideLayout.matches ? $('hide-panel') : $('grabber')).focus({ preventScroll: true });
+
+    if (showsEmbed()) return showEmbed();
+    if (!on && (mapTouched || (!wideLayout.matches && this.current === 'full'))) return;
+    const preview = state.explore?.preview?.target;
+    if (state.nav?.here) mapView.follow(state.nav.here);
+    else if (preview) mapView.follow(preview.location, 17, true, exploreMapOffset());
+    else if (state.tab === 'plan' && (state.from || state.to)) fitPlanMap();
+    else if (state.focus) fitWholeRoute();
+    else if (state.tab === 'stops' && state.stopPlace) fitStopArea();
   },
   attach() {
     const grabber = $('grabber'), panel = $('panel'), list = $('sheet');
+    const chooseSize = (size) => size === 'map' ? this.setMapOnly(true) : this.snap(size);
+    $('hide-panel').addEventListener('click', () => this.setMapOnly(true));
+    $('open-panel').addEventListener('click', () => this.setMapOnly(false));
     let startX = 0, startY = 0, startHeight = 0, lastY = 0, lastTime = 0, speed = 0;
     let tracking = false, dragging = false, fromGrabber = false, swallowClick = false;
-    // The whole sheet is a handle. Once it is full, the list scrolls instead.
+    // The sheet resizes from its body, but only the grabber can hide it entirely.
     panel.addEventListener('pointerdown', (event) => {
       swallowClick = false;
-      if (event.button !== 0 || !grabber.offsetParent || event.target === document.activeElement || event.target.closest?.('.no-drag')) return;
+      if (!event.isPrimary || event.button !== 0 || !grabber.offsetParent || event.target.closest?.('.no-drag')) return;
       if ((this.current === 'full' || state.explore) && list.contains(event.target)) return;
       fromGrabber = grabber.contains(event.target);
+      if (!fromGrabber && event.target === document.activeElement) return;
       startX = event.clientX;
       startY = lastY = event.clientY;
       lastTime = event.timeStamp;
@@ -3572,7 +3612,7 @@ const sheet = {
       dragging = false;
     });
     panel.addEventListener('pointermove', (event) => {
-      if (!tracking) return;
+      if (!event.isPrimary || !tracking) return;
       if (!dragging) {
         const across = Math.abs(event.clientX - startX), along = Math.abs(event.clientY - startY);
         if (Math.max(across, along) <= 6) return;
@@ -3589,24 +3629,31 @@ const sheet = {
       lastY = event.clientY;
       lastTime = event.timeStamp;
       const { peek, full } = this.heights(), wanted = startHeight + startY - event.clientY;
+      const minimum = fromGrabber ? 0 : peek;
       // Past either end the sheet resists like a rubber band.
-      const height = wanted > full ? full + (wanted - full) * 0.18 : wanted < peek ? peek - (peek - wanted) * 0.18 : wanted;
+      const height = wanted > full ? full + (wanted - full) * 0.18 : Math.max(minimum, wanted);
       this.apply(height);
     });
-    const finish = () => {
-      if (!tracking) return;
+    const finish = (event) => {
+      if (!event.isPrimary || !tracking) return;
       tracking = false;
-      const order = ['peek', 'half', 'full'], index = order.indexOf(this.current);
       if (!dragging) {
-        if (fromGrabber) this.snap(order[(index + 1) % order.length]); // A tap steps through the sizes.
+        if (fromGrabber && event.type === 'pointerup') {
+          // A tap keeps cycling through the open sizes.
+          const index = PANEL_SIZES.indexOf(this.current);
+          this.snap(PANEL_SIZES[index + 1] ?? 'peek');
+        }
         return;
       }
+      const heights = this.heights(), height = panel.offsetHeight;
       panel.classList.remove('dragging');
       swallowClick = true;
-      const heights = this.heights(), height = panel.offsetHeight;
+      if (event.type === 'pointercancel') return this.snap(this.current);
+      const order = fromGrabber ? PANEL_SIZES : PANEL_SIZES.slice(1), index = order.indexOf(this.current);
       const nearest = order.reduce((best, key) => (Math.abs(heights[key] - height) < Math.abs(heights[best] - height) ? key : best));
-      // A quick flick moves on a step, wherever the finger let go.
-      this.snap(Math.abs(speed) > 0.5 ? order[Math.max(0, Math.min(2, index + Math.sign(speed)))] : nearest);
+      const flick = Math.abs(speed) > 0.5 && event.timeStamp - lastTime < 100;
+      const next = order[Math.max(0, Math.min(order.length - 1, index + Math.sign(speed)))];
+      chooseSize(flick && (speed > 0 || nearest !== 'map') ? next : nearest);
     };
     panel.addEventListener('pointerup', finish);
     panel.addEventListener('pointercancel', finish);
@@ -3618,9 +3665,11 @@ const sheet = {
       event.stopPropagation();
     }, true);
     grabber.addEventListener('keydown', (event) => {
-      const order = ['peek', 'half', 'full'], index = order.indexOf(this.current);
-      if (event.key === 'ArrowUp') this.snap(order[Math.min(2, index + 1)]);
-      if (event.key === 'ArrowDown') this.snap(order[Math.max(0, index - 1)]);
+      const index = PANEL_SIZES.indexOf(this.current);
+      const size = { ArrowUp: PANEL_SIZES[Math.min(3, index + 1)], ArrowDown: PANEL_SIZES[index - 1], Home: 'map', End: 'full' }[event.key];
+      if (!size) return;
+      event.preventDefault();
+      chooseSize(size);
     });
   },
 };
@@ -3727,6 +3776,10 @@ function fitPlanMap() {
 }
 
 function renderTab() {
+  $('grabber').setAttribute('aria-label', t('調整選單高度', 'Resize menu'));
+  $('hide-panel').textContent = t('收起選單', 'Hide menu');
+  $('open-panel').textContent = t('打開選單', 'Open menu');
+  sheet.updateControls();
   clear($('top'));
   clear($('bottom'));
   if (state.tab === 'plan') {

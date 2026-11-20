@@ -24,11 +24,13 @@
     <div id="embed-map" hidden><iframe title="Google Maps" allowfullscreen referrerpolicy="no-referrer-when-downgrade"></iframe></div>
     <button id="locate" aria-label="Show my location"></button>
     <section id="panel">
-      <div id="grabber" role="slider" aria-label="Resize panel" aria-valuetext="half" tabindex="0"></div>
+      <div id="grabber" role="slider" aria-label="調整選單高度" aria-orientation="vertical" aria-valuemin="0" aria-valuemax="3" aria-valuenow="2" tabindex="0"></div>
+      <button id="hide-panel" class="panel-toggle" aria-controls="panel">收起選單</button>
       <div id="top"></div>
       <div id="sheet"></div>
       <div id="bottom"></div>
     </section>
+    <button id="open-panel" class="panel-toggle" aria-controls="panel" hidden>打開選單</button>
   </div>
   <noscript>hktransport 需要 JavaScript。</noscript>
   <script src="vendor/leaflet.js"></script>

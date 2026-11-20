@@ -56,6 +56,10 @@ svg.icon.solid { fill: currentColor; }
 #panel { position: absolute; z-index: 10; left: 8px; right: 8px; bottom: calc(env(safe-area-inset-bottom) + 8px + var(--keyboard, 0px)); height: var(--panel-h); max-height: calc(var(--room, 100dvh) - 20px); display: flex; flex-direction: column; overflow: hidden; background: var(--material); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); border-radius: 30px; box-shadow: var(--rim), var(--lift); transition: height .34s var(--ease-out); transition: height .62s var(--spring); will-change: height; }
 #panel.dragging { transition: none; }
 #panel.dragging { user-select: none; -webkit-user-select: none; }
+#app.sheet-hidden #panel { pointer-events: none; visibility: hidden; transition: height .34s var(--ease-out), visibility 0s linear .34s; }
+.panel-toggle { min-height: 44px; padding: 0 14px; border-radius: 999px; font-size: 14px; font-weight: 600; }
+#hide-panel { display: none; }
+#open-panel { position: absolute; z-index: 11; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 24px); translate: -50% 0; color: var(--accent); background: var(--float); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); box-shadow: var(--rim), var(--shadow); animation: rise .34s var(--ease-out) both; }
 /* Vertical drags move the sheet until it is full; sideways swipes still scroll chips. */
 #top, #bottom, #app:not(.sheet-full) #sheet { touch-action: pan-x; }
 #grabber { flex: none; padding: 9px 0 7px; display: grid; place-items: center; touch-action: none; cursor: grab; }
@@ -359,6 +363,7 @@ svg.icon.solid { fill: currentColor; }
 #embed-map iframe { display: block; width: 100%; border: 0; }
 #app.embedding #locate { display: none; }
 @media (min-width: 820px) { #embed-map iframe { position: absolute; left: 440px; width: calc(100% - 440px); height: 100% !important; } }
+#app.sheet-hidden #embed-map iframe { left: 0; width: 100%; }
 .leg-dot { display: inline-block; width: 9px; height: 9px; margin-right: 6px; border-radius: 50%; }
 .leg-key { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 #plan-stop:empty { display: none; }
@@ -385,15 +390,17 @@ svg.icon.solid { fill: currentColor; }
 
 /* Wider screens: the same panel floats beside the map. */
 @media (min-width: 820px) {
-  #panel { left: 16px; right: auto; width: 400px; top: 16px; bottom: calc(16px + var(--keyboard, 0px)); height: auto; max-height: none; }
+  #panel { left: 16px; right: auto; width: 400px; top: 16px; bottom: calc(16px + var(--keyboard, 0px)); height: auto; max-height: none; transition: transform .34s var(--ease-out); }
+  #app.sheet-hidden #panel { transform: translateX(calc(-100% - 24px)); transition: transform .34s var(--ease-out), visibility 0s linear .34s; }
   #app.sheet-full #map { transform: none; filter: none; border-radius: 0; }
   #app.sheet-full #locate { opacity: 1; transform: none; pointer-events: auto; }
   #grabber { display: none; }
+  #hide-panel { display: block; flex: none; align-self: flex-end; margin: 8px 14px 0; color: var(--accent); background: var(--raised); }
   .gm-style a[href*="maps.google"], .gm-style .gm-style-cc { transform: none; }
   #top, #bottom, #app:not(.sheet-full) #sheet { touch-action: auto; }
-  #top { padding-top: 14px; }
   .leaflet-bottom { bottom: 0; }
   .nav-banner { left: 432px; right: 70px; top: 16px; }
+  #app.sheet-hidden .nav-banner { left: 16px; }
   #locate { top: 16px; right: 16px; }
 }
 
