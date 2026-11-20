@@ -283,10 +283,16 @@ EXPLORE_TYPES = {
 EXPLORE_AGENT = 'hktransport/1.1 (+https://github.com/kevinwentao07-zwt/hktransport/issues)'
 AI_EXPLORE_LANGUAGES = {'zh-Hant': 'Traditional Chinese (Hong Kong)', 'zh-Hans': 'Simplified Chinese', 'en': 'English'}
 AI_EXPLORE_LIMIT = 10
+AI_EXPLORE_FOCUS = {
+    'food': ('Local bakeries, dessert shops and tea cafés', 'Dim sum, noodle shops and neighbourhood restaurants'),
+    'sights': ('Public gardens, neighbourhood markets, temples and heritage buildings',
+               'Exhibition venues, theatres, historic streets, cultural landmarks and public libraries'),
+}
 AI_EXPLORE_PROMPT = """You are a Hong Kong neighbourhood guide inside a public transport app.
 Use your web search tool before answering. Search for the requested number of distinct places
 near the destination in Hong Kong within roughly 1.5 km. Search several subcategories if the
-first results are sparse, and exclude any names supplied under already_suggested. Prioritise real,
+first results are sparse. When search_focus is given, use it to find new results and exclude
+any places supplied under already_suggested, including name variants. Prioritise real,
 specific venues over generic areas. For food, distinguish branches and describe a speciality
 or dining experience. For sights, prefer visitable places and describe what visitors can do.
 Prefer official, local tourism or established editorial sources. A source may support more than
@@ -359,7 +365,7 @@ def explore_name_key(name):
 
 
 def ask_explore_ai(area, category, language):
-    def search(count, previous, timeout):
+    def search(count, previous, timeout, focus=''):
         reply = deepseek_completion({
             'model': MODEL, 'max_tokens': 3000, 'stream': False, 'thinking': {'type': 'disabled'},
             'tools': [{'type': 'deepseek_web_search'}],
@@ -367,18 +373,20 @@ def ask_explore_ai(area, category, language):
                 {'role': 'system', 'content': AI_EXPLORE_PROMPT},
                 {'role': 'user', 'content': json.dumps({
                     'destination': area, 'region': 'Hong Kong', 'category': category, 'language': AI_EXPLORE_LANGUAGES[language],
-                    'number_requested': count, 'already_suggested': previous,
+                    'number_requested': count, 'already_suggested': previous, 'search_focus': focus,
                 }, ensure_ascii=False)},
             ],
         }, timeout=timeout)
         message = (reply.get('choices') or [{}])[0].get('message', {})
         return sourced_explore_suggestions(message), cost_of(reply.get('usage') or {})
 
-    items, cost = search(AI_EXPLORE_LIMIT, [], 24)
-    if len(items) < AI_EXPLORE_LIMIT:
+    items, cost = search(AI_EXPLORE_LIMIT, [], 22)
+    for focus in AI_EXPLORE_FOCUS[category]:
+        if len(items) >= AI_EXPLORE_LIMIT:
+            break
         try:
             names = [item['name'] for item in items]
-            more, extra_cost = search(min(AI_EXPLORE_LIMIT, AI_EXPLORE_LIMIT - len(items) + 2), names, 15)
+            more, extra_cost = search(min(AI_EXPLORE_LIMIT, AI_EXPLORE_LIMIT - len(items) + 3), names, 13, focus)
             cost += extra_cost
             seen = {explore_name_key(name) for name in names}
             items.extend(item for item in more if explore_name_key(item['name']) not in seen)

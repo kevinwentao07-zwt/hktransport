@@ -270,7 +270,7 @@ export async function exploreAISuggestions(destination, category, locale, signal
   const response = await fetch('api/explore/ai', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ area: destination.name.slice(0, 100), category, locale }),
-    signal: AbortSignal.any([signal, AbortSignal.timeout(45_000)]),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(55_000)]),
   });
   return response.ok ? response.json() : { status: response.status };
 }
