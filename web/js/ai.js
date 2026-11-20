@@ -1,7 +1,8 @@
 // The AI, reached through this site's server, and the rule parser used without it.
 const FEWER = ['唔想轉車', '不想轉車', '唔轉車', '不轉車', '少轉車', '少啲轉車', '直達', 'fewer transfers', 'no transfers', 'no transfer', 'direct'];
 const LESS_WALK = ['唔想行', '少行路', '少啲行', '少行', '不想走路', '少走路', 'less walking', 'walk less'];
-const FILLER = ['點樣去', '點去', '怎麼去', '怎樣去', '如何去', '嘅路線', '的路線', '搭咩車', '坐咩車', '坐什麼車', '坐甚麼車', '最快', '快啲', '請問', '我想', '我要', 'fastest', 'quickest', 'how do i get there', 'how to get there', 'please'];
+const FASTEST = ['最快', '快啲', '快点', 'fastest', 'quickest', 'faster'];
+const FILLER = ['點樣去', '點去', '怎麼去', '怎樣去', '如何去', '嘅路線', '的路線', '搭咩車', '坐咩車', '坐什麼車', '坐甚麼車', '請問', '我想', '我要', 'how do i get there', 'how to get there', 'please'];
 const HERE = new Set(['呢度', '這裡', '這裏', '这里', '我的位置', '目前位置', '現在位置', '而家位置', 'here', 'my location', 'current location']);
 const WISHES = ['我想吃', '我想食', '我要吃', '我要食', '想吃', '想食', '想喝', '想飲', '我想買', '想買', '我想搵', '想搵', '附近有冇', '附近有什麼', '附近有甚麼', '附近有咩', 'i want to eat', 'i want', 'looking for', 'find me', 'craving'];
 
@@ -17,10 +18,10 @@ export const normalizedOrigin = (origin) => {
 export function parseTrip(input) {
   let working = input.trim();
   if (!working) return null;
-  let preference = 'fastest';
+  let preference = has(working, FASTEST) ? 'fastest' : 'lessWalking';
   if (has(working, FEWER)) preference = 'fewerTransfers';
   else if (has(working, LESS_WALK)) preference = 'lessWalking';
-  for (const word of [...FEWER, ...LESS_WALK, ...FILLER]) {
+  for (const word of [...FEWER, ...LESS_WALK, ...FASTEST, ...FILLER]) {
     working = working.replace(new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ');
   }
   // 改去中環 changes the destination: 改 isn't a place to start from.
@@ -42,9 +43,9 @@ export function parseTrip(input) {
 /** Applies a follow-up to the trip on screen: anything not mentioned stays. */
 export function parseFollowUp(text, current) {
   if (!current) return parseTrip(text);
-  const preference = has(text, FEWER) ? 'fewerTransfers' : has(text, LESS_WALK) ? 'lessWalking' : current.preference;
+  const preference = has(text, FEWER) ? 'fewerTransfers' : has(text, LESS_WALK) ? 'lessWalking' : has(text, FASTEST) ? 'fastest' : current.preference;
   const intent = parseTrip(text);
-  if (!intent) return has(text, [...FEWER, ...LESS_WALK]) ? { ...current, preference } : null;
+  if (!intent) return has(text, [...FEWER, ...LESS_WALK, ...FASTEST]) ? { ...current, preference } : null;
   const mentionsHere = [...HERE].some((word) => text.toLowerCase().includes(word));
   return { ...intent, preference, origin: intent.origin ?? (mentionsHere ? null : current.origin) };
 }
@@ -62,7 +63,7 @@ export function parseWish(text) {
 /** Without the AI, whatever isn't plainly a trip goes to Google as typed, across Hong Kong. */
 export function parseSearch(text) {
   const want = strip(text);
-  if (!want || has(want, [...FEWER, ...LESS_WALK]) || /[去到往至由從从→]|->|\b(to|from)\b/i.test(want)) return null;
+  if (!want || has(want, [...FEWER, ...LESS_WALK, ...FASTEST]) || /[去到往至由從从→]|->|\b(to|from)\b/i.test(want)) return null;
   return { want, query: want, queryEn: null, searchTerms: [want], area: null, extra: null, question: null, options: [], anywhere: true };
 }
 
@@ -100,8 +101,7 @@ Rules:
   in Traditional Chinese. Examples: 理大 -> 香港理工大學, 中大 -> 香港中文大學, 港大 -> 香港大學,
   機場 -> 香港國際機場一號客運大樓, 尖東 -> 尖沙咀東, 銅鑼灣時代廣場 -> 時代廣場.
 - Keep MTR station names as station names, e.g. 旺角, 九龍塘.
-- preference is fewerTransfers when the rider wants no or few changes, lessWalking when they want to
-  walk less, otherwise fastest.
+- preference is fewerTransfers for fewer changes, fastest when the rider asks for speed, and lessWalking by default.
 - Never suggest routes, times or fares.`;
 
 const DISCOVER_RULES = `{"kind": "discover", "want": string, "query": string, "queryEn": string, "searchTerms": [string], "area": string or null, "extra": string or null, "question": string or null, "options": [string]}
@@ -203,7 +203,7 @@ const PREFERENCES = ['fastest', 'fewerTransfers', 'lessWalking'];
 export function decodeIntent(reply) {
   const object = jsonObject(reply), destination = clean(object?.destination);
   if (!destination) return null;
-  return { origin: normalizedOrigin(object.origin), destination, preference: PREFERENCES.includes(object.preference) ? object.preference : 'fastest' };
+  return { origin: normalizedOrigin(object.origin), destination, preference: PREFERENCES.includes(object.preference) ? object.preference : 'lessWalking' };
 }
 
 /** A trip request ({trip}), or a request to find somewhere ({wish}). */

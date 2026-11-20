@@ -264,7 +264,34 @@ const walkingMinutes = (journey) => journey.legs.reduce((total, leg) => total + 
 export const transfers = (journey) => Math.max(0, rides(journey).length - 1);
 export const arrivalTime = (journey) => journey.departure + totalMinutes(journey) * 60_000;
 export const arrivesLate = (journey) => journey.arriveBy != null && arrivalTime(journey) > journey.arriveBy;
-export const journeyID = (journey) => rides(journey).map((r) => `${r.op}|${r.route}@${r.boardStopID}>${r.alightStopID}`).join(',') || 'walk';
+export const journeyID = (journey) => journey.id ?? (rides(journey).map((r) => `${r.op}|${r.route}@${r.boardStopID}>${r.alightStopID}`).join(',') || 'walk');
+
+export const MAX_WALK_LEG_MINUTES = 10;
+export const fitsWalkLimit = (journey) => journey.legs.every((leg) => leg.type !== 'walk' || leg.minutes <= MAX_WALK_LEG_MINUTES);
+
+/** Practical picks stay on transit and weigh short walks and straightforward transfers before journey time. */
+export function rankTripOptions(journeys, preference, limit = 5) {
+  const criteria = (journey) => {
+    const base = [Number(!fitsWalkLimit(journey)), Number(arrivesLate(journey))];
+    if (preference === 'fastest') return [...base, totalMinutes(journey)];
+    const changes = transfers(journey), walk = walkingMinutes(journey);
+    return [...base, Number(!rides(journey).length),
+      ...(preference === 'fewerTransfers' ? [changes, walk] : [walk + changes * 4, walk]), totalMinutes(journey)];
+  };
+  const seen = new Set();
+  return journeys.map((journey) => ({ journey, values: criteria(journey) })).sort((a, b) => {
+    for (const [i, value] of a.values.entries()) {
+      const diff = value - b.values[i];
+      if (diff) return diff;
+    }
+    return 0;
+  }).map(({ journey }) => journey).filter((journey) => {
+    const id = journeyID(journey);
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  }).slice(0, limit);
+}
 
 const LATE_PENALTY = 100_000;
 
@@ -290,7 +317,7 @@ export function planAdvice(journeys, t, lineOf, now) {
     `建議第一個方案：全程 ${minutes} 分鐘，${changes ? `轉 ${changes} 次車` : '直達'}，步行 ${walk} 米。`,
     `Best option: ${minutes} min, ${changes ? `${changes} change${changes > 1 ? 's' : ''}` : 'direct'}, ${walk} m on foot.`,
   )];
-  if (best.arriveBy != null && !arrivesLate(best)) lines.push(t('出發時間已預留最長的候車時間。', 'The start time allows for the longest wait.'));
+  if (!best.byGoogle && best.arriveBy != null && !arrivesLate(best)) lines.push(t('出發時間已預留最長的候車時間。', 'The start time allows for the longest wait.'));
   const first = rides(best)[0];
   if (first?.liveDeparture && !first.isProjected) {
     const wait = Math.max(0, Math.floor((first.liveDeparture - now) / 60_000)), line = lineOf(first);
@@ -327,11 +354,12 @@ export function rank(journeys, preference, limit) {
 }
 
 /** Round-based transit routing (RAPTOR): round k finds the fastest way to every stop using k vehicles. */
-export function search(network, origin, destination, departure, bannedFirstRoutes = new Set()) {
-  let access = network.near(origin, SETTINGS.accessRadius);
-  if (!access.length) access = network.near(origin, SETTINGS.fallbackAccessRadius);
-  let egressList = network.near(destination, SETTINGS.accessRadius);
-  if (!egressList.length) egressList = network.near(destination, SETTINGS.fallbackAccessRadius);
+export function search(network, origin, destination, departure, bannedFirstRoutes = new Set(), options = {}) {
+  const near = (place) => {
+    const stops = network.near(place, options.radius ?? SETTINGS.accessRadius);
+    return options.radius || stops.length ? stops : network.near(place, SETTINGS.fallbackAccessRadius);
+  };
+  const access = near(origin), egressList = near(destination);
   if (!access.length || !egressList.length) return [];
 
   const n = network.stopIDs.length, rounds = Math.max(1, SETTINGS.maxTransitLegs);
@@ -419,6 +447,15 @@ export function search(network, origin, destination, departure, bannedFirstRoute
     }
     marked = [...improved, ...walked];
 
+    if (options.keepAlternatives) {
+      const ends = egressList.filter(({ stop }) => arrival[k][stop] < Infinity)
+        .sort((a, b) => arrival[k][a.stop] + walkMinutes(a.meters) - arrival[k][b.stop] - walkMinutes(b.meters));
+      const candidates = ends.slice(0, 10).map(({ stop, meters: distance }) => (
+        reconstruct(network, k, stop, distance, accessMeters, departure, rideParent, walkParent)
+      )).filter(Boolean);
+      journeys.push(...rankTripOptions(candidates, options.preference, 3));
+      continue;
+    }
     let bestEnd = Infinity, endStop = -1;
     for (const [stop, distance] of egress) {
       if (arrival[k][stop] === Infinity) continue;
@@ -484,6 +521,30 @@ export function plan(network, origin, destination, departure, preference = 'fast
   return rank(found, preference, limit);
 }
 
+export function planLocal(network, origin, destination, departure, preference) {
+  const comfortableRadius = MAX_WALK_LEG_MINUTES * SETTINGS.walkMetersPerMinute / SETTINGS.walkDetour;
+  const scan = (radius) => {
+    const found = [], banned = new Set();
+    for (let i = 0; i < 4; i++) {
+      const journeys = search(network, origin, destination, departure, banned, { radius, keepAlternatives: true, preference });
+      if (!journeys.length) break;
+      found.push(...journeys);
+      for (const journey of journeys) {
+        const first = rides(journey)[0];
+        banned.add(`${first.op}|${first.route}`);
+      }
+    }
+    return found;
+  };
+  const found = scan(comfortableRadius);
+  if (!found.some(fitsWalkLimit)) found.push(...scan(SETTINGS.fallbackAccessRadius));
+  const distance = meters(origin, destination);
+  if (distance <= SETTINGS.walkOnlyRadius) {
+    found.push({ legs: [{ type: 'walk', meters: distance, minutes: walkMinutes(distance), to: null }], departure });
+  }
+  return rankTripOptions(found, preference, 8);
+}
+
 /**
  * Only headways are known, so a bus could be a full headway away: the average wait in the journey
  * is counted twice, and the rider who leaves then is on time even after the longest wait.
@@ -491,15 +552,15 @@ export function plan(network, origin, destination, departure, preference = 'fast
 const latestStart = (journey, arriveBy) => arriveBy - (totalMinutes(journey) + rides(journey).reduce((total, ride) => total + ride.waitMinutes, 0)) * 60_000;
 
 /** Journeys that reach the destination by `arriveBy`. One that cannot leaves `now` and shows as late. */
-export function planArriving(network, origin, destination, arriveBy, now, preference = 'fastest', limit = 5) {
+export function planArriving(network, origin, destination, arriveBy, now, preference = 'fastest', limit = 5, planner = plan) {
   let found = [];
   // Which buses run depends on the hour, so first find about when to leave, then plan from there.
   for (const minutes of [45, 15, 90]) {
-    found = plan(network, origin, destination, arriveBy - minutes * 60_000, preference, limit);
+    found = planner(network, origin, destination, arriveBy - minutes * 60_000, preference, limit);
     if (found.length) break;
   }
   if (found.length) {
-    const closer = plan(network, origin, destination, latestStart(found[0], arriveBy), preference, limit);
+    const closer = planner(network, origin, destination, latestStart(found[0], arriveBy), preference, limit);
     if (closer.length) found = closer;
   }
   return found.map((journey) => ({ ...journey, departure: Math.max(now, latestStart(journey, arriveBy)), arriveBy }));
@@ -716,6 +777,10 @@ export async function retime(journey, arrivals) {
       ride.liveDeparture = null;
       ride.isProjected = false;
       ride.livePlatform = null;
+      if (ride.googleDeparture != null) {
+        if (ride.googleDeparture < atStop - 30_000) return { ...journey, missedConnection: true };
+        ride.waitMinutes = Math.max(0, (ride.googleDeparture - atStop) / 60_000);
+      }
     }
     clock = atStop + (ride.waitMinutes + ride.rideMinutes) * 60_000;
     legs.push(ride);
@@ -1020,15 +1085,22 @@ export function journeyPath(journey, origin, destination, db) {
   for (const leg of journey.legs) {
     let segment;
     if (leg.type === 'walk') {
-      const target = leg.to ? db.stops[leg.to]?.location : destination;
+      const target = leg.googlePoints?.at(-1) ?? (leg.to ? db.stops[leg.to]?.location : destination);
       if (!target) continue;
-      segment = { mode: 'walk', points: [cursor, target], stopIDs: [] };
+      segment = { mode: 'walk', points: leg.googlePoints?.length >= 2 ? leg.googlePoints : [cursor, target], stopIDs: [], google: !!leg.googlePoints };
     } else {
+      if (leg.googlePoints && !leg.routeKey) {
+        const points = [leg.boardLocation, leg.alightLocation];
+        segments.push({ mode: 'ride', route: leg.route, op: leg.op, points, stopIDs: [], line: leg.googlePoints.length >= 2 ? leg.googlePoints : points, google: true });
+        cursor = leg.alightLocation;
+        continue;
+      }
       const ids = rideStopIDs(leg, db), isWhole = ids.length === leg.alightPosition - leg.boardPosition + 1;
       const onRoute = ids.map((id, index) => [id, isWhole ? leg.boardPosition + index : index ? leg.alightPosition : leg.boardPosition])
         .filter(([id]) => validLocation(db.stops[id]?.location));
       const stops = onRoute.map(([id]) => id);
-      segment = { mode: 'ride', route: leg.route, routeKey: leg.routeKey, op: leg.op, points: stops.map((id) => db.stops[id].location), stopIDs: stops, positions: onRoute.map(([, position]) => position) };
+      segment = { mode: 'ride', route: leg.route, routeKey: leg.routeKey, op: leg.op, points: stops.map((id) => db.stops[id].location), stopIDs: stops, positions: onRoute.map(([, position]) => position), google: !!leg.googlePoints,
+        line: leg.googlePoints?.length >= 2 ? leg.googlePoints : undefined };
     }
     if (!segment.points.length) continue;
     segments.push(segment);

@@ -2,18 +2,17 @@
 
 The web app: a static page, live at <https://hk.52-220-124-215.sslip.io/>.
 
-Every data source allows direct browser calls, so only the AI goes through a server:
-route data from hkbus.app, arrivals from the operators, maps from Google on your own server and OpenFreeMap elsewhere, place
-search and walking routes from Google on your own server and otherwise the Government and OpenStreetMap's Photon, and AI
-from DeepSeek. To plan a trip, the AI says which lines to ride, and the page checks them against the route data, picks the
-stops and works out the times; Google's walking routes then replace the straight-line walking times.
-To find shops, the AI works out what to search for, and Google finds them with their details, in its own order.
-On your own server, `server/ai_proxy.py` holds the DeepSeek key and every visitor can use the AI.
-Without it, as on GitHub Pages, the page uses its free map and search, with no AI.
+Route data comes from hkbus.app and arrivals come straight from the operators. The site's server
+handles Google place, walking and public transport requests and DeepSeek. With Google Maps active,
+Google transit supplies routes and walking times. The built-in RAPTOR planner supplies alternatives
+when Google has no suitable journey. The app defaults to less walking and only shows walks over 10
+minutes on request. On a static host such as GitHub Pages, the built-in planner and free map are
+available without the server.
 
 | File | Purpose |
 | --- | --- |
-| `js/transit.js` | Route data, RAPTOR search, checking the AI's plans, journeys and navigation maths |
+| `js/transit.js` | Route data, RAPTOR search, journey ranking and navigation maths |
+| `js/google-transit.js` | Google transit requests, journey conversion and stop matching for operator ETAs |
 | `js/eta.js` | Per-operator arrival fetchers and parsers |
 | `js/ai.js` | DeepSeek client, prompts and the rule parser used without a key |
 | `js/places.js` | Place search and walking routes: Google through the server, then the free sources |
@@ -29,12 +28,10 @@ python3 -m http.server 8642 --directory web
 
 To publish to your own server, put `DEPLOY_HOST`, `DEPLOY_KEY` and `DEPLOY_DOMAIN` in `.env.deploy`
 (ignored by git) and run `Deploy web.command`. Run `Set AI key.command` once to put the DeepSeek key
-on the server. It never goes into the repository or the web folder. Run `Set routes key.command` for walking routes, and `Set Google keys.command` to add
-Google's map and place keys. The server counts each map load and place search on disk, and stops
-at 300 and 150 a day, and 9,000 and 4,500 a month, with 300 and 9,000 for walking routes, so use stays
-inside Google's free allowance. At the
-limit, the site goes back to OpenFreeMap and its free search. Browsers can see the map key, so limit it
-to your domain and set daily quotas in Google Cloud too.
+on the server. It never goes into the repository or the web folder. Run `Set routes key.command` for walking and transit routes, and `Set Google keys.command` to add
+Google's map and place keys. The server caps usage at 5,000 walking requests and 4,000 transit
+requests per month. Google transit runs with Google Maps active. Browsers can see the map key, so
+limit it to your domain and set daily quotas in Google Cloud.
 
 To publish to GitHub Pages, push `web/` to the `gh-pages` branch:
 

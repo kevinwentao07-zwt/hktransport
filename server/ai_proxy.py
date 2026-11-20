@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -174,10 +175,11 @@ spending = Spending(
 )
 
 # Free each month: 10,000 map loads, 5,000 searches, 1,000 searches with shop details, 10,000 walking
-# routes, 10,000 suggestions and 10,000 place lookups. These stop well short of all six.
+# routes, 10,000 suggestions and 10,000 place lookups. Walk and transit share conservatively
+# budgeted space in Routes API usage.
 budget = Budget(
     Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'usage.json',
-    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 9000, 40), 'details': (30, 900, 12), 'suggest': (300, 9000, 60), 'place': (300, 9000, 60)},
+    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 5000, 40), 'transit': (120, 4000, 25), 'details': (30, 900, 12), 'suggest': (300, 9000, 60), 'place': (300, 9000, 60)},
 )
 
 
@@ -317,24 +319,52 @@ def decode_polyline(encoded):
     return points
 
 
-def walking_route(start, end):
-    """The line, how far and how long. These stay in the cheapest tier."""
-    place = lambda point: {'location': {'latLng': {'latitude': point['lat'], 'longitude': point['lng']}}}
+def compute_routes(start, end, fields, timeout, **options):
+    def place(point):
+        return {'location': {'latLng': {'latitude': point['lat'], 'longitude': point['lng']}}}
+
     request = urllib.request.Request(
         'https://routes.googleapis.com/directions/v2:computeRoutes',
-        data=json.dumps({'origin': place(start), 'destination': place(end), 'travelMode': 'WALK'}).encode(),
+        data=json.dumps({'origin': place(start), 'destination': place(end), **options}).encode(),
         headers={
             'Content-Type': 'application/json', 'X-Goog-Api-Key': routes_key(),
-            'X-Goog-FieldMask': 'routes.polyline.encodedPolyline,routes.distanceMeters,routes.duration',
+            'X-Goog-FieldMask': fields,
         },
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        route = json.load(response)['routes'][0]
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.load(response).get('routes', [])
+
+
+def walking_route(start, end):
+    """The line, how far and how long. These stay in the cheapest tier."""
+    route = compute_routes(start, end, 'routes.polyline.encodedPolyline,routes.distanceMeters,routes.duration',
+                           15, travelMode='WALK')[0]
     # Google writes the time as seconds with an "s", e.g. "523s".
     return {
         'points': decode_polyline(route['polyline']['encodedPolyline']),
         'meters': route.get('distanceMeters'), 'seconds': int(route['duration'].rstrip('s')) if 'duration' in route else None,
     }
+
+
+TRANSIT_PREFERENCES = {'lessWalking': 'LESS_WALKING', 'fewerTransfers': 'FEWER_TRANSFERS', 'fastest': None}
+TRANSIT_FIELDS = ','.join(f'routes.legs.steps.{field}' for field in (
+    'travelMode', 'staticDuration', 'distanceMeters', 'startLocation', 'endLocation',
+    'polyline.geoJsonLinestring', 'transitDetails.stopDetails', 'transitDetails.headsign',
+    'transitDetails.stopCount', 'transitDetails.transitLine',
+))
+
+
+def transit_routes(start, end, preference, language, mode=None, when=None):
+    options = {
+        'travelMode': 'TRANSIT', 'computeAlternativeRoutes': True,
+        'polylineEncoding': 'GEO_JSON_LINESTRING', 'languageCode': language, 'regionCode': 'HK',
+    }
+    if TRANSIT_PREFERENCES[preference]:
+        options['transitPreferences'] = {'routingPreference': TRANSIT_PREFERENCES[preference]}
+    if when is not None:
+        field = 'arrivalTime' if mode == 'arrive' else 'departureTime'
+        options[field] = datetime.fromtimestamp(when / 1000, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+    return compute_routes(start, end, TRANSIT_FIELDS, 5, **options)
 
 
 def in_hong_kong(point):
@@ -405,12 +435,12 @@ class Handler(BaseHTTPRequestHandler):
         return body
 
     def do_POST(self):
-        if self.path not in ('/api/ai', '/api/places', '/api/walk', '/api/suggest', '/api/place'):
+        if self.path not in ('/api/ai', '/api/places', '/api/walk', '/api/transit', '/api/suggest', '/api/place'):
             return self.send(404, {'error': 'Not found'})
         body = self.read_json()
         if body is None:
             return None
-        return {'/api/places': self.places, '/api/walk': self.walk, '/api/suggest': self.suggest, '/api/place': self.place}.get(self.path, self.ask)(body)
+        return {'/api/places': self.places, '/api/walk': self.walk, '/api/transit': self.transit, '/api/suggest': self.suggest, '/api/place': self.place}.get(self.path, self.ask)(body)
 
     def suggest(self, body):
         query, origin = body.get('query'), body.get('from')
@@ -457,6 +487,30 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
             print(f'Routes failed: {type(error).__name__}', file=sys.stderr, flush=True)
             self.send(502, {'error': 'Unavailable'})
+
+    def transit(self, body):
+        start, end = body.get('from'), body.get('to')
+        preference, mode, when = body.get('preference'), body.get('mode'), body.get('at')
+        if not in_hong_kong(start) or not in_hong_kong(end):
+            return self.send(400, {'error': 'Bad request'})
+        if not isinstance(preference, str) or preference not in TRANSIT_PREFERENCES:
+            return self.send(400, {'error': 'Bad request'})
+        if mode is not None or when is not None:
+            now = int(time.time() * 1000)
+            if mode not in ('depart', 'arrive') or type(when) is not int or not now - 60_000 <= when <= now + 100 * 86_400_000:
+                return self.send(400, {'error': 'Bad request'})
+        if not routes_key() or not budget.spend('transit', self.visitor()):
+            return self.send(429, {'error': 'Limit reached'})
+        language = 'en' if body.get('lang') == 'en' else 'zh-HK'
+        try:
+            routes = transit_routes(start, end, preference, language, mode, when)
+        except urllib.error.HTTPError as error:
+            print(f'Transit returned {error.code}', file=sys.stderr, flush=True)
+            return self.send(502, {'error': 'Unavailable'})
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f'Transit failed: {type(error).__name__}', file=sys.stderr, flush=True)
+            return self.send(502, {'error': 'Unavailable'})
+        self.send(200, {'routes': routes})
 
     def places(self, body):
         query, lat, lng, radius = body.get('query'), body.get('lat'), body.get('lng'), body.get('radius')

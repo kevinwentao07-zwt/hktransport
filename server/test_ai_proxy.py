@@ -82,6 +82,18 @@ class PolylineTests(unittest.TestCase):
         self.assertIn('routes.duration', sent[0].get_header('X-goog-fieldmask'))
 
 
+    def test_transit_uses_the_google_alternatives_and_arrival_time(self):
+        start, end = {'lat': 22.28, 'lng': 114.15}, {'lat': 22.29, 'lng': 114.16}
+        with patch.object(ai_proxy, 'compute_routes', return_value=[{'legs': []}]) as upstream:
+            self.assertEqual(ai_proxy.transit_routes(start, end, 'lessWalking', 'zh-HK', 'arrive', 1_700_000_000_000), [{'legs': []}])
+        self.assertIn('routes.legs.steps.staticDuration', upstream.call_args.args[2])
+        self.assertEqual(upstream.call_args.kwargs, {
+            'travelMode': 'TRANSIT', 'computeAlternativeRoutes': True, 'polylineEncoding': 'GEO_JSON_LINESTRING',
+            'languageCode': 'zh-HK', 'regionCode': 'HK', 'transitPreferences': {'routingPreference': 'LESS_WALKING'},
+            'arrivalTime': '2023-11-14T22:13:20.000Z',
+        })
+
+
 class SpendingTests(unittest.TestCase):
     def test_cost_uses_the_tokens_reported(self):
         usage = {'prompt_tokens': 1182, 'prompt_cache_hit_tokens': 1024, 'prompt_cache_miss_tokens': 158, 'completion_tokens': 80}
@@ -233,6 +245,19 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.post({**good, 'lat': 35.0}, path='/api/places')[0], 400)
         self.assertEqual(self.post({**good, 'radius': 60000}, path='/api/places')[0], 400)
         self.assertEqual(self.post({**good, 'query': 'x' * 101}, path='/api/places')[0], 400)
+
+    def test_transit_validates_endpoints_and_stops_at_the_limit(self):
+        ai_proxy.budget = budget(transit=(1, 10, 10))
+        trip = {'from': {'lat': 22.28, 'lng': 114.15}, 'to': {'lat': 22.29, 'lng': 114.16}, 'preference': 'lessWalking'}
+        with patch.object(ai_proxy, 'transit_routes', return_value=[{'legs': []}]) as upstream:
+            self.assertEqual(self.post(trip, origin=False, path='/api/transit')[0], 403)
+            self.assertEqual(self.post({**trip, 'preference': []}, path='/api/transit')[0], 400)
+            self.assertEqual(self.post({**trip, 'mode': 'depart', 'at': True}, path='/api/transit')[0], 400)
+            self.assertEqual(self.post({**trip, 'to': {'lat': 35, 'lng': 139}}, path='/api/transit')[0], 400)
+            status, payload = self.post(trip, path='/api/transit')
+            self.assertEqual((status, json.loads(payload)), (200, {'routes': [{'legs': []}]}))
+            self.assertEqual(self.post(trip, path='/api/transit')[0], 429)
+            upstream.assert_called_once()
 
     def test_walking_route_stops_at_the_limit(self):
         ai_proxy.budget = budget(walk=(1, 10, 10))

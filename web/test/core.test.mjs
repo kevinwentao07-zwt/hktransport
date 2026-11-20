@@ -165,10 +165,10 @@ test('ETA parsers', () => {
 });
 
 test('offline parser', () => {
-  assert.deepEqual(A.parseTrip('由旺角去理大'), { origin: '旺角', destination: '理大', preference: 'fastest' });
+  assert.deepEqual(A.parseTrip('由旺角去理大'), { origin: '旺角', destination: '理大', preference: 'lessWalking' });
   assert.deepEqual(A.parseTrip('去機場最快'), { origin: null, destination: '機場', preference: 'fastest' });
   assert.deepEqual(A.parseTrip('沙田到中環 唔想轉車'), { origin: '沙田', destination: '中環', preference: 'fewerTransfers' });
-  assert.deepEqual(A.parseTrip('from Mong Kok to Central'), { origin: 'Mong Kok', destination: 'Central', preference: 'fastest' });
+  assert.deepEqual(A.parseTrip('from Mong Kok to Central'), { origin: 'Mong Kok', destination: 'Central', preference: 'lessWalking' });
   assert.deepEqual(A.parseTrip('我的位置去九龍塘少行路'), { origin: null, destination: '九龍塘', preference: 'lessWalking' });
   assert.equal(A.parseTrip('   '), null);
 });
@@ -568,4 +568,62 @@ test('walks take Google\'s distance and time where it has them, and the rest kee
   close(T.totalMinutes(walked) - T.totalMinutes(journey), 2.5 - journey.legs[1].minutes);
   assert.equal(T.withWalkTimes(walked, T.walkEnds(walked, at('A'), at('F'), db), P.knownWalkTime), walked, 'nothing new, nothing changes');
   assert.equal(T.withWalkTimes(journey, T.walkEnds(journey, at('A'), at('F'), db), () => null), journey);
+});
+
+test('Google transit joins adjacent walking instructions and matches the boarding direction', async () => {
+  const { googleJourneys } = await import('../js/google-transit.js');
+  const point = (at) => ({ latLng: { latitude: at.lat, longitude: at.lng } });
+  const walk = { travelMode: 'WALK', staticDuration: '330s', distanceMeters: 300,
+    startLocation: point(at('A')), endLocation: point(at('A')) };
+  const trip = { travelMode: 'TRANSIT', transitDetails: {
+    headsign: '丙', stopCount: 2, transitLine: { nameShort: '1', agencies: [{ name: 'Kowloon Motor Bus' }] },
+    stopDetails: {
+      departureStop: { name: '甲', location: point(at('A')) }, arrivalStop: { name: '丙', location: point(at('C')) },
+      departureTime: new Date(noon + 15 * 60_000).toISOString(), arrivalTime: new Date(noon + 35 * 60_000).toISOString(),
+    },
+  } };
+  const [long, short] = googleJourneys([{ legs: [{ steps: [walk, walk, trip] }] }, { legs: [{ steps: [walk, trip] }] }], db, noon);
+  assert.equal(long.legs[0].minutes, 11);
+  assert.equal(T.fitsWalkLimit(long), false);
+  assert.equal(T.fitsWalkLimit(short), true);
+  assert.deepEqual(T.rides(short).map((r) => [r.routeKey, r.boardPosition, r.alightPosition]), [['r1', 0, 2]]);
+  assert.equal(T.rankTripOptions([long, short], 'lessWalking')[0], short);
+  assert.deepEqual(T.rankTripOptions([short, { ...short }], 'lessWalking'), [short]);
+  assert.equal(T.totalMinutes(short), 35);
+  assert.equal(T.journeyPath(short, at('A'), at('C'), db).segments[1].google, true);
+});
+
+test('local planning expands a station search after a nearby stop gives no route', () => {
+  const point = (offset) => ({ lat: 22.31, lng: 114.18 + offset / 103_000 });
+  const stop = (offset) => ({ location: point(offset) });
+  const route = (number, stops) => ({ route: number, operators: ['kmb'], stops: { kmb: stops }, journeyMinutes: 12 });
+  const db = {
+    stops: { a: stop(100), x: stop(-2300), b: stop(820), y: stop(6200) }, holidays: [], serviceDayMap: {},
+    routes: { wrong: route('1', ['a', 'x']), right: route('2', ['b', 'y']) },
+  };
+  assert.deepEqual(T.plan(T.buildNetwork(db), point(0), point(6200), noon), []);
+  const [result] = T.planLocal(T.buildNetwork(db), point(0), point(6200), noon, 'lessWalking');
+  assert.equal(T.rides(result)[0].route, '2');
+  assert.equal(T.fitsWalkLimit(result), false);
+});
+
+test('the default ranking prefers a shorter walk over saving a few minutes', () => {
+  const [base] = T.plan(network, at('A'), at('C'), noon);
+  const option = (id, walk, ride) => ({ ...base, id, legs: [
+    { type: 'walk', minutes: walk, meters: walk * 70 },
+    { ...T.rides(base)[0], rideMinutes: ride },
+  ] });
+  const short = option('short', 4, 24), fast = option('fast', 9, 14), tooFar = option('too-far', 17, 1);
+  assert.deepEqual(T.rankTripOptions([tooFar, fast, short], 'lessWalking'), [short, fast, tooFar]);
+  assert.deepEqual(T.rankTripOptions([tooFar, fast, short], 'fastest'), [fast, short, tooFar]);
+});
+
+test('a changed ETA that misses a Google connection invalidates the itinerary', async () => {
+  const [first] = T.rides(T.plan(network, at('A'), at('C'), noon)[0]);
+  const second = { ...first, route: '2', googleDeparture: noon + 25 * 60_000 };
+  const journey = { departure: noon, byGoogle: true, legs: [
+    { ...first, googleDeparture: noon }, second,
+  ] };
+  const updated = await T.retime(journey, (ride) => Promise.resolve(ride.route === '1' ? [{ date: noon + 15 * 60_000 }] : null));
+  assert.equal(updated.missedConnection, true);
 });

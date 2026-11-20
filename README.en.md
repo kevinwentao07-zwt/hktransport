@@ -12,14 +12,13 @@ A Hong Kong public transport web app: trip planning, live arrivals, buses on the
 
 - **Search places or stops**: suggestions list places and shops first (Google Maps), then stops.
 - **Routes at once**: the best route is drawn on the map as soon as you search, framed from end to end. Tap another option to switch.
-- **Plan a time**: leave now, leave at a time, or arrive by a time. Arrive-by plans allow for the longest wait, and say so if you can't make it.
+- **Plan a time**: leave now, leave at a time, or arrive by a time. Arrive-by plans show when to leave and say if you can't make it.
 - **Three preferences**: fastest, fewer changes, less walking.
 - **Live correction**: estimates are replaced with the operators' real arrival times, and the options reordered.
 - **Navigation**: follows your position and tells you the next stop, how many are left and where to get off.
-- **The AI proposes, the route data checks**: from the stations and lines near each end, the AI says which lines to ride. The browser then checks that each line exists, is running and meets the next, picks the stops and works out the times. If no plan holds up, or the AI is unavailable, the built-in RAPTOR search takes over.
-- **Marked when the AI recommends it**: an option the AI proposed and the route data confirmed carries an "AI" tag.
-- **Real walking times**: walks follow Google's walking route, with its distance and time by the streets rather than a straight line. Only once Google's allowance runs out are walks estimated from a straight line.
-- Covers buses, minibuses, MTR and Light Rail, with up to three rides.
+- **Google transit directions**: with Google Maps active, the app asks for routes with less walking and alternatives. The built-in RAPTOR search looks for routes via stops near both ends when Google has no suitable result.
+- **Up to 10 minutes per walk**: longer walks are shown on request when needed. Google plans use street walking times. The built-in planner labels estimates where street data is unavailable.
+- Covers buses, minibuses, MTR and Light Rail. The built-in planner searches up to three rides.
 
 ### Buses on the map
 
@@ -39,7 +38,7 @@ Search a stop or place to see every bus, minibus, MTR and Light Rail stop around
 
 ### AI assistant
 
-It **reads sentences**, **keeps the conversation** and **proposes routes**. A route it proposes is shown only after the route data confirms it, and the stops and times never come from the AI. Shop order never goes through it.
+It **reads sentences** and **keeps the conversation**, then passes the two places and the preference to the planner. Google finds and ranks shop results.
 
 | You say | What happens |
 | --- | --- |
@@ -49,7 +48,7 @@ It **reads sentences**, **keeps the conversation** and **proposes routes**. A ro
 | What about the second? | Changes to the second shop |
 | Start from Tsim Sha Tsui | Changes only the start |
 
-Type or speak. If the AI is unavailable, basic parsing and the built-in search take over and routes keep working.
+Type or speak. Basic parsing takes over if the AI is unavailable.
 
 ### Also
 
@@ -62,7 +61,7 @@ Type or speak. If the AI is unavailable, basic parsing and the built-in search t
 | Part | Approach |
 | --- | --- |
 | Web | Static PWA in plain ES modules, with no framework or build step |
-| Trip planning | The AI proposes lines, checked against the route data in a Web Worker, with the RAPTOR algorithm as the fallback and the yardstick |
+| Trip planning | Google Routes API for transit, with RAPTOR in a Web Worker for fallback search |
 | Places and walks | Google's place search and walking routes, then Government GIS, OpenStreetMap and straight-line estimates after the allowance |
 | Arrivals | Straight from the browser to KMB/LWB, Citybus, NLB, green minibuses, MTR and Light Rail |
 | Map | Google Maps, moving to OpenFreeMap once the allowance runs out |
