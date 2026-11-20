@@ -48,10 +48,20 @@ const history = {
 // MARK: State
 
 const savedTransitMode = store.get('transitMode', 'all');
+const FARE_PROFILES = {
+  adult: ['成人', 'Adult'],
+  child: ['小童（3–11 歲）', 'Child (3–11)'],
+  student: ['學生八達通', 'Student Octopus'],
+  joyyou60: ['樂悠咭（60–64 歲）', 'JoyYou Card (60–64)'],
+  joyyou65: ['樂悠咭（65 歲或以上）', 'JoyYou Card (65+)'],
+  disability: ['合資格殘疾人士', 'Eligible disability'],
+};
+const savedFareProfile = store.get('fareProfile', 'adult');
 const state = {
   lang: store.get('lang', 'zh'), script: store.get('script', 'hant'), tab: 'plan', db: null, dbError: null, index: null,
   origin: '', destination: '', when: null, chat: '', preference: store.get('preference', 'lessWalking'), phase: 'idle', error: null,
   transitMode: ['mtr', 'bus'].includes(savedTransitMode) ? savedTransitMode : 'all',
+  fareProfile: Object.hasOwn(FARE_PROFILES, savedFareProfile) ? savedFareProfile : 'adult',
   from: null, to: null, journeys: [], candidates: [], allowLongWalk: false, onMap: null, expanded: null, explanation: null, aiNotice: null, lastChat: null,
   discovery: null,
   stopQuery: '', stopPlace: null, stops: [], stopMode: 'all', stopRadius: 500, stopBusy: false, stopError: null, stopOpen: null,
@@ -823,18 +833,20 @@ async function loadDB() {
 
 let planRun = 0, transitRequest, plannedInputs;
 const SAME_PLACE_METERS = 30;
-let railFares, railFareRequest;
+const railFares = new Map(), railFareRequests = new Set();
 const usesRail = (journey) => rides(journey).some((ride) => ride.op === 'mtr' || ride.op === 'lightRail');
 
 function loadRailFares() {
-  if (railFares || railFareRequest) return;
-  railFareRequest = fetch('api/fares', { signal: AbortSignal.timeout(8000) })
+  const profile = state.fareProfile;
+  if (railFares.has(profile) || railFareRequests.has(profile)) return;
+  railFareRequests.add(profile);
+  fetch(`api/fares?profile=${profile}`, { signal: AbortSignal.timeout(8000) })
     .then((response) => response.ok ? response.json() : null)
-    .then((data) => { railFares = data?.fares; })
+    .then((data) => { if (data?.fares) railFares.set(profile, data.fares); })
     .catch(() => {})
     .finally(() => {
-      railFareRequest = null;
-      if (state.tab === 'plan' && state.journeys.some(usesRail)) renderSheet();
+      railFareRequests.delete(profile);
+      if (state.tab === 'plan' && state.fareProfile === profile && state.journeys.some(usesRail)) renderSheet();
     });
 }
 
@@ -2285,10 +2297,10 @@ function journeyCard(journey) {
   const shown = journey.legs.filter((leg) => leg.type === 'ride' || leg.minutes >= 0.5);
   const changes = transfers(journey);
   const arrive = clock(arrivalTime(journey));
-  const cents = journeyFare(journey, state.db, railFares);
+  const cents = journeyFare(journey, state.db, railFares.get(state.fareProfile), state.fareProfile);
   const money = cents == null ? null : `HK$${(cents / 100).toFixed(2)}`;
   const fare = money ? (cents === 0 ? t(`全程車費 ${money}`, `Total fare ${money}`) : t(`全程車費約 ${money}`, `Est. fare ${money}`))
-    : railFareRequest && usesRail(journey) ? t('正在查詢車費…', 'Checking fare…')
+    : railFareRequests.has(state.fareProfile) && usesRail(journey) ? t('正在查詢車費…', 'Checking fare…')
       : t('全程車費暫缺資料', 'Total fare unavailable');
   const canNavigate = rides(journey).every((ride) => ride.routeKey || ride.providerStops?.length >= 2);
   return h('div', { class: `card${isOpen ? ' open' : ''}${state.onMap === id ? ' on-map' : ''}${state.justOpened === id ? ' reveal' : ''}`, 'data-journey': id },
@@ -2321,7 +2333,7 @@ function journeyCard(journey) {
         h('span', { class: cents == null ? 'journey-fare' : 'journey-fare bold' }, fare))),
     isOpen && h('div', { class: 'timeline' }, journey.legs.map(legDetail)),
     isOpen && cents > 0 && h('div', { class: 'tiny muted' },
-      t('成人車費估算，實付金額視乎付款方式及優惠。', 'Estimated adult fare. Payment method and discounts may change the actual fare.')),
+      t('按設定的票價類別估算，實付金額視乎付款方式及優惠。', 'Estimated using the fare profile in Settings. Payment method and discounts may change the actual fare.')),
     isOpen && !canNavigate && h('a', { class: 'link', href: googleDirections(), target: '_blank', rel: 'noopener' }, t('在 Google 地圖查看', 'View in Google Maps')),
     isOpen && canNavigate && h('button', {
       class: `primary wide${isNavigating ? ' danger' : ''}`,
@@ -2884,6 +2896,24 @@ const settingGroup = (title, ...rows) => h('section', { class: 'settings' }, h('
 const setting = (label, control) => h('div', { class: 'setting' }, h('span', {}, label), control);
 const aboutItem = (title, ...body) => h('details', { class: 'about' }, h('summary', {}, title), h('div', { class: 'small muted' }, body));
 
+function fareProfilePicker() {
+  const group = h('div', { class: 'fare-profiles', role: 'group', 'aria-label': t('票價類別', 'Fare profile') });
+  for (const [profile, labels] of Object.entries(FARE_PROFILES)) {
+    group.append(h('button', {
+      'aria-pressed': String(profile === state.fareProfile),
+      onclick: (event) => {
+        if (profile === state.fareProfile) return;
+        state.fareProfile = profile;
+        store.set('fareProfile', profile);
+        group.querySelector('[aria-pressed="true"]').setAttribute('aria-pressed', 'false');
+        event.currentTarget.setAttribute('aria-pressed', 'true');
+        if (state.candidates.some(usesRail)) loadRailFares();
+      },
+    }, t(...labels)));
+  }
+  return group;
+}
+
 /** A button that asks once more before it clears anything. */
 function clearButton(label, count, clearAll) {
   const button = h('button', { class: 'danger', disabled: !count }, label);
@@ -2927,6 +2957,13 @@ function settingsSheet() {
         store.set('preference', preference);
         renderTab();
       }))),
+    settingGroup(t('票價', 'Fares'),
+      fareProfilePicker(),
+      h('div', { class: 'tiny muted' },
+        t('按所選的八達通票價類別估算。個別路線、轉乘及限時優惠以營辦商公布為準。', 'Estimates use the selected Octopus fare profile. Check operators for route-specific, interchange and limited-time offers.')),
+      h('div', { class: 'row' },
+        h('a', { class: 'link', href: 'https://www.mtr.com.hk/en/customer/tickets/octopus_fares.html', target: '_blank', rel: 'noopener' }, t('港鐵票價', 'MTR fares')),
+        h('a', { class: 'link', href: 'https://www.td.gov.hk/tc/gov_public_transport_fare_concession/index.html', target: '_blank', rel: 'noopener' }, t('兩蚊兩折', 'Government fare scheme')))),
     settingGroup(t('AI 助手', 'AI assistant'),
       h('div', { class: 'setting inline' }, h('span', {}, t('狀態', 'Status')),
         h('span', { class: state.sharedAI ? 'ok' : 'muted' }, state.sharedAI ? t('已連接', 'Connected') : t('未連接', 'Not connected'))),
@@ -2950,7 +2987,7 @@ function settingsSheet() {
         'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go through this site\'s server to Google, or to OpenStreetMap\'s Photon service once the allowance is used up, to search within 5 km of you. AI requests and shop searches pass through this site\'s server to DeepSeek and Google, and the server keeps none of it. DeepSeek only receives your text, the district, stop names, route numbers and shop details, never coordinates. For public transport directions, the start and end coordinates and selected time go through this site\'s server to Transitous or Google. Google also receives the two ends of walking segments. Google Maps loads straight into your browser under Google\'s privacy policy.')),
       aboutItem(t('資料來源', 'Data sources'), t('路線資料來自 hkbus.app；到站時間來自各營辦商；公共交通路線由 Transitous、Google 地圖或內置演算法規劃；地圖、地點、步行路線及店舖來自 Google，額度用完後改用 OpenFreeMap、OpenStreetMap 及政府地理資訊。', 'Route data from hkbus.app; arrivals from the operators; public transport routes from Transitous, Google Maps or the built-in planner; maps, places, walking routes and shops from Google, and after the allowance, OpenFreeMap, OpenStreetMap and Government GIS.')),
       h('a', { class: 'small link', href: 'https://data.gov.hk/en-data/dataset/mtr-data-routes-fares-barrier-free-facilities', target: '_blank', rel: 'noopener' },
-        t('成人八達通鐵路車費 © 港鐵公司（資料來自 DATA.GOV.HK）', 'Adult Octopus rail fares © MTR Corporation Limited via DATA.GOV.HK')),
+        t('八達通鐵路車費 © 港鐵公司（資料來自 DATA.GOV.HK）', 'Octopus rail fares © MTR Corporation Limited via DATA.GOV.HK')),
       h('a', { class: 'small link', href: 'https://www.google.com/help/terms_maps/', target: '_blank', rel: 'noopener' }, t('Google 地圖使用條款', 'Google Maps Terms of Service')),
       h('a', { class: 'small link', href: 'https://policies.google.com/privacy', target: '_blank', rel: 'noopener' }, t('Google 私隱政策', 'Google Privacy Policy')),
       h('a', { class: 'small link', href: 'https://github.com/kevinwentao07-zwt/hktransport', target: '_blank', rel: 'noopener' }, t('GitHub 原始碼（GPL-3.0）', 'Source on GitHub (GPL-3.0)'))),

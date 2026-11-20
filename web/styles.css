@@ -124,6 +124,9 @@ svg.icon.solid { fill: currentColor; }
 .segments::before { content: ""; position: absolute; top: 2px; bottom: 2px; left: 2px; width: calc((100% - 4px) / var(--n)); border-radius: 10px; background: var(--selected); box-shadow: 0 3px 8px rgba(0, 0, 0, .12), 0 3px 1px rgba(0, 0, 0, .04); transform: translateX(calc(var(--i) * 100%)); transition: transform .45s var(--pop); }
 .segments button { position: relative; flex: 1 1 0; min-width: 0; padding: 6px 4px; font-size: 13px; font-weight: 500; color: var(--ink); white-space: nowrap; }
 .segments button[aria-pressed="true"] { font-weight: 600; }
+.fare-profiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.fare-profiles button { min-height: 36px; padding: 6px; border-radius: 10px; background: var(--raised); font-size: 13px; }
+.fare-profiles button[aria-pressed="true"] { background: var(--accent-fill); color: var(--on-accent); font-weight: 600; }
 
 /* History */
 #chat-input::placeholder { font-size: 14px; }

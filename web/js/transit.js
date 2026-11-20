@@ -269,26 +269,47 @@ const routeSequence = (journey) => rides(journey).map((ride) =>
   `${ride.op}|${ride.route}@${ride.boardStopID}>${ride.alightStopID}`).join(',') || 'walk';
 export const journeyID = (journey) => journey.id ?? routeSequence(journey);
 
-function busFare(ride, db, at, holidays) {
+const governmentFareProfile = (profile) => ['joyyou60', 'joyyou65', 'disability'].includes(profile);
+// TD's $2 scheme applies per paid trip. At over HK$10, round the 20% fare to HK$0.10.
+const governmentFare = (cents) => cents > 1000 ? Math.round(cents / 50) * 10 : Math.min(cents, 200);
+
+function busFare(ride, db, at, holidays, profile) {
   const route = db.routes[ride.routeKey], stops = route?.stops[ride.op];
   if (!stops || stops[ride.boardPosition] !== ride.boardStopID) return null;
   const useHolidayFare = Array.isArray(route.holidayFares) && serviceClock(new Date(at), holidays).weekday === 0;
   const fares = useHolidayFare ? route.holidayFares : route.fares;
   if (!Array.isArray(fares) || fares.length !== stops.length - 1) return null;
   const amount = fares[ride.boardPosition];
-  return /^\d+(\.\d{1,2})?$/.test(amount) ? Math.round(Number(amount) * 100) : null;
+  if (!/^\d+(\.\d{1,2})?$/.test(amount)) return null;
+  const cents = Math.round(Number(amount) * 100);
+  const franchised = MODES.bus(ride), halfFare = Math.ceil(cents / 20) * 10;
+  if (profile === 'child' && franchised) return halfFare;
+  if (!governmentFareProfile(profile)) return cents;
+  if (ride.op === 'gmb') return governmentFare(cents);
+  if (!franchised) return cents;
+
+  const number = route.route.toUpperCase();
+  if (/^N?A\d/.test(number)) return profile === 'joyyou65' ? halfFare : cents;
+  const racecourse = [route.orig, route.dest].some((stop) => /racecourse|馬場/i.test(`${stop?.en ?? ''} ${stop?.zh ?? ''}`));
+  const excluded = (ride.op === 'kmb' && ['P960', 'P968', 'HK1'].includes(number))
+    || (ride.op === 'ctb' && (/^H\d/.test(number) || number === 'SP12'));
+  if (racecourse || excluded) return cents;
+  const seniorFare = profile === 'joyyou65' && ride.op !== 'ctb' ? halfFare : cents;
+  return Math.min(governmentFare(cents), seniorFare);
 }
 
-/** Adult fare in HK cents. Only return a total if every paid part has a fare. */
-export function journeyFare(journey, db, railFares) {
+/** Fare in HK cents for the selected Octopus profile. */
+export function journeyFare(journey, db, railFares, profile = 'adult') {
+  const providerFare = profile === 'adult' ? journey.fareCents ?? null : null;
   const holidays = new Set(db.holidays);
   let total = 0, at = journey.departure, railTrip = null;
   const finishRail = () => {
     if (!railTrip) return true;
-    const fare = railFares?.[railTrip.mode]?.[`${railTrip.from}>${railTrip.to}`];
+    const { mode, from, to } = railTrip;
+    const fare = railFares?.[mode]?.[`${from}>${to}`];
     railTrip = null;
     if (fare == null) return false;
-    total += fare;
+    total += mode === 'lightRail' && governmentFareProfile(profile) ? governmentFare(fare) : fare;
     return true;
   };
 
@@ -312,17 +333,17 @@ export function journeyFare(journey, db, railFares) {
         railTrip.to = to;
         railTrip.alightAt = at;
       } else {
-        if (!finishRail()) return journey.fareCents ?? null;
+        if (!finishRail()) return providerFare;
         railTrip = { mode, from, to, alightAt: at };
       }
     } else {
-      if (!finishRail()) return journey.fareCents ?? null;
-      const fare = busFare(leg, db, leg.liveDeparture ?? leg.scheduledDeparture ?? boardAt, holidays);
-      if (fare == null) return journey.fareCents ?? null;
+      if (!finishRail()) return providerFare;
+      const fare = busFare(leg, db, leg.liveDeparture ?? leg.scheduledDeparture ?? boardAt, holidays, profile);
+      if (fare == null) return providerFare;
       total += fare;
     }
   }
-  return finishRail() ? total : journey.fareCents ?? null;
+  return finishRail() ? total : providerFare;
 }
 
 export const MAX_WALK_LEG_MINUTES = 10;

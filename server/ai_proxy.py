@@ -379,6 +379,16 @@ RAIL_FILES = {
     'airportExpress': 'airport_express_fares.csv',
     'lightRail': 'light_rail_fares.csv',
 }
+# Columns for regular MTR, Light Rail and Airport Express respectively. For the
+# latter two, the client applies the government scheme or dated offer to the adult fare.
+RAIL_FARE_COLUMNS = {
+    'adult': ('OCT_ADT_FARE', 'fare_octo_adult', 'OCT_ADT_FARE'),
+    'child': ('OCT_CON_CHILD_FARE', 'fare_octo_child', 'OCT_CHD_FARE'),
+    'student': ('OCT_STD_FARE', 'fare_octo_student', 'OCT_ADT_FARE'),
+    'joyyou60': ('OCT_JOYYOU_SIXTY_FARE', 'fare_octo_adult', 'OCT_ADT_FARE'),
+    'joyyou65': ('OCT_CON_ELDERLY_FARE', 'fare_octo_adult', 'OCT_ADT_FARE'),
+    'disability': ('OCT_CON_PWD_FARE', 'fare_octo_adult', 'OCT_ADT_FARE'),
+}
 rail_fare_lock = threading.Lock()
 rail_fare_tables = {}
 rail_fare_refresh_at = 0
@@ -395,22 +405,22 @@ def rail_fare_rows(filename):
     return []
 
 
-def rail_fares():
+def rail_fares(profile='adult'):
     global rail_fare_refresh_at
     with rail_fare_lock:
         if time.monotonic() < rail_fare_refresh_at:
-            return dict(rail_fare_tables)
+            return dict(rail_fare_tables.get(profile, {}))
         with ThreadPoolExecutor(max_workers=len(RAIL_FILES)) as pool:
             rows = dict(zip(RAIL_FILES, pool.map(rail_fare_rows, RAIL_FILES.values())))
         stations = {row.get('Station ID'): row.get('Station Code') for row in rows['stations']}
         tables = (
-            ('mtr', 'SRC_STATION_ID', 'DEST_STATION_ID', 'OCT_ADT_FARE'),
-            ('airportExpress', 'ST_FROM_ID', 'ST_TO_ID', 'OCT_ADT_FARE'),
-            ('lightRail', 'from_station_id', 'to_station_id', 'fare_octo_adult'),
+            ('mtr', 'SRC_STATION_ID', 'DEST_STATION_ID'),
+            ('lightRail', 'from_station_id', 'to_station_id'),
+            ('airportExpress', 'ST_FROM_ID', 'ST_TO_ID'),
         )
         updated = 0
-        for mode, start_key, end_key, fare_key in tables:
-            fares = {}
+        for index, (mode, start_key, end_key) in enumerate(tables):
+            fares = {columns[index]: {} for columns in RAIL_FARE_COLUMNS.values()}
             for row in rows[mode]:
                 start, end = row.get(start_key), row.get(end_key)
                 if mode == 'lightRail':
@@ -419,17 +429,23 @@ def rail_fares():
                     start, end = f'LR{start}', f'LR{end}'
                 else:
                     start, end = stations.get(start), stations.get(end)
-                try:
-                    cents = round(float(row.get(fare_key)) * 100)
-                except (TypeError, ValueError, OverflowError):
+                if not start or not end or start == end:
                     continue
-                if start and end and start != end and cents >= 0:
-                    fares[f'{start}>{end}'] = cents
-            if fares:
-                rail_fare_tables[mode] = fares
+                for column, amounts in fares.items():
+                    try:
+                        cents = round(float(row.get(column)) * 100)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if cents >= 0:
+                        amounts[f'{start}>{end}'] = cents
+            if any(fares.values()):
                 updated += 1
+                for rider, columns in RAIL_FARE_COLUMNS.items():
+                    amounts = fares[columns[index]]
+                    if amounts:
+                        rail_fare_tables.setdefault(rider, {})[mode] = amounts
         rail_fare_refresh_at = time.monotonic() + (86400 if updated == len(tables) else 300)
-        return dict(rail_fare_tables)
+        return dict(rail_fare_tables.get(profile, {}))
 
 
 TRANSITOUS_ENABLED = os.environ.get('TRANSITOUS_ENABLED', '1') == '1'
@@ -487,8 +503,12 @@ class Handler(BaseHTTPRequestHandler):
         return self.headers.get('X-Forwarded-For', '').split(',')[-1].strip() or self.client_address[0]
 
     def do_GET(self):
-        if self.path == '/api/fares':
-            fares = rail_fares()
+        path, _, query = self.path.partition('?')
+        if path == '/api/fares':
+            profiles = urllib.parse.parse_qs(query, keep_blank_values=True).get('profile', ['adult'])
+            if len(profiles) != 1 or profiles[0] not in RAIL_FARE_COLUMNS:
+                return self.send(400, {'error': 'Unknown fare profile'})
+            fares = rail_fares(profiles[0])
             if not fares:
                 return self.send(503, {'error': 'Unavailable'})
             return self.send(200, {'fares': fares, 'source': MTR_FARE_SOURCE, 'owner': 'MTR Corporation Limited'}, 'public, max-age=300')

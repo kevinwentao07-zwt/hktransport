@@ -611,6 +611,7 @@ test('Google transit joins adjacent walking instructions and matches the boardin
     travelAdvisory: { transitFare: { currencyCode: 'HKD', units: '13', nanos: 600_000_000 } },
   }], db, noon);
   assert.equal(T.journeyFare(withPrice, db), 1360);
+  assert.equal(T.journeyFare(withPrice, db, null, 'child'), null);
   assert.equal(T.journeyFare(short, db), null);
 });
 
@@ -630,6 +631,25 @@ test('journey fare uses the boarding stop and day and combines rail within the s
   assert.equal(T.journeyFare(trip([bus], noon + 86_400_000), faresDB), 620);
   assert.equal(T.journeyFare(trip([bus, train]), faresDB), null);
   assert.equal(T.journeyFare(trip([{ type: 'walk', minutes: 8 }]), faresDB), 0);
+});
+
+test('fare profiles price each paid trip and exempt airport routes from the government scheme', () => {
+  const faresDB = T.normalizeDB({ ...raw, routeList: {
+    r1: { ...raw.routeList.r1, fares: ['12.2', '1.8'] },
+    airport: { ...raw.routeList.r1, route: 'A21', co: ['ctb'], stops: { ctb: ['A', 'B', 'C'] }, fares: ['34.6', '34.6'] },
+  } });
+  const ride = { type: 'ride', rideMinutes: 10, waitMinutes: 0, transferMinutes: 0 };
+  const bus = { ...ride, op: 'kmb', routeKey: 'r1', boardStopID: 'A', boardPosition: 0 };
+  const minFare = { ...bus, boardStopID: 'B', boardPosition: 1 };
+  const airport = { ...bus, op: 'ctb', routeKey: 'airport' };
+  const train = { ...ride, op: 'mtr', route: 'TWL', boardStopID: 'ADM', alightStopID: 'MOK' };
+  const lightRail = { ...ride, op: 'lightRail', boardStopID: 'LR920', alightStopID: 'LR265' };
+  const trip = (...legs) => ({ legs, departure: noon });
+  assert.equal(T.journeyFare(trip(bus, train), faresDB, { mtr: { 'ADM>MOK': 650 } }, 'child'), 1260);
+  assert.equal(T.journeyFare(trip(bus, train), faresDB, { mtr: { 'ADM>MOK': 650 } }, 'student'), 1870);
+  assert.equal(T.journeyFare(trip(bus, minFare, lightRail), faresDB, { lightRail: { 'LR920>LR265': 510 } }, 'disability'), 620);
+  assert.equal(T.journeyFare(trip(airport), faresDB, null, 'joyyou60'), 3460);
+  assert.equal(T.journeyFare(trip(airport), faresDB, null, 'joyyou65'), 1730);
 });
 
 test('local planning expands a station search after a nearby stop gives no route', () => {

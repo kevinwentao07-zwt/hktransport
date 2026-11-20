@@ -89,18 +89,20 @@ class PolylineTests(unittest.TestCase):
                 {'Station ID': '1', 'Station Code': 'CEN'}, {'Station ID': '2', 'Station Code': 'ADM'},
             ],
             'mtr_lines_fares.csv': [
-                {'SRC_STATION_ID': '1', 'DEST_STATION_ID': '2', 'OCT_ADT_FARE': '4.90', 'SINGLE_ADT_FARE': '5.00'},
+                {'SRC_STATION_ID': '1', 'DEST_STATION_ID': '2', 'OCT_ADT_FARE': '4.90', 'OCT_CON_CHILD_FARE': '3.20',
+                 'OCT_JOYYOU_SIXTY_FARE': '2.00', 'SINGLE_ADT_FARE': '5.00'},
                 {'SRC_STATION_ID': '2', 'DEST_STATION_ID': '1', 'OCT_ADT_FARE': 'N/A'},
             ],
             'light_rail_fares.csv': [
-                {'from_station_id': '920', 'to_station_id': '265', 'fare_octo_adult': '5.10'},
+                {'from_station_id': '920', 'to_station_id': '265', 'fare_octo_adult': '5.10', 'fare_octo_child': '2.20'},
             ],
         }
         with patch.multiple(ai_proxy, rail_fare_tables={}, rail_fare_refresh_at=0), \
                 patch.object(ai_proxy, 'rail_fare_rows', side_effect=lambda filename: rows.get(filename, [])) as upstream:
             fares = {'mtr': {'CEN>ADM': 490}, 'lightRail': {'LR920>LR265': 510}}
             self.assertEqual(ai_proxy.rail_fares(), fares)
-            self.assertEqual(ai_proxy.rail_fares(), fares)
+            self.assertEqual(ai_proxy.rail_fares('child'), {'mtr': {'CEN>ADM': 320}, 'lightRail': {'LR920>LR265': 220}})
+            self.assertEqual(ai_proxy.rail_fares('joyyou60'), {'mtr': {'CEN>ADM': 200}, 'lightRail': {'LR920>LR265': 510}})
             self.assertEqual(upstream.call_count, 4)
 
 
