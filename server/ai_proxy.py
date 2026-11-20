@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forwards the web app's AI tasks to DeepSeek with each visitor's own key.
+"""Forwards the web app's AI tasks to the visitor's configured provider.
 
 The proxy supplies the app prompts and returns estimated cost from the reported usage.
 Neither the key nor the visitor's messages are logged or stored by the proxy.
@@ -9,11 +9,15 @@ disk, and at the limit the site quietly goes back to its free map and search.
 """
 import csv
 import html
+import http.client
+import ipaddress
 import io
 import json
+import math
 import os
 import re
 import socket
+import ssl
 import sys
 import tempfile
 import threading
@@ -157,6 +161,164 @@ def ask_deepseek(key, system, message):
     return message.get('content') or '', reply.get('usage') or {}
 
 
+AI_SERVICES = {
+    'deepseek': ('https://api.deepseek.com', 'chat'),
+    'openai': ('https://api.openai.com/v1', 'chat'),
+    'anthropic': ('https://api.anthropic.com/v1', 'messages'),
+    'gemini': ('https://generativelanguage.googleapis.com/v1beta/openai', 'chat'),
+    'openrouter': ('https://openrouter.ai/api/v1', 'chat'),
+}
+
+
+class InvalidAIEndpoint(ValueError):
+    pass
+
+
+def ai_service(body):
+    config = body.get('ai', {'provider': 'deepseek', 'model': MODEL})
+    if not isinstance(config, dict):
+        raise InvalidAIEndpoint()
+    provider, model = config.get('provider'), config.get('model')
+    if not isinstance(provider, str) or not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9._:/@+\-]{1,160}', model):
+        raise InvalidAIEndpoint()
+    if provider == 'custom':
+        base, protocol = config.get('baseUrl'), config.get('protocol')
+        if not isinstance(base, str) or len(base) > 500 or protocol not in ('chat', 'messages', 'responses'):
+            raise InvalidAIEndpoint()
+        try:
+            target = urllib.parse.urlsplit(base)
+            if (target.scheme != 'https' or target.port not in (443, None) or target.query or target.fragment
+                    or not re.fullmatch(r'[A-Za-z0-9.-]+', target.netloc.removesuffix(':443'))
+                    or not re.fullmatch(r'(?:/[A-Za-z0-9._~\-]+)*/?', target.path) or {'..', '.'}.intersection(target.path.split('/'))):
+                raise InvalidAIEndpoint()
+        except ValueError:
+            raise InvalidAIEndpoint() from None
+    elif provider in AI_SERVICES:
+        base, protocol = AI_SERVICES[provider]
+    else:
+        raise InvalidAIEndpoint()
+    base = base.rstrip('/')
+    if provider == 'custom':
+        base = base.removesuffix({'messages': '/messages', 'chat': '/chat/completions', 'responses': '/responses'}[protocol])
+    return provider, model, base, protocol
+
+
+def public_ai_addresses(host):
+    addresses = _lookup(host, 443, type=socket.SOCK_STREAM)
+    for _, _, _, _, address in addresses:
+        ip = ipaddress.ip_address(address[0])
+        if not ip.is_global or ip.is_multicast or ip.is_reserved:
+            raise InvalidAIEndpoint()
+    return sorted(addresses, key=lambda entry: entry[0] != socket.AF_INET)
+
+
+class PublicHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        # Reuse the approved address directly. HTTP redirects are never followed.
+        deadline = time.monotonic() + self.timeout
+        for family, kind, protocol, _, address in public_ai_addresses(self.host):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            with socket.socket(family, kind, protocol) as sock:
+                sock.settimeout(min(remaining, 5))
+                try:
+                    sock.connect(address)
+                except OSError:
+                    continue
+                sock.settimeout(self.timeout)
+                self.sock = self._context.wrap_socket(sock.dup(), server_hostname=self.host)
+                return
+        raise OSError('AI host unreachable')
+
+
+def provider_request(service, key, resource, payload=None, timeout=35):
+    _, _, base, protocol = service
+    target = urllib.parse.urlsplit(base)
+    headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
+    if protocol == 'messages':
+        headers.update({'x-api-key': key, 'anthropic-version': '2023-06-01'})
+    else:
+        headers['Authorization'] = f'Bearer {key}'
+    connection = PublicHTTPSConnection(target.hostname, timeout=timeout, context=ssl.create_default_context())
+    try:
+        connection.request('GET' if payload is None else 'POST', f'{target.path}/{resource}',
+                           json.dumps(payload) if payload is not None else None, headers)
+        with connection.getresponse() as response:
+            if response.status != 200:
+                raise urllib.error.HTTPError('', response.status, '', {}, None)
+            data = response.read(2_000_001)
+            if len(data) > 2_000_000:
+                raise ValueError('AI response too large')
+            return json.loads(data)
+    finally:
+        connection.close()
+
+
+def provider_completion(service, key, system, message, max_tokens=1200):
+    provider, model, _, protocol = service
+    messages = [{'role': 'user', 'content': message}]
+    if protocol == 'messages':
+        reply = provider_request(service, key, 'messages', {
+            'model': model, 'max_tokens': max_tokens, 'system': system, 'messages': messages,
+        })
+        text = ''.join(block.get('text', '') for block in reply.get('content', []) if block.get('type') == 'text')
+    elif protocol == 'responses':
+        reply = provider_request(service, key, 'responses', {
+            'model': model, 'instructions': system, 'input': message, 'max_output_tokens': max_tokens, 'store': False,
+        })
+        text = ''.join(block.get('text', '') for item in reply.get('output', []) if item.get('type') == 'message'
+                       for block in item.get('content', []) if block.get('type') == 'output_text')
+    else:
+        payload = {'model': model, 'messages': [{'role': 'system', 'content': system}, *messages],
+                   'max_completion_tokens' if provider in ('openai', 'gemini') else 'max_tokens': max_tokens}
+        if provider == 'deepseek':
+            payload['thinking'] = {'type': 'disabled'}
+        reply = provider_request(service, key, 'chat/completions', payload)
+        if reply.get('error'):
+            raise ValueError('AI completion failed')
+        text = ((reply.get('choices') or [{}])[0].get('message') or {}).get('content') or ''
+    return text, provider_usage(reply.get('usage') or {}, provider, protocol)
+
+
+def provider_usage(raw, provider, protocol):
+    def count(value):
+        return value if type(value) is int and value >= 0 else 0
+
+    details = raw.get('prompt_tokens_details') or raw.get('input_tokens_details') or {}
+    cache = count(raw.get('cache_read_input_tokens', raw.get('prompt_cache_hit_tokens', details.get('cached_tokens'))))
+    inputs = count(raw.get('prompt_tokens', raw.get('input_tokens')))
+    if protocol == 'messages':
+        inputs += cache + count(raw.get('cache_creation_input_tokens'))
+    usage = {'cached': min(inputs, cache)}
+    if 'prompt_tokens' in raw or 'input_tokens' in raw:
+        usage['input'] = inputs
+    if 'completion_tokens' in raw or 'output_tokens' in raw:
+        usage['output'] = count(raw.get('completion_tokens', raw.get('output_tokens')))
+    cost = raw.get('cost')
+    if provider == 'openrouter' and type(cost) in (int, float) and 0 <= cost < math.inf:
+        usage.update(amount=cost, currency='USD')
+    return usage
+
+
+def verify_provider(service, key):
+    provider, model, _, _ = service
+    if provider == 'openrouter':
+        provider_request(service, key, 'key', timeout=8)
+    elif provider == 'gemini':
+        models = provider_request(service, key, 'models', timeout=8).get('data', [])
+        if not any(row.get('id', '').removeprefix('models/') == model for row in models):
+            raise urllib.error.HTTPError('', 404, '', {}, None)
+    elif provider == 'custom':
+        text, usage = provider_completion(service, key, 'Reply with OK.', 'Connection test.', 64)
+        if not text and not usage.get('output'):
+            raise ValueError('Connection test returned no text')
+        return usage
+    else:
+        provider_request(service, key, f'models/{urllib.parse.quote(model, safe="")}', timeout=8)
+    return None
+
+
 BASIC_FIELDS = 'places.id,places.displayName,places.formattedAddress,places.location,places.googleMapsUri,places.primaryTypeDisplayName,places.businessStatus'
 # These move a search into Google's dearest tier, with a far smaller free allowance.
 SHOP_FIELDS = 'places.rating,places.userRatingCount,places.priceLevel,places.currentOpeningHours.openNow,places.nationalPhoneNumber'
@@ -221,8 +383,8 @@ be copied verbatim from a web search result that supports the recommendation. If
 are supported than requested, return those. Leave the answer empty if there are none."""
 
 
-def sourced_explore_suggestions(message):
-    """Keep only recommendations whose links were returned by the hosted web tool."""
+def sourced_explore_suggestions(message, evidence=()):
+    """Keep only recommendations whose links came from web search."""
     def page_key(url):
         if not isinstance(url, str) or len(url) > 2048:
             return None
@@ -234,7 +396,8 @@ def sourced_explore_suggestions(message):
             return (link.netloc.lower(), urllib.parse.unquote(link.path.rstrip('/')), link.query)
         return None
 
-    sources = {}
+    sources = {page_key(row['url']): {'url': row['url'], 'title': row['title']}
+               for row in evidence if page_key(row['url'])}
     for step in message.get('server_tool_calls') or []:
         for call in step.get('calls') or []:
             if call.get('status') != 'completed':
@@ -312,6 +475,25 @@ def ask_explore_ai(key, area, category, language):
     return items[:AI_EXPLORE_LIMIT], cost
 
 
+def ask_provider_explore(service, key, area, category, language):
+    search_language = 'en' if language == 'en' else 'zh-HK'
+    try:
+        evidence = explore_web(area, category, search_language, with_evidence=True)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        evidence = []
+    if not evidence:
+        return [], None
+    prompt = AI_EXPLORE_PROMPT.replace(
+        'Use your web search tool before answering.',
+        'Use only the web search evidence provided in the user message. Do not invent places or links.',
+    )
+    message = json.dumps({'destination': area, 'region': 'Hong Kong', 'category': category,
+                          'language': AI_EXPLORE_LANGUAGES[language], 'number_requested': AI_EXPLORE_LIMIT,
+                          'web_search_evidence': evidence}, ensure_ascii=False)
+    content, usage = provider_completion(service, key, prompt, message, 3000)
+    return sourced_explore_suggestions({'content': content}, evidence), usage
+
+
 def nearby_places(center, radius, category, language):
     request = urllib.request.Request(
         'https://places.googleapis.com/v1/places:searchNearby',
@@ -326,7 +508,7 @@ def nearby_places(center, radius, category, language):
         return place_cards(json.load(response).get('places', []))
 
 
-def explore_web(area, category, language):
+def explore_web(area, category, language, with_evidence=False):
     def read(url, params, headers, timeout=3):
         request = urllib.request.Request(f'{url}?{urllib.parse.urlencode(params)}', headers=headers)
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -339,8 +521,9 @@ def explore_web(area, category, language):
     if brave_key:
         suffix = ('Hong Kong ' + EXPLORE_TYPES[category][1]) if language == 'en' else ('香港 ' + EXPLORE_TYPES[category][2])
         try:
+            count = 12 if with_evidence else 6
             answer = read('https://api.search.brave.com/res/v1/web/search', {
-                'q': f'{area} {suffix}', 'count': 6, 'safesearch': 'moderate',
+                'q': f'{area} {suffix}', 'count': count, 'safesearch': 'moderate',
             }, {'X-Subscription-Token': brave_key, 'Accept': 'application/json'})
             sources = []
             for row in answer.get('web', {}).get('results', []):
@@ -349,7 +532,7 @@ def explore_web(area, category, language):
                 if title and urllib.parse.urlsplit(url).scheme in ('https', 'http'):
                     sources.append({'title': title, 'url': url, 'snippet': plain(row.get('description'), 360), 'provider': 'brave'})
             if sources:
-                return sources[:6]
+                return sources[:count]
         except (OSError, ValueError, TypeError, AttributeError):
             pass
 
@@ -376,11 +559,19 @@ def explore_web(area, category, language):
         guide = read(api, {'action': 'parse', 'page': page['title'], 'prop': 'sections', 'format': 'json'}, headers, timeout=2)
         sections = [section for section in guide.get('parse', {}).get('sections', []) if plain(section.get('line'), 80) in labels]
         if sections:
-            return [{'title': f'{title} · {plain(section["line"], 80)}', 'url': f'{url}#{urllib.parse.quote(section["anchor"])}',
-                     'provider': 'wikivoyage'} for section in sections[:2]]
+            sources = [{'title': f'{title} · {plain(section["line"], 80)}', 'url': f'{url}#{urllib.parse.quote(section["anchor"])}',
+                        'provider': 'wikivoyage'} for section in sections[:2]]
+            if with_evidence:
+                for section, source in zip(sections, sources):
+                    detail = read(api, {'action': 'parse', 'page': page['title'], 'section': section['index'],
+                                        'prop': 'text', 'formatversion': 2, 'format': 'json'}, headers, timeout=2)
+                    text = re.sub(r'<[^>]+>', ' ', detail.get('parse', {}).get('text', ''))
+                    source['snippet'] = ' '.join(html.unescape(text).split())[:6000]
+            return sources
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    return [{'title': title, 'url': url, 'provider': 'wikivoyage'}]
+    return [{'title': title, 'url': url, 'provider': 'wikivoyage',
+             **({'snippet': plain(page.get('snippet'), 500)} if with_evidence else {})}]
 
 
 def suggest_places(query, origin, language):
@@ -699,25 +890,29 @@ class Handler(BaseHTTPRequestHandler):
 
     def personal_key(self):
         authorization = self.headers.get('Authorization', '')
-        match = re.fullmatch(r'Bearer ([A-Za-z0-9._~-]{1,256})', authorization, re.IGNORECASE)
+        match = re.fullmatch(r'Bearer ([A-Za-z0-9._~+/=\-]{1,2048})', authorization, re.IGNORECASE)
         if not match:
-            self.send(401, {'error': 'DeepSeek API key required'})
+            self.send(401, {'error': 'AI API key required'})
             return None
         return match[1]
 
     def ai_error(self, error):
+        if isinstance(error, InvalidAIEndpoint):
+            return self.send(400, {'error': 'Invalid AI configuration'})
         if isinstance(error, urllib.error.HTTPError):
             error.close()
-            print(f'DeepSeek returned {error.code}', file=sys.stderr, flush=True)
+            print(f'AI provider returned {error.code}', file=sys.stderr, flush=True)
             if error.code in (401, 403):
-                return self.send(401, {'error': 'DeepSeek API key rejected'})
+                return self.send(401, {'error': 'AI API key rejected'})
             if error.code == 402:
-                return self.send(402, {'error': 'DeepSeek balance insufficient'})
+                return self.send(402, {'error': 'AI balance insufficient'})
+            if error.code == 404:
+                return self.send(404, {'error': 'AI model or endpoint not found'})
             if error.code == 429:
-                return self.send(429, {'error': 'DeepSeek rate limit'})
+                return self.send(429, {'error': 'AI provider rate limit'})
         else:
-            print(f'DeepSeek failed: {type(error).__name__}', file=sys.stderr, flush=True)
-        return self.send(502, {'error': 'DeepSeek unavailable'})
+            print(f'AI request failed: {type(error).__name__}', file=sys.stderr, flush=True)
+        return self.send(502, {'error': 'AI provider unavailable'})
 
     def explore_ai(self, body):
         area, category, language = (body.get(field) for field in ('area', 'category', 'locale'))
@@ -728,10 +923,14 @@ class Handler(BaseHTTPRequestHandler):
         if key is None:
             return
         try:
-            suggestions, cost = ask_explore_ai(key, area.strip(), category, language)
-        except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
+            service = ai_service(body)
+            if service[:2] == ('deepseek', MODEL):
+                suggestions, cost = ask_explore_ai(key, area.strip(), category, language)
+                return self.send(200, {'suggestions': suggestions, 'costCny': cost})
+            suggestions, usage = ask_provider_explore(service, key, area.strip(), category, language)
+        except (OSError, http.client.HTTPException, ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
             return self.ai_error(error)
-        return self.send(200, {'suggestions': suggestions, 'costCny': cost})
+        return self.send(200, {'suggestions': suggestions, 'usage': usage})
 
     def suggest(self, body):
         query, origin = body.get('query'), body.get('from')
@@ -835,11 +1034,16 @@ class Handler(BaseHTTPRequestHandler):
             if key is None:
                 return
             try:
-                with urllib.request.urlopen(deepseek_request('user/balance', key), timeout=8):
-                    pass
-            except OSError as error:
+                service = ai_service(body)
+                usage = None
+                if service[:2] == ('deepseek', MODEL):
+                    with urllib.request.urlopen(deepseek_request('user/balance', key), timeout=8):
+                        pass
+                else:
+                    usage = verify_provider(service, key)
+            except (OSError, http.client.HTTPException, ValueError, TypeError, KeyError, AttributeError) as error:
                 return self.ai_error(error)
-            return self.send(200, {'verified': True})
+            return self.send(200, {'verified': True, **({'usage': usage} if usage is not None else {})})
         try:
             system, message = PROMPTS[task], body['message']
         except (KeyError, TypeError):
@@ -850,13 +1054,18 @@ class Handler(BaseHTTPRequestHandler):
         if key is None:
             return
         try:
-            answer, usage = ask_deepseek(key, system, message)
-            cost = cost_of(usage)
-        except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
+            service = ai_service(body)
+            if service[:2] == ('deepseek', MODEL):
+                answer, usage = ask_deepseek(key, system, message)
+                meter = {'costCny': cost_of(usage)}
+            else:
+                answer, usage = provider_completion(service, key, system, message)
+                meter = {'usage': usage}
+        except (OSError, http.client.HTTPException, ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
             return self.ai_error(error)
         if not isinstance(answer, str) or not is_app_reply(answer):
-            return self.send(502, {'error': 'DeepSeek reply unavailable', 'costCny': cost})
-        self.send(200, {'reply': answer, 'costCny': cost})
+            return self.send(502, {'error': 'AI reply unavailable', **meter})
+        self.send(200, {'reply': answer, **meter})
 
 
 if __name__ == '__main__':

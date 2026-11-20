@@ -6,7 +6,7 @@ import { meters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache, routeArrivals } from './eta.js?v=dev';
 import { toSimplified } from './hans.js?v=dev';
-import { chatMessage, personalAI, verifyAIKey, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
+import { AI_PROVIDERS, chatMessage, personalAI, verifyAIKey, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
 import { HONG_KONG, cleanArea, exploreDestination, exploreWebSearchURL, googlePlaceLocation, googleSearch, googleSuggest, googleWalk, governmentSearch, inHongKong, insideArea, isNearby, knownShape, knownWalk, knownWalkTime, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
 
 import { googleJourneys, requestGoogleTransit } from './google-transit.js?v=dev';
@@ -60,12 +60,17 @@ const FARE_PROFILES = {
   disability: ['合資格殘疾人士', 'Eligible disability'],
 };
 const savedFareProfile = store.get('fareProfile', 'adult');
+function savedAIConfig() {
+  const legacy = store.get('deepseekKey', '');
+  return store.get('aiConfig', null) ?? (legacy ? { key: legacy, provider: 'deepseek', model: AI_PROVIDERS.deepseek.model } : null);
+}
+
 const state = {
   lang: store.get('lang', 'zh'), script: store.get('script', 'hant'), tab: 'plan', db: null, dbError: null, index: null,
   origin: '', destination: '', when: null, chat: '', preference: store.get('preference', 'lessWalking'), phase: 'idle', error: null,
   transitMode: ['mtr', 'bus'].includes(savedTransitMode) ? savedTransitMode : 'all',
   fareProfile: Object.hasOwn(FARE_PROFILES, savedFareProfile) ? savedFareProfile : 'adult',
-  apiKey: store.get('deepseekKey', ''), aiKeyRejected: false,
+  aiConfig: savedAIConfig(), aiKeyRejected: false,
   from: null, to: null, journeys: [], candidates: [], allowLongWalk: false, onMap: null, expanded: null, explanation: null, aiNotice: null, lastChat: null,
   discovery: null, explore: null,
   stopQuery: '', stopPlace: null, stops: [], stopMode: 'all', stopRadius: 500, stopBusy: false, stopError: null, stopOpen: null,
@@ -112,34 +117,39 @@ function applyScript() {
 }
 
 function client() {
-  const key = state.apiKey;
-  return key ? personalAI(key, recordAICost, () => {
-    if (state.apiKey === key) setAIKey('', true);
+  const config = state.aiConfig;
+  return config ? personalAI(config, recordAICost, () => {
+    if (state.aiConfig === config) setAIConfig(null, true);
   }) : null;
 }
 
-const enableAIHint = () => t('在「設定 → AI API」輸入 DeepSeek API Key 後啟用。', 'Enter a DeepSeek API key in Settings → AI API to enable AI.');
+const enableAIHint = () => t('在「設定 → AI API」選擇平台並輸入 API Key 後啟用。', 'Choose a provider and enter an API key in Settings → AI API to enable AI.');
 
 function aiErrorMessage(status) {
-  if (status === 401) return t('DeepSeek API Key 無效或已撤銷。', 'DeepSeek rejected the API key.');
-  if (status === 402) return t('DeepSeek 帳戶餘額不足。', 'Your DeepSeek balance is insufficient.');
-  if (status === 429) return t('DeepSeek 暫時限制請求頻率，請稍後再試。', 'DeepSeek is temporarily rate limiting requests. Try again shortly.');
-  return t('暫時未能連接 DeepSeek，請稍後再試。', 'Unable to reach DeepSeek. Try again shortly.');
+  if (status === 400) return t('請確認介面格式、模型名稱和公開 HTTPS 地址。', 'Check the API format, model name and public HTTPS address.');
+  if (status === 401) return t('平台拒絕了 API Key，請檢查 Key 及其權限。', 'The provider rejected the API key. Check the key and its permissions.');
+  if (status === 402) return t('AI 平台帳戶餘額不足。', 'Your provider balance is insufficient.');
+  if (status === 404) return t('找不到所選模型或 API 端點。', 'The selected model or API endpoint was not found.');
+  if (status === 429) return t('AI 平台暫時限制請求頻率，請稍後再試。', 'The AI provider is temporarily limiting requests. Try again shortly.');
+  return t('暫時未能取得 AI 回覆，請檢查設定或稍後再試。', 'Unable to get an AI response. Check your settings or try again shortly.');
 }
 
 const aiUsageDay = () => new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10);
 let aiUsage = store.get('aiUsage', null);
 
-function todayAICost(day = aiUsageDay()) {
+function todayAIUsage(day = aiUsageDay()) {
   const saved = store.get('aiUsage', aiUsage);
-  return saved?.day === day && Number.isFinite(saved.cost) ? saved.cost : 0;
+  if (saved?.day !== day) return { costs: {}, unpriced: 0 };
+  return { costs: saved.costs ?? (Number.isFinite(saved.cost) ? { CNY: saved.cost } : {}), unpriced: saved.unpriced ?? 0 };
 }
 
-function recordAICost(cost) {
+function recordAICost(charge) {
   const day = aiUsageDay();
   const add = () => {
     if (day !== aiUsageDay()) return;
-    aiUsage = { day, cost: todayAICost(day) + cost };
+    const { costs, unpriced } = todayAIUsage(day);
+    if (charge) costs[charge.currency] = (costs[charge.currency] ?? 0) + charge.amount;
+    aiUsage = { day, costs, unpriced: unpriced + Number(charge === null) };
     store.set('aiUsage', aiUsage);
     renderAICost();
   };
@@ -149,8 +159,11 @@ function recordAICost(cost) {
 }
 
 function aiCostText() {
-  const cost = todayAICost();
-  return cost > 0 && cost < 0.0001 ? '< CNY 0.0001' : `CNY ${cost.toFixed(cost ? 4 : 2)}`;
+  const { costs, unpriced } = todayAIUsage();
+  const parts = Object.entries(costs).map(([currency, cost]) =>
+    cost > 0 && cost < 0.0001 ? `< ${currency} 0.0001` : `${currency} ${cost.toFixed(cost ? 4 : 2)}`);
+  if (unpriced) parts.push(t(`${unpriced} 次費用未知`, `${unpriced} unpriced`));
+  return parts.join(' · ') || '0.00';
 }
 
 function renderAICost() {
@@ -160,11 +173,12 @@ function renderAICost() {
   if (amount.textContent !== text) amount.textContent = text;
 }
 
-function setAIKey(key, rejected = false) {
-  if (state.apiKey === key && state.aiKeyRejected === rejected) return;
-  if (key) store.set('deepseekKey', key);
-  else store.remove('deepseekKey');
-  state.apiKey = key;
+function setAIConfig(config, rejected = false) {
+  if (JSON.stringify(state.aiConfig) === JSON.stringify(config) && state.aiKeyRejected === rejected) return;
+  if (config) store.set('aiConfig', config);
+  else store.remove('aiConfig');
+  store.remove('deepseekKey');
+  state.aiConfig = config;
   state.aiKeyRejected = rejected;
   recognition?.abort();
   if (state.thread?.busy && state.phase === 'understanding') state.phase = state.journeys.length ? 'done' : 'idle';
@@ -1045,7 +1059,7 @@ function currentTrip() {
 
 /** Replanning reuses the resolved places from the current trip. */
 async function runPlan(request) {
-  const ai = client(), isChat = request.kind === 'chat', key = state.apiKey, phaseBefore = state.phase;
+  const ai = client(), isChat = request.kind === 'chat', key = state.aiConfig, phaseBefore = state.phase;
   if (isChat && !ai) return;
   const run = ++planRun, stale = () => run !== planRun;
   const previous = request.kind === 'replan' ? { start: state.from, end: state.to } : null;
@@ -1074,7 +1088,7 @@ async function runPlan(request) {
     // Only the chat box needs the AI: the search box holds a place, and the planner does the rest.
     try {
       const reply = await ai.chat(chatMessage(request.text, request.current, request.context));
-      if (stale() || key !== state.apiKey) return;
+      if (stale() || key !== state.aiConfig) return;
       // Small talk changes nothing, so what is on screen stays.
       if (reply.say) {
         state.discovery = request.discovery;
@@ -1085,7 +1099,7 @@ async function runPlan(request) {
       wish = reply.wish ?? null;
       intent = reply.trip ?? null;
     } catch (error) {
-      if (stale() || key !== state.apiKey) return;
+      if (stale() || key !== state.aiConfig) return;
       state.aiNotice = aiErrorMessage(error.status);
     }
   }
@@ -1834,15 +1848,15 @@ const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
 let recognition = null;
 
 function toggleSpeech() {
-  if (!state.apiKey) return;
+  if (!state.aiConfig) return;
   if (recognition) return recognition.stop();
   recognition = new Recognition();
   recognition.lang = state.speechLang;
   recognition.interimResults = true;
   let text = '';
-  const key = state.apiKey;
+  const key = state.aiConfig;
   recognition.onresult = (event) => {
-    if (key !== state.apiKey || !$('chat-input')) return;
+    if (key !== state.aiConfig || !$('chat-input')) return;
     text = [...event.results].map((result) => result[0].transcript).join('');
     state.chat = text;
     $('chat-input').value = text;
@@ -1858,7 +1872,7 @@ function toggleSpeech() {
     recognition = null;
     state.listening = false;
     renderChatControls();
-    if (key === state.apiKey && text.trim()) sendChat();
+    if (key === state.aiConfig && text.trim()) sendChat();
   };
   recognition.start();
   state.listening = true;
@@ -1880,7 +1894,7 @@ function renderChatControls() {
 const syncComposer = () => $('composer')?.classList.toggle('typing', !!state.chat.trim());
 
 function chatPrompt() {
-  if (!state.apiKey) return t('AI 尚未啟用', 'AI is disabled');
+  if (!state.aiConfig) return t('AI 尚未啟用', 'AI is disabled');
   if (state.listening) return t('正在聆聽…', 'Listening…');
   if (state.discovery?.stage === 'asking') return t('輸入你的回答…', 'Type your answer…');
   return t('問 AI，例如：去吃茶餐廳', 'Ask AI, e.g. Find a cha chaan teng');
@@ -1921,7 +1935,7 @@ function chatContext() {
 }
 
 function askAI(text) {
-  if (!state.apiKey) return;
+  if (!state.aiConfig) return;
   const { stage, wish, suggestions } = state.discovery ?? state.lastSearch ?? {}, context = chatContext(), current = currentTrip();
   const discovery = state.discovery;
   remember('Rider', text);
@@ -1936,7 +1950,7 @@ function askAI(text) {
 
 function sendChat() {
   const text = state.chat.trim();
-  if (!state.apiKey || !text || !state.db) return;
+  if (!state.aiConfig || !text || !state.db) return;
   history.add('chat', text);
   state.chat = '';
   const input = $('chat-input');
@@ -2725,7 +2739,7 @@ function explorePreviewStatus(view, item) {
 
 function exploreAISection(view) {
   const ai = view.ai;
-  const disabled = !state.apiKey;
+  const disabled = !state.aiConfig;
   const cards = ai?.suggestions.map((item) => {
     const query = [item.name, item.address, 'Hong Kong'].filter(Boolean).join(' ');
     const maps = new URLSearchParams({ api: '1', query });
@@ -2853,7 +2867,7 @@ function homeSheet() {
       list,
     ] : [
       h('div', { class: 'section' }, t('試試問 AI', 'Try asking AI')),
-      h('div', { class: 'examples' }, examples.map((text) => h('button', { disabled: !state.apiKey,
+      h('div', { class: 'examples' }, examples.map((text) => h('button', { disabled: !state.aiConfig,
         onclick: () => { state.chat = text; sendChat(); } }, text))),
     ],
   ];
@@ -2961,7 +2975,7 @@ function renderBottomStatus() {
 const speechLabels = () => ({ 'zh-HK': t('粵語', 'Cantonese'), 'zh-CN': t('普通話', 'Mandarin'), 'en-US': 'English' });
 
 function renderPlanBottom() {
-  const disabled = !state.apiKey;
+  const disabled = !state.aiConfig;
   clear($('bottom'),
     h('div', { id: 'ai-status' }),
     h('div', { id: 'chat-history' }),
@@ -3358,42 +3372,100 @@ function clearButton(label, count, clearAll) {
 }
 
 function aiSettings() {
-  const key = h('input', {
-    id: 'deepseek-key', type: 'password', required: true, maxlength: 256, placeholder: 'sk-…',
-    autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false',
+  const current = state.aiConfig;
+  const pick = (id, options, value) => {
+    const select = h('select', { id }, options.map(([value, label]) => h('option', { value }, label)));
+    select.value = value;
+    return select;
+  };
+  const field = (label, control) => h('label', { class: 'setting ai-api-field' }, label, control);
+  const text = (id, props = {}) => h('input', {
+    id, autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', ...props,
   });
+
+  const provider = pick('ai-provider', Object.entries(AI_PROVIDERS).map(([id, preset]) =>
+    [id, preset.name ?? t('自訂平台', 'Custom provider')]), current?.provider ?? 'openai');
+  const model = text('ai-model', { required: true, maxlength: 160, value: current?.model ?? AI_PROVIDERS[provider.value].model });
+  const protocol = pick('ai-protocol', [['chat', 'OpenAI Chat Completions'], ['responses', 'OpenAI Responses'],
+    ['messages', 'Anthropic Messages']], current?.protocol ?? 'chat');
+  const base = text('ai-base-url', { type: 'url', maxlength: 500, value: current?.baseUrl, placeholder: 'https://api.example.com/v1' });
+  const custom = h('div', { class: 'ai-api-custom' },
+    field(t('接口格式', 'API format'), protocol), field(t('API 基礎地址', 'API base URL'), base),
+    h('div', { class: 'tiny muted' }, t('使用公開 HTTPS 地址。驗證會傳送一個簡短請求，平台可能收費。', 'Use a public HTTPS endpoint. Verification sends a short request that may incur a charge.')));
+  const key = text('ai-api-key', { type: 'password', maxlength: 2048 });
+  const currency = pick('ai-currency', ['USD', 'CNY', 'HKD'].map((code) => [code, code]), current?.rates?.[0] ?? 'USD');
+  const price = (id, value) => text(id, { type: 'number', min: 0, max: 1_000_000, step: 'any', inputmode: 'decimal', value });
+  const input = price('ai-input-rate', current?.rates?.[1]);
+  const output = price('ai-output-rate', current?.rates?.[2]);
+  const rates = h('details', { class: 'about' },
+    h('summary', {}, t('模型費率（可選）', 'Model rates (optional)')),
+    h('div', { class: 'ai-api-custom' }, field(t('貨幣', 'Currency'), currency),
+      field(t('每百萬輸入 tokens', 'Per million input tokens'), input),
+      field(t('每百萬輸出 tokens', 'Per million output tokens'), output),
+      h('div', { class: 'tiny muted' }, t('平台未提供金額時，使用已知或填寫的模型費率估算。', 'When no charge is reported, estimates use known model rates or the rates entered here.'))));
+  const canReuseKey = () => current && provider.value === current.provider && (provider.value !== 'custom'
+    || (base.value.trim() === current.baseUrl && protocol.value === current.protocol));
+  function refreshFields() {
+    custom.hidden = provider.value !== 'custom';
+    base.disabled = protocol.disabled = custom.hidden;
+    base.required = !custom.hidden;
+    key.required = !canReuseKey();
+    key.placeholder = canReuseKey() ? t('已儲存，可輸入新 Key', 'Saved. Enter a new key to replace it') : t('輸入平台的 API Key', 'Enter your provider’s API key');
+    const preset = AI_PROVIDERS[provider.value];
+    const listedRates = preset.model === model.value.trim() ? preset.rates : null;
+    input.placeholder = listedRates ? `${listedRates[0]} ${listedRates[1]}` : '';
+    output.placeholder = listedRates ? `${listedRates[0]} ${listedRates[2]}` : '';
+  }
+  provider.addEventListener('change', () => {
+    model.value = AI_PROVIDERS[provider.value].model ?? '';
+    key.value = input.value = output.value = '';
+    refreshFields();
+  });
+  protocol.addEventListener('change', refreshFields);
+  [model, base].forEach((control) => control.addEventListener('input', refreshFields));
+  refreshFields();
+
   const status = h('div', { class: 'tiny muted', role: 'status' }, state.aiKeyRejected && aiErrorMessage(401));
   const save = h('button', { class: 'link', type: 'submit' }, t('驗證並儲存', 'Verify and save'));
   const form = h('form', { class: 'setting', onsubmit: async (event) => {
     event.preventDefault();
-    const value = key.value.trim();
-    if (!value || save.disabled) return;
-    key.disabled = save.disabled = true;
-    status.textContent = t('正在驗證 API Key…', 'Verifying API key…');
+    if (save.disabled) return;
+    const config = { provider: provider.value, model: model.value.trim(), key: key.value.trim() || (canReuseKey() ? current.key : '') };
+    if (!config.key || !config.model) return;
+    if (config.provider === 'custom') Object.assign(config, { baseUrl: base.value.trim().replace(/\/+$/, ''), protocol: protocol.value });
+    if (input.value || output.value) {
+      if (!Number.isFinite(input.valueAsNumber) || !Number.isFinite(output.valueAsNumber)) {
+        rates.open = true;
+        status.textContent = t('請同時填寫輸入及輸出費率。', 'Enter both the input and output rates.');
+        return;
+      }
+      config.rates = [currency.value, input.valueAsNumber, output.valueAsNumber];
+    }
+    save.disabled = true;
+    status.textContent = t('正在驗證 API 設定…', 'Verifying API settings…');
     try {
-      await verifyAIKey(value);
+      await verifyAIKey(config, recordAICost);
       if (!form.isConnected) return;
       key.value = '';
-      status.textContent = '';
-      setAIKey(value);
+      status.textContent = t('已儲存。', 'Saved.');
+      setAIConfig(config);
     } catch (error) {
       status.textContent = aiErrorMessage(error.status);
     } finally {
-      key.disabled = save.disabled = false;
+      save.disabled = false;
     }
-  } },
-  h('label', { for: key.id }, 'DeepSeek API Key'),
-  h('div', { class: 'row ai-key-row' }, h('div', { class: 'field plain grow' }, key), save),
-  status);
+  } }, field(t('平台', 'Provider'), provider), field(t('模型', 'Model'), model), custom,
+  field('API Key', key), rates, h('div', {}, save), status);
+  const active = current && (AI_PROVIDERS[current.provider]?.name ?? t('自訂平台', 'Custom provider'));
   return settingGroup('AI API',
     h('div', { class: 'setting inline' }, h('span', {}, t('狀態', 'Status')),
-      h('span', { class: state.apiKey ? 'ok' : 'muted' }, state.apiKey ? t('已啟用', 'Enabled') : t('未啟用', 'Disabled'))),
+      h('span', { class: current ? 'ok' : 'muted' }, current ? active : t('未啟用', 'Disabled'))),
     form,
-    state.apiKey && h('button', { class: 'link', onclick: () => setAIKey('') }, t('移除 API Key', 'Remove API key')),
-    h('div', { class: 'setting inline' }, h('span', {}, t('今日 AI 費用（估算）', 'Today’s AI cost (estimate)')),
+    current && h('button', { class: 'link', onclick: () => setAIConfig(null) }, t('移除 API Key', 'Remove API key')),
+    h('div', { class: 'setting inline ai-cost-row' }, h('span', {}, t('今日 AI 費用', 'Today’s AI cost')),
       h('strong', { id: 'ai-cost' }, aiCostText())),
-    h('div', { class: 'tiny muted' }, t('按香港時間統計此瀏覽器在本站的用量，以 DeepSeek 高峰費率估算。', 'Estimates use DeepSeek peak rates for this browser’s usage on this site, by Hong Kong date.')),
-    h('div', { class: 'tiny muted' }, t('API Key 儲存在此瀏覽器，使用時經本站轉送至 DeepSeek。', 'Your browser stores the API key, and this site forwards it to DeepSeek when needed.')));
+    h('div', { class: 'tiny muted' }, t('按香港時間統計此瀏覽器在本站的用量，金額可能為估算。', 'Totals cover this browser’s usage on this site by Hong Kong date. Amounts may be estimates.')),
+    h('div', { class: 'tiny muted' }, t('API Key 儲存在此瀏覽器，使用時經本站轉送至你選擇的平台。', 'Your browser stores the API key, and this site forwards it to your chosen provider when needed.')));
 }
 
 function settingsSheet() {
@@ -3442,10 +3514,10 @@ function settingsSheet() {
     settingGroup(t('關於', 'About'),
       aboutItem(t('安裝到手機', 'Install on your phone'), t('iPhone：在 Safari 按分享，再選「加入主畫面」。Android：在 Chrome 選單按「安裝應用程式」。', 'iPhone: in Safari, tap Share, then Add to Home Screen. Android: in the Chrome menu, tap Install app.')),
       aboutItem(t('私隱', 'Privacy'), t(
-        '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會經本站伺服器傳送給 Google，或在額度用完時傳送給 OpenStreetMap 的 Photon 服務，用來搜尋你身邊 5 公里內的地點。AI 請求及店舖搜尋經本站伺服器轉送給 DeepSeek 及 Google，伺服器不會保存內容。傳送給 DeepSeek 的只有你輸入的文字、地區、站名、路線號碼及店舖資料，不包括座標。規劃公共交通路線時，起終點座標及所選時間會經本站伺服器傳送給 Transitous 或 Google。Google 亦會收到步行路段兩端的座標。Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
-        'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go through this site\'s server to Google, or to OpenStreetMap\'s Photon service once the allowance is used up, to search within 5 km of you. AI requests and shop searches pass through this site\'s server to DeepSeek and Google, and the server keeps none of it. DeepSeek only receives your text, the district, stop names, route numbers and shop details, never coordinates. For public transport directions, the start and end coordinates and selected time go through this site\'s server to Transitous or Google. Google also receives the two ends of walking segments. Google Maps loads straight into your browser under Google\'s privacy policy.')),
+        '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會經本站伺服器傳送給 Google，或在額度用完時傳送給 OpenStreetMap 的 Photon 服務，用來搜尋你身邊 5 公里內的地點。AI 請求由本站伺服器轉送至你設定的 AI 平台，店舖搜尋會轉送至 Google。本站伺服器不會保存 API Key 或請求內容。規劃公共交通路線時，起終點座標及所選時間會經本站伺服器傳送給 Transitous 或 Google。Google 亦會收到步行路段兩端的座標。Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
+        'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go through this site\'s server to Google, or to OpenStreetMap\'s Photon service once the allowance is used up, to search within 5 km of you. This site forwards AI requests to the provider you configure and shop searches to Google. The server does not store your AI key or request content. For public transport directions, the start and end coordinates and selected time go through this site\'s server to Transitous or Google. Google also receives the two ends of walking segments. Google Maps loads straight into your browser under Google\'s privacy policy.')),
       aboutItem(t('資料來源', 'Data sources'), t('路線資料來自 hkbus.app；到站時間來自各營辦商；公共交通路線由 Transitous、Google 地圖或內置演算法規劃；地圖、地點、步行路線及店舖來自 Google，額度用完後改用 OpenFreeMap、OpenStreetMap 及政府地理資訊。', 'Route data from hkbus.app; arrivals from the operators; public transport routes from Transitous, Google Maps or the built-in planner; maps, places, walking routes and shops from Google, and after the allowance, OpenFreeMap, OpenStreetMap and Government GIS.')),
-      aboutItem(t('探索目的地附近', 'Explore nearby'), t('開啟探索後，目的地座標會用於 Google 地圖或 OpenStreetMap 的 Photon 地點搜尋，目的地名稱會用於維基導遊或 Brave Search 的網頁搜尋。點選 AI 建議時，目的地名稱及所選類別會交給 DeepSeek 搜尋。', 'Opening Explore uses the destination coordinates to find places through Google Maps or OpenStreetMap Photon. It uses the destination name to search Wikivoyage or Brave Search for web sources. AI suggestions send the destination name and selected category to DeepSeek for web search.')),
+      aboutItem(t('探索目的地附近', 'Explore nearby'), t('開啟探索後，目的地座標會用於 Google 地圖或 OpenStreetMap 的 Photon 地點搜尋，目的地名稱會用於維基導遊或 Brave Search 的網頁搜尋。點選 AI 建議時，本站使用網頁搜尋結果及你選擇的模型整理建議。', 'Opening Explore uses the destination coordinates to find places through Google Maps or OpenStreetMap Photon. It uses the destination name to search Wikivoyage or Brave Search for web sources. AI suggestions combine web search results with the model you select.')),
       h('a', { class: 'small link', href: 'https://data.gov.hk/en-data/dataset/mtr-data-routes-fares-barrier-free-facilities', target: '_blank', rel: 'noopener' },
         t('八達通鐵路車費 © 港鐵公司（資料來自 DATA.GOV.HK）', 'Octopus rail fares © MTR Corporation Limited via DATA.GOV.HK')),
       h('a', { class: 'small link', href: 'https://www.google.com/help/terms_maps/', target: '_blank', rel: 'noopener' }, t('Google 地圖使用條款', 'Google Maps Terms of Service')),
@@ -3739,7 +3811,7 @@ locateOnOpen();
 checkServer();
 loadDB();
 window.addEventListener('storage', (event) => {
-  if (event.key === 'hkt.deepseekKey' || event.key === null) setAIKey(store.get('deepseekKey', ''));
+  if (event.key === 'hkt.aiConfig' || event.key === null) setAIConfig(savedAIConfig());
   if (event.key === 'hkt.aiUsage' || event.key === null) {
     aiUsage = store.get('aiUsage', null);
     renderAICost();

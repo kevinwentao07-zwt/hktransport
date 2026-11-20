@@ -48,7 +48,7 @@ It **reads sentences** and **keeps the conversation**, then passes the two place
 | What about the second? | Changes to the second shop |
 | Start from Tsim Sha Tsui | Changes only the start |
 
-Type or speak after verifying and saving your DeepSeek API key in Settings → AI API. The same key enables AI suggestions for nearby places.
+Choose a provider and model, then verify and save your own API key in Settings → AI API. The same configuration enables the chat assistant and AI suggestions for nearby places.
 
 ### Also
 
@@ -65,12 +65,12 @@ Type or speak after verifying and saving your DeepSeek API key in Settings → A
 | Places and walks | Google's place search and walking routes, then Government GIS, OpenStreetMap and straight-line estimates after the allowance |
 | Arrivals | Straight from the browser to KMB/LWB, Citybus, NLB, green minibuses, MTR and Light Rail |
 | Map | Google Maps, moving to OpenFreeMap once the allowance runs out |
-| AI | DeepSeek, through [`server/ai_proxy.py`](server/ai_proxy.py) |
+| AI | OpenAI, Claude, Gemini, DeepSeek, OpenRouter, and custom OpenAI Chat Completions, OpenAI Responses or Anthropic Messages endpoints through [`server/ai_proxy.py`](server/ai_proxy.py) |
 | Server | Python's standard library behind Caddy |
 
 ### Security and cost
 
-- Your browser stores your DeepSeek API key. The server forwards it to DeepSeek with each request. Server-side Google keys stay on the server.
+- Your browser stores your AI API key. The server forwards it to your chosen provider with each request. Server-side Google keys stay on the server.
 - The map key has to reach the browser, so it is limited by domain and API.
 - The AI endpoint accepts only the app's own tasks and returns only short JSON, so it can't serve as a free chatbot.
 - Settings → AI API shows the estimated daily cost of this browser’s usage on this site. Google use stays inside the free allowance, and the site falls back to free services at the limit.

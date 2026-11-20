@@ -3,7 +3,7 @@
 The web app: a static page, live at <https://hk.52-220-124-215.sslip.io/>.
 
 Route data comes from hkbus.app and arrivals come straight from the operators. The site's server
-handles Transitous, Google and DeepSeek requests. The planner compares the results of Transitous,
+handles Transitous, Google and AI provider requests. The planner compares the results of Transitous,
 RAPTOR and Google (when Google Maps is active) for the same search. The app defaults to less walking and only shows walks over 10
 minutes on request. On a static host such as GitHub Pages, the built-in planner and free map are
 available without the server.
@@ -14,7 +14,7 @@ available without the server.
 | `js/google-transit.js`, `js/transitous.js` | Direction requests and journey conversion by provider |
 | `js/transit-provider.js` | Shared scheduled journeys and stop matching for operator ETAs |
 | `js/eta.js` | Per-operator arrival fetchers and parsers |
-| `js/ai.js` | DeepSeek client, prompts and rule parser |
+| `js/ai.js` | AI provider client, prompts and rule parser |
 | `js/places.js` | Place search and walking routes: Google through the server, then the free sources |
 | `js/hans.js` | Traditional to Simplified Chinese |
 | `js/planner.worker.js` | Runs the route search off the main thread |
@@ -27,7 +27,8 @@ python3 -m http.server 8642 --directory web
 ```
 
 To publish to your own server, put `DEPLOY_HOST`, `DEPLOY_KEY` and `DEPLOY_DOMAIN` in `.env.deploy`
-(ignored by git) and run `Deploy web.command`. Users enter their own DeepSeek key in Settings → AI API.
+(ignored by git) and run `Deploy web.command`. Users select a provider and enter their own key in Settings → AI API.
+Custom providers require a public HTTPS endpoint on port 443 and an OpenAI Chat Completions, OpenAI Responses or Anthropic Messages API.
 Run `Set routes key.command` for walking and transit routes, and `Set Google keys.command` to add
 Google's map and place keys. The server caps usage at 5,000 walking requests and 4,000 transit
 requests per month. Google transit runs with Google Maps active. Browsers can see the map key, so

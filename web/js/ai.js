@@ -243,35 +243,59 @@ export function decodePlans(reply) {
     .slice(0, MOST_PLANS);
 }
 
-async function requestAI(path, key, body, timeout, onCost, onUnauthorized) {
+export const AI_PROVIDERS = {
+  openai: { name: 'OpenAI', model: 'gpt-5.4-mini', rates: ['USD', 0.75, 4.5, 0.075] },
+  anthropic: { name: 'Claude (Anthropic)', model: 'claude-haiku-4-5-20251001', rates: ['USD', 1, 5, 0.1] },
+  gemini: { name: 'Google Gemini', model: 'gemini-4-hydrogen', rates: ['USD', 1.5, 7.5, 0.075] },
+  deepseek: { name: 'DeepSeek', model: 'deepseek-flash' },
+  openrouter: { name: 'OpenRouter', model: 'openrouter/auto' },
+  custom: {},
+};
+
+export function aiCharge(config, usage) {
+  const { amount, currency, input, output, cached } = usage;
+  if (Number.isFinite(amount) && amount >= 0 && ['USD', 'CNY', 'HKD'].includes(currency)) return { amount, currency };
+  const preset = AI_PROVIDERS[config.provider];
+  const rates = config.rates ?? (preset?.model === config.model ? preset.rates : null);
+  if (rates && Number.isFinite(input) && Number.isFinite(output)) {
+    const [currency, inputRate, outputRate, cachedRate = inputRate] = rates;
+    const hits = Number.isFinite(cached) ? Math.min(input, cached) : 0;
+    return { currency, amount: ((input - hits) * inputRate + hits * cachedRate + output * outputRate) / 1_000_000 };
+  }
+  return null;
+}
+
+async function requestAI(path, config, body, timeout, onUsage, onUnauthorized) {
+  const { key, provider, model, baseUrl, protocol } = config;
   const response = await fetch(path, {
     method: 'POST', redirect: 'error',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, ai: { provider, model, baseUrl, protocol } }),
     signal: AbortSignal.timeout(timeout),
   });
   const json = await response.json().catch(() => null);
-  if (Number.isFinite(json?.costCny) && json.costCny > 0) onCost?.(json.costCny);
+  if (json?.usage) onUsage?.(aiCharge(config, json.usage));
+  if (Number.isFinite(json?.costCny)) onUsage?.({ amount: json.costCny, currency: 'CNY' });
   if (response.status === 401) onUnauthorized?.();
-  if (!response.ok || !json) throw Object.assign(new Error('DeepSeek request failed'), { status: response.status });
+  if (!response.ok || !json) throw Object.assign(new Error('AI request failed'), { status: response.status });
   return json;
 }
 
-export async function verifyAIKey(key) {
-  const response = await requestAI('api/ai', key, { task: 'verify' }, 12_000);
-  if (response.verified !== true) throw new Error('DeepSeek key could not be verified');
+export async function verifyAIKey(config, onUsage) {
+  const response = await requestAI('api/ai', config, { task: 'verify' }, 40_000, onUsage);
+  if (response.verified !== true) throw new Error('AI configuration could not be verified');
 }
 
-export function personalAI(key, onCost, onUnauthorized) {
+export function personalAI(config, onUsage, onUnauthorized) {
   const complete = async (task, message, timeout = 60_000) => {
-    const json = await requestAI('api/ai', key, { task, message }, timeout, onCost, onUnauthorized);
+    const json = await requestAI('api/ai', config, { task, message }, timeout, onUsage, onUnauthorized);
     return json.reply;
   };
   return {
     ...assistant(complete),
     explore(destination, category, locale) {
-      return requestAI('api/explore/ai', key, { area: destination.name.slice(0, 100), category, locale },
-        60_000, onCost, onUnauthorized);
+      return requestAI('api/explore/ai', config, { area: destination.name.slice(0, 100), category, locale },
+        60_000, onUsage, onUnauthorized);
     },
   };
 }
@@ -280,18 +304,18 @@ function assistant(complete) {
   return {
     async intent(message) {
       const intent = decodeIntent(await complete('intent', message));
-      if (!intent) throw new Error('DeepSeek reply was not valid trip JSON');
+      if (!intent) throw new Error('AI reply was not valid trip JSON');
       return intent;
     },
     async chat(message) {
       const reply = decodeChat(await complete('chat', message));
-      if (!reply) throw new Error('DeepSeek reply was not valid trip JSON');
+      if (!reply) throw new Error('AI reply was not valid trip JSON');
       return reply;
     },
     /** Plans for a trip. A rider is waiting on the map, so this gives up sooner than a chat. */
     async route(message) {
       const plans = decodePlans(await complete('route', message, 20_000));
-      if (!plans) throw new Error('DeepSeek reply was not valid plan JSON');
+      if (!plans) throw new Error('AI reply was not valid plan JSON');
       return plans;
     },
   };

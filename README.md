@@ -48,7 +48,7 @@
 | 第二間呢 | 改去第二間 |
 | 由尖沙咀出發 | 只改起點，目的地不變 |
 
-支援打字及語音輸入。在「設定 → AI API」驗證並儲存自己的 DeepSeek API Key，即可使用 AI 助手和附近地點的 AI 建議。
+支援打字及語音輸入。在「設定 → AI API」選擇平台及模型，驗證並儲存自己的 API Key，即可使用 AI 助手和附近地點的 AI 建議。
 
 ### 其他
 
@@ -65,12 +65,12 @@
 | 地點及步行 | Google 地點搜尋及步行路線；額度用完後改用政府地理資訊、OpenStreetMap 及直線估算 |
 | 到站資料 | 由瀏覽器直接查詢九巴／龍運、城巴、嶼巴、綠色專線小巴、港鐵及輕鐵 |
 | 地圖 | Google 地圖；額度用完後自動改用 OpenFreeMap |
-| AI | DeepSeek，經 [`server/ai_proxy.py`](server/ai_proxy.py) 呼叫 |
+| AI | OpenAI、Claude、Gemini、DeepSeek、OpenRouter，以及支援 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages 的自訂平台，經 [`server/ai_proxy.py`](server/ai_proxy.py) 呼叫 |
 | 伺服器 | Python 標準庫，前面是 Caddy |
 
 ### 安全與費用
 
-- DeepSeek API Key 儲存在使用者的瀏覽器，每次請求由伺服器轉送至 DeepSeek。Google 後端密鑰保存在伺服器。
+- AI API Key 儲存在使用者的瀏覽器，每次請求由伺服器轉送至所選 AI 平台。Google 後端密鑰保存在伺服器。
 - 地圖密鑰必須給瀏覽器使用，已限制網域及 API。
 - AI 接口只接受應用自己的任務，只傳回簡短 JSON，不能當作免費聊天機器人。
 - 「設定 → AI API」顯示此瀏覽器當天在本站的 AI 費用估算。Google 用量到達免費額度後自動退回免費方案。

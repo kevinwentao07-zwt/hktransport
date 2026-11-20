@@ -432,29 +432,35 @@ test('personal AI verifies the key and counts usage from chat and exploration', 
   const sent = [], costs = [];
   let unauthorized = 0;
   const key = 'sk-test-visitor';
-  const assistant = A.personalAI(key, (cost) => costs.push(cost), () => unauthorized++);
+  const ai = { provider: 'openrouter', model: 'openrouter/auto' };
+  const config = { ...ai, key };
+  const assistant = A.personalAI(config, (cost) => costs.push(cost), () => unauthorized++);
   const reply = (status, body) => ({ ok: status < 400, status, json: async () => body });
   context.mock.method(globalThis, 'fetch', async (url, options) => {
     sent.push({ url, headers: options.headers, body: JSON.parse(options.body) });
     if (sent.length === 1) return reply(200, { verified: true });
-    if (sent.length === 2) return reply(200, { reply: '{"destination":"中環"}', costCny: 0.015 });
-    if (sent.length === 3) return reply(200, { suggestions: [], costCny: 0.025 });
-    if (sent.length === 4) return reply(502, { error: 'Failed', costCny: 0.005 });
+    if (sent.length === 2) return reply(200, { reply: '{"destination":"中環"}', usage: { currency: 'USD', amount: 0.015 } });
+    if (sent.length === 3) return reply(200, { suggestions: [], usage: { currency: 'USD', amount: 0.025 } });
+    if (sent.length === 4) return reply(502, { error: 'Failed', usage: { input: 100, output: 20 } });
     return reply(401, { error: 'Rejected' });
   });
-  await A.verifyAIKey(key);
+  await A.verifyAIKey(config);
   await assistant.chat('去中環');
   await assistant.explore({ name: '中環' }, 'food', 'zh-Hant');
   await assert.rejects(assistant.chat('去中環'), { status: 502 });
   await assert.rejects(assistant.chat('去中環'), { status: 401 });
   assert.deepEqual(sent.slice(0, 3).map(({ url, body }) => ({ url, body })), [
-    { url: 'api/ai', body: { task: 'verify' } },
-    { url: 'api/ai', body: { task: 'chat', message: '去中環' } },
-    { url: 'api/explore/ai', body: { area: '中環', category: 'food', locale: 'zh-Hant' } },
+    { url: 'api/ai', body: { task: 'verify', ai } },
+    { url: 'api/ai', body: { task: 'chat', message: '去中環', ai } },
+    { url: 'api/explore/ai', body: { area: '中環', category: 'food', locale: 'zh-Hant', ai } },
   ]);
   assert.ok(sent.every(({ headers }) => headers.Authorization === `Bearer ${key}`));
-  assert.deepEqual(costs, [0.015, 0.025, 0.005]);
+  assert.deepEqual(costs, [{ amount: 0.015, currency: 'USD' }, { amount: 0.025, currency: 'USD' }, null]);
   assert.equal(unauthorized, 1);
+  assert.deepEqual(A.aiCharge({ provider: 'openai', model: 'gpt-5.4-mini' }, { input: 1000, cached: 1000, output: 0 }),
+    { amount: 0.000075, currency: 'USD' });
+  assert.deepEqual(A.aiCharge({ provider: 'custom', rates: ['HKD', 1, 2] }, { input: 2000, cached: 1000, output: 3000 }),
+    { amount: 0.008, currency: 'HKD' });
 });
 
 test('arriving by a time leaves early enough for the longest wait', () => {
@@ -601,11 +607,12 @@ test('the AI\'s plans are read as lines only', async () => {
   assert.equal(A.decodePlans('I would take the MTR.'), null);
   assert.equal(A.decodePlans('{"destination":"中環"}'), null);
   const sent = [];
+  const ai = { provider: 'deepseek', model: 'deepseek-flash' }, config = { ...ai, key: 'sk-test-visitor' };
   globalThis.fetch = async (url, options) => { sent.push(JSON.parse(options.body)); return { ok: true, status: 200, json: async () => ({ reply: '{"plans":[{"legs":[{"mode":"bus","route":"1"}]}]}' }) }; };
-  assert.deepEqual(await A.personalAI('sk-test-visitor').route('Start: 甲'), [[{ mode: 'bus', route: '1' }]]);
-  assert.deepEqual(sent, [{ task: 'route', message: 'Start: 甲' }]);
+  assert.deepEqual(await A.personalAI(config).route('Start: 甲'), [[{ mode: 'bus', route: '1' }]]);
+  assert.deepEqual(sent, [{ task: 'route', message: 'Start: 甲', ai }]);
   globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ reply: '{"kind":"say","text":"hi"}' }) });
-  await assert.rejects(A.personalAI('sk-test-visitor').route('Start: 甲'));
+  await assert.rejects(A.personalAI(config).route('Start: 甲'));
 });
 
 test('walks take Google\'s distance and time where it has them, and the rest keep the estimate', async () => {

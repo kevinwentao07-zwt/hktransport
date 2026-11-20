@@ -202,6 +202,64 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(request.get_header('Authorization'), f'Bearer {SECRET}')
         self.assertEqual(self.calls, [])
 
+    def test_provider_chat_and_claude_use_the_selected_model_and_key(self):
+        replies = [
+            {'choices': [{'message': {'content': ANSWER}}], 'usage': {'prompt_tokens': 50, 'completion_tokens': 5}},
+            {'content': [{'type': 'text', 'text': ANSWER}], 'usage': {'input_tokens': 55, 'output_tokens': 8, 'cache_read_input_tokens': 20}},
+        ]
+        with patch.object(ai_proxy, 'provider_request', side_effect=replies) as upstream:
+            for provider, model in [('openai', 'gpt-5.4-mini'), ('anthropic', 'claude-haiku-4-5-20251001')]:
+                status, text = self.post({'task': 'chat', 'message': '去中環', 'ai': {'provider': provider, 'model': model}})
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(text)['reply'], ANSWER)
+                service, key, endpoint, payload = upstream.call_args.args
+                self.assertEqual((service[:2], key, payload['model']), ((provider, model), SECRET, model))
+                self.assertEqual(endpoint, 'messages' if provider == 'anthropic' else 'chat/completions')
+        self.assertEqual(json.loads(text)['usage'], {'input': 75, 'output': 8, 'cached': 20})
+
+    def test_custom_endpoint_blocks_private_addresses_and_untrusted_url_parts(self):
+        config = {'task': 'verify', 'ai': {'provider': 'custom', 'model': 'test', 'protocol': 'chat'}}
+        for url in ('https://127.0.0.1/v1', 'https://example.test:444/v1', 'https://user@example.test/v1',
+                    'http://example.test/v1', 'https://example.test/v1?secret=yes'):
+            self.assertEqual(self.post({**config, 'ai': {**config['ai'], 'baseUrl': url}})[0], 400)
+        with patch.object(ai_proxy, 'provider_request', return_value={
+            'choices': [{'message': {'content': 'OK'}}], 'usage': {'prompt_tokens': 10, 'completion_tokens': 1},
+        }) as upstream:
+            status, text = self.post({**config, 'ai': {**config['ai'], 'baseUrl': 'https://example.test/v1/chat/completions'}})
+            self.assertEqual(status, 200)
+            self.assertTrue(json.loads(text)['verified'])
+            self.assertEqual(upstream.call_args.args[:3], (('custom', 'test', 'https://example.test/v1', 'chat'), SECRET, 'chat/completions'))
+
+    def test_generic_explore_keeps_only_search_citations_and_provider_cost(self):
+        source = 'https://example.org/hong-kong'
+        evidence = [{'url': source, 'title': 'Guide', 'snippet': 'Try Test Café.'}]
+        rows = [{'name': 'Test Café', 'reason': 'Coffee', 'source_url': source},
+                {'name': 'Fake', 'reason': 'Coffee', 'source_url': 'https://example.net/unsupported'}]
+        config = {'area': '中環', 'category': 'food', 'locale': 'en', 'ai': {'provider': 'openrouter', 'model': 'openrouter/auto'}}
+        with patch.object(ai_proxy, 'explore_web', return_value=evidence), patch.object(ai_proxy, 'provider_request', return_value={
+            'choices': [{'message': {'content': '\n'.join(map(json.dumps, rows))}}],
+            'usage': {'prompt_tokens': 35, 'completion_tokens': 20, 'cost': 0.011},
+        }) as upstream:
+            status, text = self.post(config, path='/api/explore/ai')
+            self.assertEqual(status, 200)
+            reply = json.loads(text)
+            self.assertEqual([item['name'] for item in reply['suggestions']], ['Test Café'])
+            self.assertEqual(reply['usage']['amount'], 0.011)
+            self.assertEqual(json.loads(upstream.call_args.args[3]['messages'][1]['content'])['web_search_evidence'], evidence)
+
+    def test_responses_endpoint_reads_text_and_cached_tokens(self):
+        config = {'task': 'chat', 'message': '去中環', 'ai': {'provider': 'custom', 'model': 'test',
+                  'baseUrl': 'https://example.test/v1', 'protocol': 'responses'}}
+        with patch.object(ai_proxy, 'provider_request', return_value={
+            'output': [{'type': 'reasoning'}, {'type': 'message', 'content': [{'type': 'output_text', 'text': ANSWER}]}],
+            'usage': {'input_tokens': 10, 'output_tokens': 5, 'input_tokens_details': {'cached_tokens': 3}},
+        }) as upstream:
+            status, text = self.post(config)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(text), {'reply': ANSWER, 'usage': {'input': 10, 'output': 5, 'cached': 3}})
+        self.assertEqual(upstream.call_args.args[2], 'responses')
+        self.assertFalse(upstream.call_args.args[3]['store'])
+
     def get_status(self, fetch_site='same-origin', visitor='1.1.1.1'):
         connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port)
         connection.request('GET', '/api/ai', headers={'Sec-Fetch-Site': fetch_site, 'X-Forwarded-For': visitor})
