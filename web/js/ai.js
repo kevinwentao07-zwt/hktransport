@@ -243,19 +243,37 @@ export function decodePlans(reply) {
     .slice(0, MOST_PLANS);
 }
 
-/** The AI this site's server provides, which holds the key. */
-export function sharedAI() {
-  return assistant(async (task, message, patience = 60_000) => {
-    const response = await fetch('api/ai', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task, message }),
-      signal: AbortSignal.timeout(patience),
-    });
-    const json = await response.json().catch(() => null);
-    if (!response.ok || !json?.reply) throw new Error(json?.error ?? `HTTP ${response.status}`);
-    return json.reply;
+async function requestAI(path, key, body, timeout, onCost, onUnauthorized) {
+  const response = await fetch(path, {
+    method: 'POST', redirect: 'error',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeout),
   });
+  const json = await response.json().catch(() => null);
+  if (Number.isFinite(json?.costCny) && json.costCny > 0) onCost?.(json.costCny);
+  if (response.status === 401) onUnauthorized?.();
+  if (!response.ok || !json) throw Object.assign(new Error('DeepSeek request failed'), { status: response.status });
+  return json;
+}
+
+export async function verifyAIKey(key) {
+  const response = await requestAI('api/ai', key, { task: 'verify' }, 12_000);
+  if (response.verified !== true) throw new Error('DeepSeek key could not be verified');
+}
+
+export function personalAI(key, onCost, onUnauthorized) {
+  const complete = async (task, message, timeout = 60_000) => {
+    const json = await requestAI('api/ai', key, { task, message }, timeout, onCost, onUnauthorized);
+    return json.reply;
+  };
+  return {
+    ...assistant(complete),
+    explore(destination, category, locale) {
+      return requestAI('api/explore/ai', key, { area: destination.name.slice(0, 100), category, locale },
+        60_000, onCost, onUnauthorized);
+    },
+  };
 }
 
 function assistant(complete) {

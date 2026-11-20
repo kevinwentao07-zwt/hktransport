@@ -266,15 +266,6 @@ export async function exploreDestination(destination, category, radius, lang, si
   return { places: exploreResults(nearby, sources, center, radius), sources, provider: 'osm' };
 }
 
-export async function exploreAISuggestions(destination, category, locale, signal) {
-  const response = await fetch('api/explore/ai', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ area: destination.name.slice(0, 100), category, locale }),
-    signal: AbortSignal.any([signal, AbortSignal.timeout(55_000)]),
-  });
-  return response.ok ? response.json() : { status: response.status };
-}
-
 /** Two lists as one, best of each first, with each place once. */
 export function mergeShops(first, second, limit) {
   const seen = new Set(), merged = [];

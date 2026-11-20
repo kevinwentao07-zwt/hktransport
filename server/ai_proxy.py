@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Calls DeepSeek for the web app, so the API key never reaches a browser.
+"""Forwards the web app's AI tasks to DeepSeek with each visitor's own key.
 
-Visitors can only pick one of the app's own tasks and send their text. The prompts live
-here, so this can't be used as a free general-purpose chatbot, and limits cap the cost.
-Nothing a visitor sends is logged or kept.
+The proxy supplies the app prompts and returns estimated cost from the reported usage.
+Neither the key nor the visitor's messages are logged or stored by the proxy.
 
 It also holds Google use under the free allowance. Each map and place search is counted on
 disk, and at the limit the site quietly goes back to its free map and search.
@@ -32,37 +31,12 @@ _lookup = socket.getaddrinfo
 socket.getaddrinfo = lambda host, port, family=0, *rest, **options: _lookup(host, port, socket.AF_INET, *rest, **options)
 
 PORT = int(os.environ.get('AI_PORT', '8787'))
-MODEL = os.environ.get('AI_MODEL', 'deepseek-flash')
+MODEL = 'deepseek-flash'
 MAX_BODY = 32 * 1024
 MAX_MESSAGE = 4000
 MAX_TOKENS = 600
 MAX_ANSWER_TEXT = 200
 PROMPTS = json.loads((Path(__file__).parent / 'prompts.json').read_text('utf-8'))
-
-
-class Limiter:
-    """Per-visitor limits, plus a daily cap for the whole site."""
-
-    def __init__(self, per_minute, per_day, site_per_day, clock=time.time):
-        self.per_minute, self.per_day, self.site_per_day, self.clock = per_minute, per_day, site_per_day, clock
-        self.lock = threading.Lock()
-        self.day, self.total, self.recent, self.today = None, 0, {}, {}
-
-    def allow(self, visitor):
-        with self.lock:
-            now = self.clock()
-            day = int(now // 86400)
-            if day != self.day:
-                self.day, self.total, self.recent, self.today = day, 0, {}, {}
-            recent = [moment for moment in self.recent.get(visitor, []) if now - moment < 60]
-            self.recent[visitor] = recent
-            if (self.total >= self.site_per_day or len(recent) >= self.per_minute
-                    or self.today.get(visitor, 0) >= self.per_day):
-                return False
-            recent.append(now)
-            self.today[visitor] = self.today.get(visitor, 0) + 1
-            self.total += 1
-            return True
 
 
 class Budget:
@@ -107,83 +81,23 @@ class Budget:
             return True
 
 
-# deepseek-flash, in yuan per million tokens. Peak prices, so the real charge is never higher.
+# Peak CNY rates per million tokens: https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
 PRICE_CACHED, PRICE_INPUT, PRICE_OUTPUT = 0.04, 2, 8
-DAILY_YUAN_PER_VISITOR, DAILY_YUAN_SITE = 0.1, 1
 
 
 def cost_of(usage):
-    """What a reply cost in yuan, from the tokens DeepSeek says it used."""
+    """An estimate in yuan, using the peak rate before discounts or credits."""
     cached = usage.get('prompt_cache_hit_tokens', 0)
     fresh = usage.get('prompt_cache_miss_tokens', usage.get('prompt_tokens', 0) - cached)
     return (cached * PRICE_CACHED + fresh * PRICE_INPUT + usage.get('completion_tokens', 0) * PRICE_OUTPUT) / 1_000_000
 
-
-class Spending:
-    """A day's DeepSeek money, Beijing time, split evenly among whoever uses it.
-
-    The site's total is kept on disk so a restart can't reset it. What each visitor spent stays in
-    memory, as addresses are never stored. Unsure means no.
-    """
-
-    def __init__(self, path, per_visitor, site, clock=time.time):
-        self.path, self.per_visitor, self.site, self.clock = Path(path), per_visitor, site, clock
-        self.lock = threading.Lock()
-        self.spent, self.broken = {}, False
-        try:
-            saved = json.loads(self.path.read_text())
-            self.day, self.total = saved['day'], float(saved['total'])
-        except FileNotFoundError:
-            self.day, self.total = None, 0.0
-        except (OSError, ValueError, KeyError, TypeError):
-            self.day, self.total, self.broken = None, 0.0, True
-
-    def roll_over(self):
-        day = int((self.clock() + 8 * 3600) // 86400)
-        if day != self.day:
-            self.day, self.total, self.spent = day, 0.0, {}
-
-    def share(self, visitor):
-        """One visitor's part of the day: an even split, but never above the most anyone may use."""
-        return min(self.per_visitor, self.site / len({*self.spent, visitor}))
-
-    def allows(self, visitor):
-        with self.lock:
-            self.roll_over()
-            return not self.broken and self.total < self.site and self.spent.get(visitor, 0) < self.share(visitor)
-
-    def add(self, visitor, yuan):
-        with self.lock:
-            self.roll_over()
-            self.spent[visitor] = self.spent.get(visitor, 0) + yuan
-            self.total += yuan
-            try:
-                scratch = self.path.with_suffix('.tmp')
-                scratch.write_text(json.dumps({'day': self.day, 'total': self.total}))
-                os.replace(scratch, self.path)
-            except OSError:
-                self.broken = True
-
-
-limiter = Limiter(
-    per_minute=int(os.environ.get('AI_PER_MINUTE', '12')),
-    per_day=int(os.environ.get('AI_PER_DAY', '100')),
-    site_per_day=int(os.environ.get('AI_SITE_PER_DAY', '2000')),
-)
-in_flight = threading.BoundedSemaphore(int(os.environ.get('AI_CONCURRENT', '16')))
-
-
-spending = Spending(
-    Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'spending.json',
-    DAILY_YUAN_PER_VISITOR, DAILY_YUAN_SITE,
-)
 
 # Free each month: 10,000 map loads, 5,000 searches, 1,000 searches with shop details, 10,000 walking
 # routes, 10,000 suggestions and 10,000 place lookups. Walk and transit share conservatively
 # budgeted space in Routes API usage.
 budget = Budget(
     Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'usage.json',
-    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 5000, 40), 'transit': (120, 4000, 25), 'transitous': (300, 9000, 30), 'details': (30, 900, 12), 'suggest': (300, 9000, 60), 'place': (300, 9000, 60), 'explore': (120, 3000, 12), 'explore_ai': (80, 2000, 8)},
+    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 5000, 40), 'transit': (120, 4000, 25), 'transitous': (300, 9000, 30), 'details': (30, 900, 12), 'suggest': (300, 9000, 60), 'place': (300, 9000, 60), 'explore': (120, 3000, 12)},
 )
 
 
@@ -203,10 +117,6 @@ def is_short(value):
     return all(is_short(part) for part in parts)
 
 
-def api_key():
-    return os.environ.get('DEEPSEEK_API_KEY', '').strip()
-
-
 def map_key():
     return os.environ.get('GOOGLE_MAP_KEY', '').strip()
 
@@ -223,23 +133,28 @@ def routes_key():
     return os.environ.get('GOOGLE_ROUTES_KEY', '').strip() or places_key()
 
 
-def deepseek_completion(payload, timeout=55):
-    request = urllib.request.Request(
-        'https://api.deepseek.com/chat/completions', data=json.dumps(payload).encode(),
-        headers={'Authorization': f'Bearer {api_key()}', 'Content-Type': 'application/json'},
+def deepseek_request(path, key, payload=None):
+    return urllib.request.Request(
+        f'https://api.deepseek.com/{path}', data=json.dumps(payload).encode() if payload is not None else None,
+        headers={'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'},
     )
+
+
+def deepseek_completion(key, payload, timeout=55):
+    request = deepseek_request('chat/completions', key, payload)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.load(response)
 
 
-def ask_deepseek(system, message):
+def ask_deepseek(key, system, message):
     """Returns the answer and its token use. Errors carry no upstream text, which could quote the key."""
-    reply = deepseek_completion({
+    reply = deepseek_completion(key, {
         'model': MODEL, 'temperature': 0.2, 'max_tokens': MAX_TOKENS, 'stream': False,
         'thinking': {'type': 'disabled'},
         'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': message}],
     })
-    return reply['choices'][0]['message']['content'].strip(), reply.get('usage', {})
+    message = (reply.get('choices') or [{}])[0].get('message') or {}
+    return message.get('content') or '', reply.get('usage') or {}
 
 
 BASIC_FIELDS = 'places.id,places.displayName,places.formattedAddress,places.location,places.googleMapsUri,places.primaryTypeDisplayName,places.businessStatus'
@@ -364,9 +279,9 @@ def explore_name_key(name):
     return re.sub(r'[^\w]', '', name.casefold())
 
 
-def ask_explore_ai(area, category, language):
+def ask_explore_ai(key, area, category, language):
     def search(count, previous, timeout, focus=''):
-        reply = deepseek_completion({
+        reply = deepseek_completion(key, {
             'model': MODEL, 'max_tokens': 3000, 'stream': False, 'thinking': {'type': 'disabled'},
             'tools': [{'type': 'deepseek_web_search'}],
             'messages': [
@@ -391,6 +306,8 @@ def ask_explore_ai(area, category, language):
             seen = {explore_name_key(name) for name in names}
             items.extend(item for item in more if explore_name_key(item['name']) not in seen)
         except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
+            if isinstance(error, urllib.error.HTTPError):
+                error.close()
             print(f'Explore AI follow-up failed: {type(error).__name__}', file=sys.stderr, flush=True)
     return items[:AI_EXPLORE_LIMIT], cost
 
@@ -712,7 +629,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {'fares': fares, 'source': MTR_FARE_SOURCE, 'owner': 'MTR Corporation Limited'}, 'public, max-age=300')
         if self.path != '/api/ai':
             return self.send(404, {'error': 'Not found'})
-        body = {'available': bool(api_key()), 'mapKey': None, 'places': False, 'transitous': TRANSITOUS_ENABLED}
+        body = {'mapKey': None, 'places': False, 'transitous': TRANSITOUS_ENABLED}
         # Handing out the key is what starts a billed map load, so this is where it is counted.
         # Only the page itself asks this way, and Google locks the key to this site.
         is_page = self.headers.get('Sec-Fetch-Site') == 'same-origin'
@@ -726,7 +643,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_json(self):
         """The request body, or None once an error has been sent."""
-        # Keeps other websites from spending the quota through their visitors' browsers.
+        # Only the same-origin web app can send requests from a browser.
         if self.headers.get('Origin') != f"https://{self.headers.get('Host')}":
             self.send(403, {'error': 'Forbidden'})
             return None
@@ -780,29 +697,41 @@ class Handler(BaseHTTPRequestHandler):
             nearby = pool.submit(nearby_places, center, radius, category, language) if places_key() and budget.spend('places', visitor) else None
             return self.send(200, {'places': result(nearby) if nearby else [], 'sources': result(web)})
 
+    def personal_key(self):
+        authorization = self.headers.get('Authorization', '')
+        match = re.fullmatch(r'Bearer ([A-Za-z0-9._~-]{1,256})', authorization, re.IGNORECASE)
+        if not match:
+            self.send(401, {'error': 'DeepSeek API key required'})
+            return None
+        return match[1]
+
+    def ai_error(self, error):
+        if isinstance(error, urllib.error.HTTPError):
+            error.close()
+            print(f'DeepSeek returned {error.code}', file=sys.stderr, flush=True)
+            if error.code in (401, 403):
+                return self.send(401, {'error': 'DeepSeek API key rejected'})
+            if error.code == 402:
+                return self.send(402, {'error': 'DeepSeek balance insufficient'})
+            if error.code == 429:
+                return self.send(429, {'error': 'DeepSeek rate limit'})
+        else:
+            print(f'DeepSeek failed: {type(error).__name__}', file=sys.stderr, flush=True)
+        return self.send(502, {'error': 'DeepSeek unavailable'})
+
     def explore_ai(self, body):
-        area, category, language = (body.get(key) for key in ('area', 'category', 'locale'))
+        area, category, language = (body.get(field) for field in ('area', 'category', 'locale'))
         if (not isinstance(area, str) or not 0 < len(area.strip()) <= 100 or category not in ('food', 'sights')
                 or not isinstance(language, str) or language not in AI_EXPLORE_LANGUAGES):
             return self.send(400, {'error': 'Bad request'})
-        if not api_key():
-            return self.send(503, {'error': 'Unavailable'})
-        visitor = self.visitor()
-        if not spending.allows(visitor) or not limiter.allow(visitor):
-            return self.send(429, {'error': 'Limit reached'})
-        if not in_flight.acquire(blocking=False):
-            return self.send(503, {'error': 'Unavailable'})
+        key = self.personal_key()
+        if key is None:
+            return
         try:
-            if not budget.spend('explore_ai', visitor):
-                return self.send(429, {'error': 'Limit reached'})
-            suggestions, cost = ask_explore_ai(area.strip(), category, language)
-            spending.add(visitor, cost)
-            return self.send(200, {'suggestions': suggestions})
+            suggestions, cost = ask_explore_ai(key, area.strip(), category, language)
         except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
-            print(f'Explore AI failed: {type(error).__name__}', file=sys.stderr, flush=True)
-            return self.send(502, {'error': 'Unavailable'})
-        finally:
-            in_flight.release()
+            return self.ai_error(error)
+        return self.send(200, {'suggestions': suggestions, 'costCny': cost})
 
     def suggest(self, body):
         query, origin = body.get('query'), body.get('from')
@@ -900,32 +829,34 @@ class Handler(BaseHTTPRequestHandler):
             self.send(502, {'error': 'Unavailable'})
 
     def ask(self, body):
+        task = body.get('task')
+        if task == 'verify':
+            key = self.personal_key()
+            if key is None:
+                return
+            try:
+                with urllib.request.urlopen(deepseek_request('user/balance', key), timeout=8):
+                    pass
+            except OSError as error:
+                return self.ai_error(error)
+            return self.send(200, {'verified': True})
         try:
-            system, message = PROMPTS[body['task']], body['message']
+            system, message = PROMPTS[task], body['message']
         except (KeyError, TypeError):
             return self.send(400, {'error': 'Bad request'})
         if not isinstance(message, str) or not message.strip() or len(message) > MAX_MESSAGE:
             return self.send(400, {'error': 'Bad request'})
-        if not api_key():
-            return self.send(503, {'error': 'AI 未設定'})
-        if not spending.allows(self.visitor()) or not limiter.allow(self.visitor()):
-            return self.send(429, {'error': 'AI 使用次數已達上限，請稍後再試'})
-        if not in_flight.acquire(blocking=False):
-            return self.send(503, {'error': 'AI 正忙，請稍後再試'})
+        key = self.personal_key()
+        if key is None:
+            return
         try:
-            answer, usage = ask_deepseek(system, message)
-            spending.add(self.visitor(), cost_of(usage))
-            if not is_app_reply(answer):
-                return self.send(502, {'error': 'AI 暫時未能使用'})
-            self.send(200, {'reply': answer})
-        except urllib.error.HTTPError as error:
-            print(f'DeepSeek returned {error.code}', file=sys.stderr, flush=True)
-            self.send(502, {'error': 'AI 暫時未能使用'})
+            answer, usage = ask_deepseek(key, system, message)
+            cost = cost_of(usage)
         except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
-            print(f'DeepSeek failed: {type(error).__name__}', file=sys.stderr, flush=True)
-            self.send(502, {'error': 'AI 暫時未能使用'})
-        finally:
-            in_flight.release()
+            return self.ai_error(error)
+        if not isinstance(answer, str) or not is_app_reply(answer):
+            return self.send(502, {'error': 'DeepSeek reply unavailable', 'costCny': cost})
+        self.send(200, {'reply': answer, 'costCny': cost})
 
 
 if __name__ == '__main__':

@@ -6,8 +6,8 @@ import { meters,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache, routeArrivals } from './eta.js?v=dev';
 import { toSimplified } from './hans.js?v=dev';
-import { chatMessage, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
-import { HONG_KONG, cleanArea, exploreAISuggestions, exploreDestination, exploreWebSearchURL, googlePlaceLocation, googleSearch, googleSuggest, googleWalk, governmentSearch, inHongKong, insideArea, isNearby, knownShape, knownWalk, knownWalkTime, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
+import { chatMessage, personalAI, verifyAIKey, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
+import { HONG_KONG, cleanArea, exploreDestination, exploreWebSearchURL, googlePlaceLocation, googleSearch, googleSuggest, googleWalk, governmentSearch, inHongKong, insideArea, isNearby, knownShape, knownWalk, knownWalkTime, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
 
 import { googleJourneys, requestGoogleTransit } from './google-transit.js?v=dev';
 import { requestTransitous, transitousJourneys } from './transitous.js?v=dev';
@@ -25,6 +25,9 @@ const store = {
   },
   set(key, value) {
     try { localStorage.setItem(`hkt.${key}`, JSON.stringify(value)); } catch { /* Private mode: this visit only. */ }
+  },
+  remove(key) {
+    try { localStorage.removeItem(`hkt.${key}`); } catch { /* Storage can be unavailable. */ }
   },
 };
 
@@ -62,6 +65,7 @@ const state = {
   origin: '', destination: '', when: null, chat: '', preference: store.get('preference', 'lessWalking'), phase: 'idle', error: null,
   transitMode: ['mtr', 'bus'].includes(savedTransitMode) ? savedTransitMode : 'all',
   fareProfile: Object.hasOwn(FARE_PROFILES, savedFareProfile) ? savedFareProfile : 'adult',
+  apiKey: store.get('deepseekKey', ''), aiKeyRejected: false,
   from: null, to: null, journeys: [], candidates: [], allowLongWalk: false, onMap: null, expanded: null, explanation: null, aiNotice: null, lastChat: null,
   discovery: null, explore: null,
   stopQuery: '', stopPlace: null, stops: [], stopMode: 'all', stopRadius: 500, stopBusy: false, stopError: null, stopOpen: null,
@@ -107,7 +111,78 @@ function applyScript() {
   scriptWatcher.observe($('app'), { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: TEXT_ATTRIBUTES });
 }
 
-const client = () => (state.sharedAI ? sharedAI() : null);
+function client() {
+  const key = state.apiKey;
+  return key ? personalAI(key, recordAICost, () => {
+    if (state.apiKey === key) setAIKey('', true);
+  }) : null;
+}
+
+const enableAIHint = () => t('在「設定 → AI API」輸入 DeepSeek API Key 後啟用。', 'Enter a DeepSeek API key in Settings → AI API to enable AI.');
+
+function aiErrorMessage(status) {
+  if (status === 401) return t('DeepSeek API Key 無效或已撤銷。', 'DeepSeek rejected the API key.');
+  if (status === 402) return t('DeepSeek 帳戶餘額不足。', 'Your DeepSeek balance is insufficient.');
+  if (status === 429) return t('DeepSeek 暫時限制請求頻率，請稍後再試。', 'DeepSeek is temporarily rate limiting requests. Try again shortly.');
+  return t('暫時未能連接 DeepSeek，請稍後再試。', 'Unable to reach DeepSeek. Try again shortly.');
+}
+
+const aiUsageDay = () => new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10);
+let aiUsage = store.get('aiUsage', null);
+
+function todayAICost(day = aiUsageDay()) {
+  const saved = store.get('aiUsage', aiUsage);
+  return saved?.day === day && Number.isFinite(saved.cost) ? saved.cost : 0;
+}
+
+function recordAICost(cost) {
+  const day = aiUsageDay();
+  const add = () => {
+    if (day !== aiUsageDay()) return;
+    aiUsage = { day, cost: todayAICost(day) + cost };
+    store.set('aiUsage', aiUsage);
+    renderAICost();
+  };
+  // Serialize updates from multiple tabs before writing the shared daily total.
+  if (navigator.locks) void navigator.locks.request('hkt.aiUsage', add);
+  else add();
+}
+
+function aiCostText() {
+  const cost = todayAICost();
+  return cost > 0 && cost < 0.0001 ? '< CNY 0.0001' : `CNY ${cost.toFixed(cost ? 4 : 2)}`;
+}
+
+function renderAICost() {
+  const amount = $('ai-cost');
+  if (!amount) return;
+  const text = aiCostText();
+  if (amount.textContent !== text) amount.textContent = text;
+}
+
+function setAIKey(key, rejected = false) {
+  if (state.apiKey === key && state.aiKeyRejected === rejected) return;
+  if (key) store.set('deepseekKey', key);
+  else store.remove('deepseekKey');
+  state.apiKey = key;
+  state.aiKeyRejected = rejected;
+  recognition?.abort();
+  if (state.thread?.busy && state.phase === 'understanding') state.phase = state.journeys.length ? 'done' : 'idle';
+  if (state.discovery?.stage === 'finding') {
+    planRun += 1;
+    state.phase = 'idle';
+  } else if (state.discovery?.stage === 'asking' && state.phase === 'failed') {
+    state.phase = 'idle';
+    state.error = null;
+  }
+  Object.assign(state, { chat: '', thread: null, talk: [], discovery: null, lastSearch: null, aiNotice: null });
+  if (state.explore) {
+    if (state.explore.preview?.kind === 'ai') clearExplorePreview(state.explore);
+    state.explore.ai = null;
+  }
+  renderTab();
+}
+
 const siteIndex = () => (state.index ??= buildStopIndex(state.db));
 
 // MARK: DOM helpers
@@ -823,10 +898,8 @@ async function checkServer() {
     const response = await fetch('api/ai', { signal: AbortSignal.timeout(3000) });
     if (response.ok) shared = await response.json();
   } catch { /* The page works without it. */ }
-  state.sharedAI = shared?.available === true;
   state.transitous = shared?.transitous === true;
   spareEmbedKey = shared?.embedKey ?? null;
-  if (state.sharedAI) renderTab();
   if (shared?.mapKey) useGoogleMap(shared);
   else useFreeMap();
 }
@@ -972,7 +1045,9 @@ function currentTrip() {
 
 /** Replanning reuses the resolved places from the current trip. */
 async function runPlan(request) {
-  const run = ++planRun, ai = client(), stale = () => run !== planRun, isChat = request.kind === 'chat', phaseBefore = state.phase;
+  const ai = client(), isChat = request.kind === 'chat', key = state.apiKey, phaseBefore = state.phase;
+  if (isChat && !ai) return;
+  const run = ++planRun, stale = () => run !== planRun;
   const previous = request.kind === 'replan' ? { start: state.from, end: state.to } : null;
   const startOver = () => {
     const notice = state.aiNotice;
@@ -999,7 +1074,7 @@ async function runPlan(request) {
     // Only the chat box needs the AI: the search box holds a place, and the planner does the rest.
     try {
       const reply = await ai.chat(chatMessage(request.text, request.current, request.context));
-      if (stale()) return;
+      if (stale() || key !== state.apiKey) return;
       // Small talk changes nothing, so what is on screen stays.
       if (reply.say) {
         state.discovery = request.discovery;
@@ -1010,9 +1085,8 @@ async function runPlan(request) {
       wish = reply.wish ?? null;
       intent = reply.trip ?? null;
     } catch (error) {
-      state.aiNotice = googleShops()
-        ? t('AI 額度已用完或暫時未能使用，已直接用 Google 搜尋。', 'AI is used up or unavailable, so this went straight to Google.')
-        : t('AI 暫時未能使用，已改用基本解析：', 'AI unavailable, used basic parsing: ') + error.message;
+      if (stale() || key !== state.apiKey) return;
+      state.aiNotice = aiErrorMessage(error.status);
     }
   }
   if (stale()) return;
@@ -1760,12 +1834,15 @@ const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
 let recognition = null;
 
 function toggleSpeech() {
+  if (!state.apiKey) return;
   if (recognition) return recognition.stop();
   recognition = new Recognition();
   recognition.lang = state.speechLang;
   recognition.interimResults = true;
   let text = '';
+  const key = state.apiKey;
   recognition.onresult = (event) => {
+    if (key !== state.apiKey || !$('chat-input')) return;
     text = [...event.results].map((result) => result[0].transcript).join('');
     state.chat = text;
     $('chat-input').value = text;
@@ -1781,7 +1858,7 @@ function toggleSpeech() {
     recognition = null;
     state.listening = false;
     renderChatControls();
-    if (text.trim()) sendChat();
+    if (key === state.apiKey && text.trim()) sendChat();
   };
   recognition.start();
   state.listening = true;
@@ -1803,6 +1880,7 @@ function renderChatControls() {
 const syncComposer = () => $('composer')?.classList.toggle('typing', !!state.chat.trim());
 
 function chatPrompt() {
+  if (!state.apiKey) return t('AI 尚未啟用', 'AI is disabled');
   if (state.listening) return t('正在聆聽…', 'Listening…');
   if (state.discovery?.stage === 'asking') return t('輸入你的回答…', 'Type your answer…');
   return t('問 AI，例如：去吃茶餐廳', 'Ask AI, e.g. Find a cha chaan teng');
@@ -1843,6 +1921,7 @@ function chatContext() {
 }
 
 function askAI(text) {
+  if (!state.apiKey) return;
   const { stage, wish, suggestions } = state.discovery ?? state.lastSearch ?? {}, context = chatContext(), current = currentTrip();
   const discovery = state.discovery;
   remember('Rider', text);
@@ -1857,7 +1936,7 @@ function askAI(text) {
 
 function sendChat() {
   const text = state.chat.trim();
-  if (!text || !state.db) return;
+  if (!state.apiKey || !text || !state.db) return;
   history.add('chat', text);
   state.chat = '';
   const input = $('chat-input');
@@ -2336,7 +2415,6 @@ function showStopsNear(place) {
 
 function clearExplore() {
   state.explore?.request?.abort();
-  state.explore?.ai?.request.abort();
   clearExplorePreview(state.explore);
   state.explore = null;
 }
@@ -2372,7 +2450,6 @@ async function searchExplore(category, radius) {
   view.request?.abort();
   clearExplorePreview(view);
   if (category !== view.category) {
-    view.ai?.request.abort();
     view.ai = null;
   }
   const request = new AbortController();
@@ -2389,19 +2466,20 @@ async function searchExplore(category, radius) {
 const exploreLocale = () => state.lang === 'en' ? 'en' : state.script === 'hans' ? 'zh-Hans' : 'zh-Hant';
 
 async function showExploreAI(view) {
-  if (view.ai?.busy) return;
+  const assistant = client();
+  if (!assistant || view.ai?.busy) return;
   if (view.ai?.suggestions.length) {
     view.ai.open = !view.ai.open;
     if (!view.ai.open && view.preview?.kind === 'ai') clearExplorePreview(view);
     return renderSheet();
   }
-  const request = new AbortController();
-  const ai = view.ai = { request, open: true, busy: true, suggestions: [], status: null };
+  const ai = view.ai = { open: true, busy: true, suggestions: [], failed: false };
   renderSheet();
-  const answer = await exploreAISuggestions(view.destination, view.category, exploreLocale(), request.signal)
-    .catch(() => ({ status: 503 }));
-  if (state.explore !== view || view.ai !== ai || request.signal.aborted) return;
-  Object.assign(ai, { busy: false, suggestions: answer.suggestions ?? [], status: answer.status });
+  // Keep receiving the usage if the rider leaves the panel before the model finishes.
+  const answer = await assistant.explore(view.destination, view.category, exploreLocale())
+    .catch((error) => ({ failed: true, status: error.status }));
+  if (state.explore !== view || view.ai !== ai) return;
+  Object.assign(ai, { busy: false, suggestions: answer.suggestions ?? [], failed: answer.failed, status: answer.status });
   renderSheet();
 }
 
@@ -2647,6 +2725,7 @@ function explorePreviewStatus(view, item) {
 
 function exploreAISection(view) {
   const ai = view.ai;
+  const disabled = !state.apiKey;
   const cards = ai?.suggestions.map((item) => {
     const query = [item.name, item.address, 'Hong Kong'].filter(Boolean).join(' ');
     const maps = new URLSearchParams({ api: '1', query });
@@ -2672,14 +2751,14 @@ function exploreAISection(view) {
           t('在地圖查看', 'Find on a map'))));
   });
   return [
-    h('button', { class: 'link explore-ai-button', 'aria-expanded': String(!!ai?.open), disabled: ai?.busy, onclick: () => showExploreAI(view) },
+    h('button', { class: 'link explore-ai-button', 'aria-expanded': String(!!ai?.open), disabled: disabled || ai?.busy,
+      title: disabled ? enableAIHint() : null, onclick: () => showExploreAI(view) },
       icon('spark', 15), t('AI 建議', 'AI suggestions')),
+    disabled && h('div', { class: 'tiny muted' }, enableAIHint()),
     ai?.open && h('section', { class: 'explore-ai-results', 'aria-busy': String(ai.busy) },
       ai.busy && h('div', { class: 'status', role: 'status' }, h('span', { class: 'spinner' }), t('AI 正在搜尋網頁及整理建議…', 'AI is searching the web and preparing suggestions…')),
-      !ai.busy && !cards.length && h('div', { class: 'notice', role: 'status' }, ai.status === 429
-        ? t('AI 建議暫達使用上限，請稍後再試。', 'AI suggestions have reached their limit. Try again later.')
-        : ai.status ? t('暫時未能取得 AI 建議，請稍後再試。', 'AI suggestions are unavailable. Try again later.')
-          : t('暫時找不到有網頁來源支持的建議。', 'No suggestions with usable web sources were found.')),
+      !ai.busy && !cards.length && h('div', { class: 'notice', role: 'status' }, ai.failed ? aiErrorMessage(ai.status)
+        : t('暫時找不到有網頁來源支持的建議。', 'No suggestions with usable web sources were found.')),
       cards.length > 0 && h('div', { class: 'tiny muted' },
         t(`找到 ${cards.length} 個有來源的建議 · 搜尋範圍約 1.5 公里`, `${cards.length} suggestions with sources · Search area about 1.5 km`)),
       cards),
@@ -2774,13 +2853,14 @@ function homeSheet() {
       list,
     ] : [
       h('div', { class: 'section' }, t('試試問 AI', 'Try asking AI')),
-      h('div', { class: 'examples' }, examples.map((text) => h('button', { onclick: () => { state.chat = text; sendChat(); } }, text))),
+      h('div', { class: 'examples' }, examples.map((text) => h('button', { disabled: !state.apiKey,
+        onclick: () => { state.chat = text; sendChat(); } }, text))),
     ],
   ];
 }
 
 const PHASES = {
-  understanding: () => (client() ? t('AI 正在分析你的要求…', 'AI is analysing your request…') : t('理解要求…', 'Reading your request…')),
+  understanding: () => t('理解要求…', 'Reading your request…'),
   findingPlaces: () => (googleShops() ? t('正在 Google 地圖搜尋…', 'Searching Google Maps…') : t('正在搜尋地點…', 'Searching for places…')),
   locating: () => t('正在尋找起點及目的地…', 'Finding places…'),
   planning: () => t('正在比較公共交通路線…', 'Comparing public transport routes…'),
@@ -2881,13 +2961,15 @@ function renderBottomStatus() {
 const speechLabels = () => ({ 'zh-HK': t('粵語', 'Cantonese'), 'zh-CN': t('普通話', 'Mandarin'), 'en-US': 'English' });
 
 function renderPlanBottom() {
+  const disabled = !state.apiKey;
   clear($('bottom'),
     h('div', { id: 'ai-status' }),
     h('div', { id: 'chat-history' }),
-    h('div', { id: 'composer', class: `field composer${Recognition ? '' : ' no-mic'}${state.chat.trim() ? ' typing' : ''}` },
-      h('span', { class: client() ? 'ai' : 'muted' }, icon('spark', 18)),
+    h('div', { id: 'composer', class: `field composer${Recognition ? '' : ' no-mic'}${state.chat.trim() ? ' typing' : ''}`,
+      'aria-disabled': String(disabled) },
+      h('span', { class: disabled ? 'muted' : 'ai' }, icon('spark', 18)),
       h('input', {
-        id: 'chat-input', value: state.chat, placeholder: chatPrompt(), enterkeyhint: 'send', autocomplete: 'off',
+        id: 'chat-input', disabled, value: state.chat, placeholder: chatPrompt(), enterkeyhint: 'send', autocomplete: 'off',
         oninput: (event) => {
           state.chat = event.target.value;
           syncComposer();
@@ -2896,9 +2978,9 @@ function renderPlanBottom() {
         onblur: () => setTimeout(() => renderChatHistory(false), 150),
         onkeydown: (event) => { if (event.key === 'Enter') sendChat(); },
       }),
-      Recognition && h('button', { id: 'mic', class: 'icon-button', 'aria-label': t('語音輸入', 'Voice input'), onclick: toggleSpeech }, icon('mic', 20)),
-      h('button', { class: 'go', 'aria-label': t('傳送', 'Send'), onmousedown: (event) => event.preventDefault(), onclick: sendChat }, icon('send', 19))),
-    !client() && h('div', { class: 'tiny muted', style: 'padding:0 6px' }, t('AI 未連接，現時使用基本解析。', 'AI isn\'t connected, using basic parsing.')));
+      Recognition && h('button', { id: 'mic', class: 'icon-button', disabled, 'aria-label': t('語音輸入', 'Voice input'), onclick: toggleSpeech }, icon('mic', 20)),
+      h('button', { class: 'go', disabled, 'aria-label': t('傳送', 'Send'), onmousedown: (event) => event.preventDefault(), onclick: sendChat }, icon('send', 19))),
+    disabled && h('div', { class: 'tiny muted', style: 'padding:0 6px' }, state.aiKeyRejected ? aiErrorMessage(401) + ' ' + enableAIHint() : enableAIHint()));
   renderBottomStatus();
 }
 
@@ -3275,6 +3357,45 @@ function clearButton(label, count, clearAll) {
   return button;
 }
 
+function aiSettings() {
+  const key = h('input', {
+    id: 'deepseek-key', type: 'password', required: true, maxlength: 256, placeholder: 'sk-…',
+    autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false',
+  });
+  const status = h('div', { class: 'tiny muted', role: 'status' }, state.aiKeyRejected && aiErrorMessage(401));
+  const save = h('button', { class: 'link', type: 'submit' }, t('驗證並儲存', 'Verify and save'));
+  const form = h('form', { class: 'setting', onsubmit: async (event) => {
+    event.preventDefault();
+    const value = key.value.trim();
+    if (!value || save.disabled) return;
+    key.disabled = save.disabled = true;
+    status.textContent = t('正在驗證 API Key…', 'Verifying API key…');
+    try {
+      await verifyAIKey(value);
+      if (!form.isConnected) return;
+      key.value = '';
+      status.textContent = '';
+      setAIKey(value);
+    } catch (error) {
+      status.textContent = aiErrorMessage(error.status);
+    } finally {
+      key.disabled = save.disabled = false;
+    }
+  } },
+  h('label', { for: key.id }, 'DeepSeek API Key'),
+  h('div', { class: 'row ai-key-row' }, h('div', { class: 'field plain grow' }, key), save),
+  status);
+  return settingGroup('AI API',
+    h('div', { class: 'setting inline' }, h('span', {}, t('狀態', 'Status')),
+      h('span', { class: state.apiKey ? 'ok' : 'muted' }, state.apiKey ? t('已啟用', 'Enabled') : t('未啟用', 'Disabled'))),
+    form,
+    state.apiKey && h('button', { class: 'link', onclick: () => setAIKey('') }, t('移除 API Key', 'Remove API key')),
+    h('div', { class: 'setting inline' }, h('span', {}, t('今日 AI 費用（估算）', 'Today’s AI cost (estimate)')),
+      h('strong', { id: 'ai-cost' }, aiCostText())),
+    h('div', { class: 'tiny muted' }, t('按香港時間統計此瀏覽器在本站的用量，以 DeepSeek 高峰費率估算。', 'Estimates use DeepSeek peak rates for this browser’s usage on this site, by Hong Kong date.')),
+    h('div', { class: 'tiny muted' }, t('API Key 儲存在此瀏覽器，使用時經本站轉送至 DeepSeek。', 'Your browser stores the API key, and this site forwards it to DeepSeek when needed.')));
+}
+
 function settingsSheet() {
   const searches = Object.values(store.get('history', {})).flat().length + state.recentRoutes.length;
   return [
@@ -3305,10 +3426,7 @@ function settingsSheet() {
       h('div', { class: 'row' },
         h('a', { class: 'link', href: 'https://www.mtr.com.hk/en/customer/tickets/octopus_fares.html', target: '_blank', rel: 'noopener' }, t('港鐵票價', 'MTR fares')),
         h('a', { class: 'link', href: 'https://www.td.gov.hk/tc/gov_public_transport_fare_concession/index.html', target: '_blank', rel: 'noopener' }, t('兩蚊兩折', 'Government fare scheme')))),
-    settingGroup(t('AI 助手', 'AI assistant'),
-      h('div', { class: 'setting inline' }, h('span', {}, t('狀態', 'Status')),
-        h('span', { class: state.sharedAI ? 'ok' : 'muted' }, state.sharedAI ? t('已連接', 'Connected') : t('未連接', 'Not connected'))),
-      h('div', { class: 'tiny muted' }, t('AI 理解行程及地點要求。路線會綜合比較 Transitous、Google 地圖及內置演算法的方案。', 'The AI interprets trip and place requests. Route planning compares options from Transitous, Google Maps and the built-in planner.'))),
+    aiSettings(),
     settingGroup(t('我的資料', 'My data'),
       h('div', { class: 'setting inline' }, h('span', {}, t(`搜尋記錄（${searches}）`, `Search history (${searches})`)),
         clearButton(t('清除', 'Clear'), searches, () => {
@@ -3603,7 +3721,7 @@ new ResizeObserver(() => mapView.resize()).observe($('map'));
 new ResizeObserver(() => sheet.measure()).observe($('top'));
 new ResizeObserver(() => sheet.measure()).observe($('bottom'));
 sheet.attach();
-// Keys were once saved here, and nothing needs them now.
+// Retire the older unverified key and model settings.
 try { for (const old of ['hkt.apiKey', 'hkt.model']) localStorage.removeItem(old); } catch { /* Private mode. */ }
 
 applyScript();
@@ -3620,7 +3738,17 @@ $('locate').addEventListener('click', async () => {
 locateOnOpen();
 checkServer();
 loadDB();
-setInterval(() => { if (state.tab === 'saved') renderSheet(); }, 30_000);
+window.addEventListener('storage', (event) => {
+  if (event.key === 'hkt.deepseekKey' || event.key === null) setAIKey(store.get('deepseekKey', ''));
+  if (event.key === 'hkt.aiUsage' || event.key === null) {
+    aiUsage = store.get('aiUsage', null);
+    renderAICost();
+  }
+});
+setInterval(() => {
+  if (state.tab === 'saved') renderSheet();
+  if (state.tab === 'settings') renderAICost();
+}, 30_000);
 if ('serviceWorker' in navigator) {
   // A page left open would otherwise keep running the old release, so a new one reloads it.
   const hadWorker = !!navigator.serviceWorker.controller;

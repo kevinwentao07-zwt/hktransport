@@ -428,20 +428,33 @@ test('the AI sees the conversation and what is on screen', () => {
   assert.match(last, /may not ask anything more/);
 });
 
-test('the shared AI sends a task name and the text, never a prompt or a key', async () => {
-  const sent = [];
-  globalThis.fetch = async (url, options) => {
+test('personal AI verifies the key and counts usage from chat and exploration', async (context) => {
+  const sent = [], costs = [];
+  let unauthorized = 0;
+  const key = 'sk-test-visitor';
+  const assistant = A.personalAI(key, (cost) => costs.push(cost), () => unauthorized++);
+  const reply = (status, body) => ({ ok: status < 400, status, json: async () => body });
+  context.mock.method(globalThis, 'fetch', async (url, options) => {
     sent.push({ url, headers: options.headers, body: JSON.parse(options.body) });
-    return { ok: true, status: 200, json: async () => ({ reply: '{"destination":"中環"}' }) };
-  };
-  await A.sharedAI().chat('去中環');
-  assert.equal(sent[0].url, 'api/ai');
-  assert.deepEqual(Object.keys(sent[0].body), ['task', 'message']);
-  assert.equal(sent[0].body.task, 'chat');
-  assert.ok(A.PROMPTS[sent[0].body.task]);
-  assert.equal(sent[0].headers.Authorization, undefined);
-  globalThis.fetch = async () => ({ ok: false, status: 429, json: async () => ({ error: '太頻繁' }) });
-  await assert.rejects(A.sharedAI().chat('去中環'), /太頻繁/);
+    if (sent.length === 1) return reply(200, { verified: true });
+    if (sent.length === 2) return reply(200, { reply: '{"destination":"中環"}', costCny: 0.015 });
+    if (sent.length === 3) return reply(200, { suggestions: [], costCny: 0.025 });
+    if (sent.length === 4) return reply(502, { error: 'Failed', costCny: 0.005 });
+    return reply(401, { error: 'Rejected' });
+  });
+  await A.verifyAIKey(key);
+  await assistant.chat('去中環');
+  await assistant.explore({ name: '中環' }, 'food', 'zh-Hant');
+  await assert.rejects(assistant.chat('去中環'), { status: 502 });
+  await assert.rejects(assistant.chat('去中環'), { status: 401 });
+  assert.deepEqual(sent.slice(0, 3).map(({ url, body }) => ({ url, body })), [
+    { url: 'api/ai', body: { task: 'verify' } },
+    { url: 'api/ai', body: { task: 'chat', message: '去中環' } },
+    { url: 'api/explore/ai', body: { area: '中環', category: 'food', locale: 'zh-Hant' } },
+  ]);
+  assert.ok(sent.every(({ headers }) => headers.Authorization === `Bearer ${key}`));
+  assert.deepEqual(costs, [0.015, 0.025, 0.005]);
+  assert.equal(unauthorized, 1);
 });
 
 test('arriving by a time leaves early enough for the longest wait', () => {
@@ -589,10 +602,10 @@ test('the AI\'s plans are read as lines only', async () => {
   assert.equal(A.decodePlans('{"destination":"中環"}'), null);
   const sent = [];
   globalThis.fetch = async (url, options) => { sent.push(JSON.parse(options.body)); return { ok: true, status: 200, json: async () => ({ reply: '{"plans":[{"legs":[{"mode":"bus","route":"1"}]}]}' }) }; };
-  assert.deepEqual(await A.sharedAI().route('Start: 甲'), [[{ mode: 'bus', route: '1' }]]);
+  assert.deepEqual(await A.personalAI('sk-test-visitor').route('Start: 甲'), [[{ mode: 'bus', route: '1' }]]);
   assert.deepEqual(sent, [{ task: 'route', message: 'Start: 甲' }]);
   globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ reply: '{"kind":"say","text":"hi"}' }) });
-  await assert.rejects(A.sharedAI().route('Start: 甲'));
+  await assert.rejects(A.personalAI('sk-test-visitor').route('Start: 甲'));
 });
 
 test('walks take Google\'s distance and time where it has them, and the rest keep the estimate', async () => {

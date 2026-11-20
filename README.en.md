@@ -48,7 +48,7 @@ It **reads sentences** and **keeps the conversation**, then passes the two place
 | What about the second? | Changes to the second shop |
 | Start from Tsim Sha Tsui | Changes only the start |
 
-Type or speak. Basic parsing takes over if the AI is unavailable.
+Type or speak after verifying and saving your DeepSeek API key in Settings → AI API. The same key enables AI suggestions for nearby places.
 
 ### Also
 
@@ -70,10 +70,10 @@ Type or speak. Basic parsing takes over if the AI is unavailable.
 
 ### Security and cost
 
-- The DeepSeek and server-side Google keys stay on the server. They never reach a browser or this repository.
+- Your browser stores your DeepSeek API key. The server forwards it to DeepSeek with each request. Server-side Google keys stay on the server.
 - The map key has to reach the browser, so it is limited by domain and API.
 - The AI endpoint accepts only the app's own tasks and returns only short JSON, so it can't serve as a free chatbot.
-- Each visitor and the whole site have limits on calls and spending. Google use stays inside the free allowance, and the site falls back to free services at the limit.
+- Settings → AI API shows the estimated daily cost of this browser’s usage on this site. Google use stays inside the free allowance, and the site falls back to free services at the limit.
 
 ## Development
 

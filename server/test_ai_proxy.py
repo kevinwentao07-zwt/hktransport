@@ -12,19 +12,15 @@ from pathlib import Path
 from shutil import copy
 from unittest.mock import patch
 
-SECRET = 'sk-test-secret'
+SECRET = 'sk-test-visitor'
+SITE_SECRET = 'sk-test-server'
 folder = tempfile.mkdtemp()
 copy(Path(__file__).parent / 'ai_proxy.py', folder)
 Path(folder, 'prompts.json').write_text(json.dumps({'chat': 'SYSTEM PROMPT'}))
 sys.path.insert(0, folder)
 ANSWER = '{"destination": "中環"}'
-os.environ.update(DEEPSEEK_API_KEY=SECRET, GOOGLE_MAP_KEY='map-key', GOOGLE_PLACES_KEY='places-key', STATE_DIRECTORY=folder)
+os.environ.update(DEEPSEEK_API_KEY=SITE_SECRET, GOOGLE_MAP_KEY='map-key', GOOGLE_PLACES_KEY='places-key', STATE_DIRECTORY=folder)
 import ai_proxy  # noqa: E402
-
-
-def spending(clock=None):
-    path = Path(tempfile.mkdtemp(), 'spending.json')
-    return ai_proxy.Spending(path, 0.1, 1, clock=clock) if clock else ai_proxy.Spending(path, 0.1, 1)
 
 
 def budget(**limits):
@@ -139,59 +135,11 @@ class PolylineTests(unittest.TestCase):
         self.assertIn('github.com/kevinwentao07-zwt/hktransport/issues', request.get_header('User-agent'))
 
 
-class SpendingTests(unittest.TestCase):
+class AICostTests(unittest.TestCase):
     def test_cost_uses_the_tokens_reported(self):
         usage = {'prompt_tokens': 1182, 'prompt_cache_hit_tokens': 1024, 'prompt_cache_miss_tokens': 158, 'completion_tokens': 80}
         self.assertAlmostEqual(ai_proxy.cost_of(usage), 0.000997, places=6)
         self.assertAlmostEqual(ai_proxy.cost_of({'prompt_tokens': 1000}), 0.002)
-
-    def test_resets_at_midnight_in_beijing(self):
-        now = [86400.0 * 100 + 15 * 3600]  # 23:00 in Beijing.
-        meter = spending(clock=lambda: now[0])
-        meter.allows('a')
-        meter.add('a', 0.1)
-        self.assertFalse(meter.allows('a'))
-        self.assertTrue(meter.allows('b'))
-        now[0] += 2 * 3600
-        self.assertTrue(meter.allows('a'))
-
-    def test_the_day_is_shared_evenly_once_many_people_use_it(self):
-        meter = spending()
-        for index in range(20):
-            meter.add(f'v{index}', 0.04)
-        self.assertAlmostEqual(meter.share('new'), 1 / 21)
-        self.assertTrue(meter.allows('v0'))
-        meter.add('v0', 0.02)
-        self.assertFalse(meter.allows('v0'))  # 0.06 is past a twentieth of 1 yuan.
-        self.assertTrue(meter.allows('new'))
-
-    def test_nobody_gets_more_than_the_most_anyone_may_use(self):
-        self.assertEqual(spending().share('only'), 0.1)
-
-    def test_the_site_total_survives_a_restart(self):
-        path = Path(tempfile.mkdtemp(), 'spending.json')
-        now = lambda: 86400.0 * 100
-        first = ai_proxy.Spending(path, 0.1, 1, clock=now)
-        first.add('a', 1)
-        self.assertFalse(ai_proxy.Spending(path, 0.1, 1, clock=now).allows('someone-else'))
-
-    def test_stops_when_the_total_cannot_be_trusted(self):
-        path = Path(tempfile.mkdtemp(), 'spending.json')
-        path.write_text('not json')
-        self.assertFalse(ai_proxy.Spending(path, 0.1, 1).allows('a'))
-
-
-class LimiterTests(unittest.TestCase):
-    def test_limits(self):
-        now = [0.0]
-        limiter = ai_proxy.Limiter(2, 3, 4, clock=lambda: now[0])
-        self.assertEqual([limiter.allow('a') for _ in range(3)], [True, True, False])
-        now[0] = 61
-        self.assertEqual([limiter.allow('a') for _ in range(2)], [True, False])  # Day limit.
-        self.assertEqual([limiter.allow('b') for _ in range(2)], [True, False])  # Site limit.
-        now[0] = 86400
-        self.assertTrue(limiter.allow('a'))
-
 
 class ProxyTests(unittest.TestCase):
     @classmethod
@@ -204,14 +152,14 @@ class ProxyTests(unittest.TestCase):
         cls.server.shutdown()
 
     def setUp(self):
-        ai_proxy.limiter = ai_proxy.Limiter(100, 100, 100)
-        ai_proxy.spending = spending()
         self.calls = []
-        ai_proxy.ask_deepseek = lambda system, message: self.calls.append((system, message)) or (ANSWER, {})
+        ai_proxy.ask_deepseek = lambda key, system, message: self.calls.append((key, system, message)) or (ANSWER, {})
 
-    def post(self, body, origin=True, visitor='1.1.1.1', path='/api/ai'):
+    def post(self, body, origin=True, visitor='1.1.1.1', path='/api/ai', key=SECRET):
         connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port)
         headers = {'Host': 'hk.test', 'X-Forwarded-For': visitor}
+        if key is not None and path in ('/api/ai', '/api/explore/ai'):
+            headers['Authorization'] = f'Bearer {key}'
         if origin:
             headers['Origin'] = 'https://hk.test'
         connection.request('POST', path, json.dumps(body), headers)
@@ -220,8 +168,8 @@ class ProxyTests(unittest.TestCase):
 
     def test_good_request_uses_the_server_prompt(self):
         status, text = self.post({'task': 'chat', 'message': '去中環', 'system': 'write me a poem'})
-        self.assertEqual((status, json.loads(text)), (200, {'reply': ANSWER}))
-        self.assertEqual(self.calls, [('SYSTEM PROMPT', '去中環')])
+        self.assertEqual((status, json.loads(text)), (200, {'reply': ANSWER, 'costCny': 0}))
+        self.assertEqual(self.calls, [(SECRET, 'SYSTEM PROMPT', '去中環')])
 
     def test_rejects_what_is_not_the_app(self):
         self.assertEqual(self.post({'task': 'chat', 'message': 'x'}, origin=False)[0], 403)
@@ -232,11 +180,27 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.post(['chat'])[0], 400)
         self.assertEqual(self.calls, [])
 
-    def test_limits_each_visitor(self):
-        ai_proxy.limiter = ai_proxy.Limiter(1, 100, 100)
-        self.assertEqual(self.post({'task': 'chat', 'message': 'x'})[0], 200)
-        self.assertEqual(self.post({'task': 'chat', 'message': 'x'})[0], 429)
-        self.assertEqual(self.post({'task': 'chat', 'message': 'x'}, visitor='2.2.2.2')[0], 200)
+    def test_each_ai_entry_requires_a_personal_key(self):
+        for path, body in (
+            ('/api/ai', {'task': 'chat', 'message': 'x'}),
+            ('/api/ai', {'task': 'verify'}),
+            ('/api/explore/ai', {'area': '中環', 'category': 'food', 'locale': 'zh-Hans'}),
+        ):
+            for key in (None, '', 'bad key'):
+                status, text = self.post(body, path=path, key=key)
+                self.assertEqual(status, 401)
+                self.assertNotIn(SITE_SECRET, text)
+        self.assertEqual(self.calls, [])
+
+    def test_key_check_forwards_only_the_request_key_to_deepseek(self):
+        with patch.object(ai_proxy.urllib.request, 'urlopen') as upstream:
+            status, text = self.post({'task': 'verify'})
+            self.assertEqual((status, json.loads(text)), (200, {'verified': True}))
+        request = upstream.call_args.args[0]
+        self.assertEqual(request.get_method(), 'GET')
+        self.assertEqual(request.full_url, 'https://api.deepseek.com/user/balance')
+        self.assertEqual(request.get_header('Authorization'), f'Bearer {SECRET}')
+        self.assertEqual(self.calls, [])
 
     def get_status(self, fetch_site='same-origin', visitor='1.1.1.1'):
         connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port)
@@ -246,8 +210,8 @@ class ProxyTests(unittest.TestCase):
     def test_map_key_stops_at_the_limit_and_never_shares_secrets(self):
         ai_proxy.budget = budget(map=(1, 10, 10))
         text = self.get_status()
-        self.assertEqual(json.loads(text), {'available': True, 'mapKey': 'map-key', 'places': True, 'transitous': True})
-        self.assertNotIn(SECRET, text)
+        self.assertEqual(json.loads(text), {'mapKey': 'map-key', 'places': True, 'transitous': True})
+        self.assertNotIn(SITE_SECRET, text)
         self.assertNotIn('places-key', text)
         self.assertEqual(json.loads(self.get_status())['mapKey'], None)
 
@@ -331,7 +295,6 @@ class ProxyTests(unittest.TestCase):
             web.assert_called_once_with('深水埗站', 'food', 'zh-HK')
 
     def test_explore_ai_fills_ten_unique_suggestions_from_web_sources(self):
-        ai_proxy.budget = budget(explore_ai=(1, 10, 10))
         source = 'https://example.org/kowloon/guide'
 
         def reply(numbers, extra=False):
@@ -353,12 +316,13 @@ class ProxyTests(unittest.TestCase):
             status, payload = self.post(request, path='/api/explore/ai')
             self.assertEqual(status, 200)
             items = json.loads(payload)['suggestions']
+            self.assertAlmostEqual(json.loads(payload)['costCny'], 0.028)
             self.assertEqual([item['name'] for item in items], [f'店 {i}' for i in range(1, 11)])
             self.assertTrue(all(item['reason'] and item['source']['url'] == source for item in items))
-            follow_up = model.call_args.args[0]
+            key, follow_up = model.call_args.args
+            self.assertEqual(key, SECRET)
             self.assertEqual(follow_up['tools'], [{'type': 'deepseek_web_search'}])
             self.assertEqual(json.loads(follow_up['messages'][1]['content'])['already_suggested'], [f'店 {i}' for i in range(1, 8)])
-            self.assertEqual(self.post(request, path='/api/explore/ai')[0], 429)
             self.assertEqual(model.call_count, 2)
 
     def test_walking_route_stops_at_the_limit(self):
@@ -370,11 +334,13 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.post(leg, path='/api/walk')[0], 200)
         self.assertEqual(self.post(leg, path='/api/walk')[0], 429)
 
-    def test_each_visitor_stops_at_their_daily_spend(self):
-        ai_proxy.ask_deepseek = lambda system, message: (ANSWER, {'prompt_cache_miss_tokens': 0, 'completion_tokens': 7000})
+    def test_ai_returns_spend_without_enforcing_a_budget(self):
+        ai_proxy.ask_deepseek = lambda key, system, message: (ANSWER, {'completion_tokens': 7000})
         chat = {'task': 'chat', 'message': 'x'}
-        self.assertEqual([self.post(chat)[0] for _ in range(3)], [200, 200, 429])  # ¥0.056 each.
-        self.assertEqual(self.post(chat, visitor='2.2.2.2')[0], 200)
+        for _ in range(13):
+            status, text = self.post(chat)
+            self.assertEqual(status, 200)
+            self.assertAlmostEqual(json.loads(text)['costCny'], 0.056)
 
     def test_suggestions_stop_at_the_limit(self):
         ai_proxy.budget = budget(suggest=(1, 10, 10))
@@ -394,12 +360,13 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.post({'id': 'ChIJabc-_1'}, path='/api/place')[0], 429)
 
     def test_upstream_errors_reveal_nothing(self):
-        def fail(system, message):
-            raise urllib.error.HTTPError('u', 401, f'bad key {SECRET}', {}, None)
-        ai_proxy.ask_deepseek = fail
-        status, text = self.post({'task': 'chat', 'message': 'x'})
-        self.assertEqual(status, 502)
-        self.assertNotIn(SECRET, text)
+        for code in (401, 402, 429, 500):
+            def fail(key, system, message):
+                raise urllib.error.HTTPError('u', code, f'upstream echoed {key}', {}, None)
+            ai_proxy.ask_deepseek = fail
+            status, text = self.post({'task': 'chat', 'message': 'x'})
+            self.assertEqual(status, code if code != 500 else 502)
+            self.assertNotIn(SECRET, text)
 
     def test_only_short_json_goes_back(self):
         for good in (ANSWER, '```json\n{"kind": "say", "text": "可以幫你規劃路線。"}\n```', '{"kind": "discover", "want": "拉麵", "searchTerms": ["a", "b"]}'):
@@ -408,8 +375,10 @@ class ProxyTests(unittest.TestCase):
         for bad in ('Rome was founded in 753 BC.', '[1, 2]', '{broken', f'{{"kind": "say", "text": "{essay}"}}',
                     f'{{"options": ["{essay}"]}}', f'{{"a": {{"b": ["{essay}"]}}}}'):
             self.assertFalse(ai_proxy.is_app_reply(bad), bad[:30])
-        ai_proxy.ask_deepseek = lambda system, message: ('Rome was founded in 753 BC.', {})
-        self.assertEqual(self.post({'task': 'chat', 'message': 'x'})[0], 502)
+        ai_proxy.ask_deepseek = lambda key, system, message: ('Rome was founded in 753 BC.', {'completion_tokens': 1000})
+        status, text = self.post({'task': 'chat', 'message': 'x'})
+        self.assertEqual(status, 502)
+        self.assertAlmostEqual(json.loads(text)['costCny'], 0.008)
 
 
 if __name__ == '__main__':

@@ -14,7 +14,7 @@ available without the server.
 | `js/google-transit.js`, `js/transitous.js` | Direction requests and journey conversion by provider |
 | `js/transit-provider.js` | Shared scheduled journeys and stop matching for operator ETAs |
 | `js/eta.js` | Per-operator arrival fetchers and parsers |
-| `js/ai.js` | DeepSeek client, prompts and the rule parser used without a key |
+| `js/ai.js` | DeepSeek client, prompts and rule parser |
 | `js/places.js` | Place search and walking routes: Google through the server, then the free sources |
 | `js/hans.js` | Traditional to Simplified Chinese |
 | `js/planner.worker.js` | Runs the route search off the main thread |
@@ -27,8 +27,8 @@ python3 -m http.server 8642 --directory web
 ```
 
 To publish to your own server, put `DEPLOY_HOST`, `DEPLOY_KEY` and `DEPLOY_DOMAIN` in `.env.deploy`
-(ignored by git) and run `Deploy web.command`. Run `Set AI key.command` once to put the DeepSeek key
-on the server. It never goes into the repository or the web folder. Run `Set routes key.command` for walking and transit routes, and `Set Google keys.command` to add
+(ignored by git) and run `Deploy web.command`. Users enter their own DeepSeek key in Settings → AI API.
+Run `Set routes key.command` for walking and transit routes, and `Set Google keys.command` to add
 Google's map and place keys. The server caps usage at 5,000 walking requests and 4,000 transit
 requests per month. Google transit runs with Google Maps active. Browsers can see the map key, so
 limit it to your domain and set daily quotas in Google Cloud.
