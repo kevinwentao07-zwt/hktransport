@@ -5,28 +5,12 @@
 ._*
 __MACOSX/
 
-# Xcode user state and build output
-xcuserdata/
-*.xcuserstate
-*.xccheckout
-*.xcscmblueprint
-build/
-DerivedData/
-.derivedData/
-*.dSYM
-*.dSYM.zip
-*.xcarchive
-
-# Swift and JavaScript dependency caches
-.build/
-.swiftpm/
+# JavaScript dependencies
 node_modules/
 
-# Local packaging and temporary output
+# Temporary output
 dist/
 /tmp/
-*.dmg
-*.app/
 *.log
 
 # Local environment and credentials
@@ -36,7 +20,3 @@ dist/
 *.local.json
 *.pem
 *.key
-
-# Reference project snapshots (see THIRD_PARTY_NOTICES.md)
-/Notch-Triage-main/
-/hk-independent-bus-eta-master/

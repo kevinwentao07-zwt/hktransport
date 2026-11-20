@@ -52,7 +52,7 @@ Choose a provider and model, then verify and save your own API key in Settings â
 
 ### Also
 
-- Add it to your home screen and use it as an app (PWA).
+- Add the website to your home screen (PWA).
 - Traditional Chinese, Simplified Chinese and English. Dark mode follows your device.
 - Saved stops and history stay on your device.
 
@@ -85,12 +85,8 @@ cd server && python3 -m unittest test_ai_proxy # Server tests
 
 To deploy to your own server, see [`web/README.md`](web/README.md).
 
-## macOS app
-
-The repository also holds a native macOS app (Swift / SwiftUI) with arrivals, trip planning and an optional Dynamic Island style display in the MacBook notch. Download it from [Releases](https://github.com/kevinwentao07-zwt/hktransport/releases/latest), or build it with `./"Start hktransport.command"` (macOS 14 or later). Some newer web features aren't in it yet.
-
 ## Sources and licence
 
-Route data comes from [hkbus.app](https://hkbus.app/), and arrivals from the operators' open data. The macOS notch window is based on [Notch Triage](https://github.com/0Hyacinth0/Notch-Triage), and its transport data handling draws on [HK Bus ETA](https://github.com/hkbus/hk-independent-bus-eta).
+Route data comes from [hkbus.app](https://hkbus.app/), and arrivals from the operators' open data. The arrival fetchers draw on [HK Bus ETA](https://github.com/hkbus/hk-independent-bus-eta).
 
 Licensed under **GPL-3.0**: see [`LICENSE`](LICENSE). Sources are listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

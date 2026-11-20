@@ -1,4 +1,4 @@
-// Per-operator arrival fetchers. A port of ETAService.swift.
+// Per-operator arrival fetchers.
 import { trainServes } from './transit.js?v=dev';
 
 const text = (value) => (value == null ? '' : String(value));

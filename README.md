@@ -52,7 +52,7 @@
 
 ### 其他
 
-- 可加入主畫面，當作 App 使用（PWA）。
+- 可將網站加入主畫面（PWA）。
 - 繁體中文、简体中文及 English，深色模式跟隨系統。
 - 收藏及搜尋記錄只保存在你的裝置。
 
@@ -85,12 +85,8 @@ cd server && python3 -m unittest test_ai_proxy # 伺服器測試
 
 部署到自己的伺服器及各項設定見 [`web/README.md`](web/README.md)。
 
-## macOS 版
-
-倉庫同時包含一個原生 macOS 應用（Swift / SwiftUI），提供到站預報、路線規劃，以及可選的 MacBook 劉海靈動島顯示。可到 [Releases](https://github.com/kevinwentao07-zwt/hktransport/releases/latest) 下載，或執行 `./"Start hktransport.command"` 從原始碼編譯（需要 macOS 14 或以上）。部分網頁版的新功能尚未加入 macOS 版。
-
 ## 來源與授權
 
-路線資料來自 [hkbus.app](https://hkbus.app/)，到站時間來自各營辦商的開放數據。macOS 版的劉海視窗基於 [Notch Triage](https://github.com/0Hyacinth0/Notch-Triage)，交通資料處理參考 [HK Bus ETA](https://github.com/hkbus/hk-independent-bus-eta)。
+路線資料來自 [hkbus.app](https://hkbus.app/)，到站時間來自各營辦商的開放數據。到站時間查詢參考 [HK Bus ETA](https://github.com/hkbus/hk-independent-bus-eta)。
 
 本專案採用 **GPL-3.0**，見 [`LICENSE`](LICENSE)。來源紀錄見 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

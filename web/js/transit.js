@@ -1,5 +1,5 @@
 // Route data, the RAPTOR search and journey maths. No DOM, so it also runs in
-// the worker and in Node tests. A port of RoutePlanner.swift and friends.
+// the worker and in Node tests.
 
 export const OPERATORS = ['kmb', 'ctb', 'nlb', 'gmb', 'lightRail', 'mtr'];
 
