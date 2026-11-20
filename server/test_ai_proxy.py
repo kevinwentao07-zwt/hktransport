@@ -330,6 +330,37 @@ class ProxyTests(unittest.TestCase):
             self.assertEqual(self.post(request, path='/api/explore')[0], 429)
             web.assert_called_once_with('深水埗站', 'food', 'zh-HK')
 
+    def test_explore_ai_fills_ten_unique_suggestions_from_web_sources(self):
+        ai_proxy.budget = budget(explore_ai=(1, 10, 10))
+        source = 'https://example.org/kowloon/guide'
+
+        def reply(numbers, extra=False):
+            rows = [
+                {'name': f'店 {i}', 'address': '深水埗', 'reason': '試試即製的港式小吃。', 'source_url': source + '#venues'}
+                for i in numbers
+            ]
+            if extra:
+                rows.insert(0, {'name': 'Invented venue', 'reason': 'Unsupported', 'source_url': 'https://example.org/other'})
+            return {'choices': [{'message': {
+                'content': '\n'.join(json.dumps(row) for row in rows),
+                'server_tool_calls': [{'calls': [{'status': 'completed', 'sources': [{'url': source, 'title': '九龍指南'}]}]}],
+            }}], 'usage': {'prompt_cache_miss_tokens': 7000}}
+
+        request = {'area': '深水埗站', 'category': 'food', 'locale': 'zh-Hans'}
+        with patch.object(ai_proxy, 'deepseek_completion', side_effect=[reply(range(1, 8), True), reply(range(7, 12))]) as model:
+            self.assertEqual(self.post(request, origin=False, path='/api/explore/ai')[0], 403)
+            self.assertEqual(self.post({**request, 'locale': 'invalid'}, path='/api/explore/ai')[0], 400)
+            status, payload = self.post(request, path='/api/explore/ai')
+            self.assertEqual(status, 200)
+            items = json.loads(payload)['suggestions']
+            self.assertEqual([item['name'] for item in items], [f'店 {i}' for i in range(1, 11)])
+            self.assertTrue(all(item['reason'] and item['source']['url'] == source for item in items))
+            follow_up = model.call_args.args[0]
+            self.assertEqual(follow_up['tools'], [{'type': 'deepseek_web_search'}])
+            self.assertEqual(json.loads(follow_up['messages'][1]['content'])['already_suggested'], [f'店 {i}' for i in range(1, 8)])
+            self.assertEqual(self.post(request, path='/api/explore/ai')[0], 429)
+            self.assertEqual(model.call_count, 2)
+
     def test_walking_route_stops_at_the_limit(self):
         ai_proxy.budget = budget(walk=(1, 10, 10))
         ai_proxy.walking_route = lambda start, end: {'points': [start, end], 'meters': 120, 'seconds': 95}

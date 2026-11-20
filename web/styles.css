@@ -281,6 +281,9 @@ svg.icon.solid { fill: currentColor; }
 #near-stops:empty { display: none; }
 #panel:has(#explore-panel) :is(#top, #bottom) { display: none; }
 #explore-panel { display: flex; flex-direction: column; gap: 10px; }
+.explore-ai-button { gap: 6px; color: var(--ai); background: var(--ai-soft); }
+.explore-ai-results { display: flex; flex-direction: column; gap: 8px; }
+.explore-ai-card { gap: 6px; }
 .explore-facts { display: block; margin-top: 3px; }
 .explore-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .explore-evidence { border-inline-start: 2px solid var(--line); padding-inline-start: 9px; }

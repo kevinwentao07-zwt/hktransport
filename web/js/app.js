@@ -7,7 +7,7 @@ import { meters,
 import { fetchETA, liveArrivalCache, routeArrivals } from './eta.js?v=dev';
 import { toSimplified } from './hans.js?v=dev';
 import { chatMessage, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
-import { HONG_KONG, cleanArea, exploreDestination, exploreWebSearchURL, googlePlaceLocation, googleSearch, googleSuggest, googleWalk, governmentSearch, inHongKong, insideArea, isNearby, knownShape, knownWalk, knownWalkTime, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
+import { HONG_KONG, cleanArea, exploreAISuggestions, exploreDestination, exploreWebSearchURL, googlePlaceLocation, googleSearch, googleSuggest, googleWalk, governmentSearch, inHongKong, insideArea, isNearby, knownShape, knownWalk, knownWalkTime, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
 
 import { googleJourneys, requestGoogleTransit } from './google-transit.js?v=dev';
 import { requestTransitous, transitousJourneys } from './transitous.js?v=dev';
@@ -2293,6 +2293,7 @@ function showStopsNear(place) {
 
 function clearExplore() {
   state.explore?.request?.abort();
+  state.explore?.ai?.request.abort();
   state.explore = null;
 }
 
@@ -2317,6 +2318,10 @@ function closeExplore() {
 async function searchExplore(category, radius) {
   const view = state.explore;
   view.request?.abort();
+  if (category !== view.category) {
+    view.ai?.request.abort();
+    view.ai = null;
+  }
   const request = new AbortController();
   Object.assign(view, { category, radius, request, places: [], sources: [], selected: null, busy: true, choosing: false, notice: null });
   renderSheet();
@@ -2325,6 +2330,24 @@ async function searchExplore(category, radius) {
     .catch(() => ({ places: [], sources: [] }));
   if (state.explore !== view || request.signal.aborted) return;
   Object.assign(view, results, { busy: false });
+  renderSheet();
+}
+
+const exploreLocale = () => state.lang === 'en' ? 'en' : state.script === 'hans' ? 'zh-Hans' : 'zh-Hant';
+
+async function showExploreAI(view) {
+  if (view.ai?.busy) return;
+  if (view.ai?.suggestions.length) {
+    view.ai.open = !view.ai.open;
+    return renderSheet();
+  }
+  const request = new AbortController();
+  const ai = view.ai = { request, open: true, busy: true, suggestions: [], status: null };
+  renderSheet();
+  const answer = await exploreAISuggestions(view.destination, view.category, exploreLocale(), request.signal)
+    .catch(() => ({ status: 503 }));
+  if (state.explore !== view || view.ai !== ai || request.signal.aborted) return;
+  Object.assign(ai, { busy: false, suggestions: answer.suggestions ?? [], status: answer.status });
   renderSheet();
 }
 
@@ -2359,11 +2382,50 @@ async function planToExplorePlace(view, place) {
     view.notice = t('未能配對到這個地點。可以在 Google 地圖查看。', "Couldn't match this place for routing. You can open it in Google Maps.");
     return renderSheet();
   }
+  routeToExploredPlace(place.name, target.location);
+}
+
+function routeToExploredPlace(name, location) {
   const start = state.from;
-  state.destination = place.name;
+  state.destination = name;
   state.discovery = null;
   syncPlaceInputs();
-  runPlan({ kind: 'place', place: { name: place.name, location: target.location }, start });
+  runPlan({ kind: 'place', place: { name, location }, start });
+}
+
+async function planToExploreAI(view, item) {
+  const ai = view.ai;
+  if (ai.choosing) return;
+  ai.choosing = item;
+  ai.unmatched = null;
+  renderSheet();
+
+  const key = (text) => normalizePlace(toSimplified(text ?? ''));
+  const center = view.destination.location, radius = 1500;
+  const match = (places) => {
+    const nearby = withinArea(places.filter((place) => [place.name, place.nameEn].some((name) => key(name) === key(item.name))),
+      { center, radius });
+    const address = key(item.address);
+    if (address) return nearby.find((place) => {
+      const candidate = key(place.address);
+      return candidate.length >= 6 && address.length >= 6 && (candidate.includes(address) || address.includes(candidate));
+    });
+    return nearby.length && nearby.every((place) => meters(nearby[0].location, place.location) < 40) ? nearby[0] : null;
+  };
+  let target = match(view.provider !== 'google' || mapView === googleMap ? view.places : []);
+  if (!target) {
+    const [google, government, osm] = await Promise.all([
+      mapView === googleMap ? googleSearch([item.name, item.address].filter(Boolean).join(' '), center, radius, state.lang) : null,
+      governmentSearch(item.name),
+      photonSearch(item.name, center, radius),
+    ]);
+    if (state.explore !== view || view.ai !== ai) return;
+    target = match([...(mapView === googleMap ? (google ?? []) : []), ...government, ...osm]);
+  }
+  ai.choosing = null;
+  if (target) return routeToExploredPlace(item.name, target.location);
+  ai.unmatched = item;
+  renderSheet();
 }
 
 function googleDirections() {
@@ -2480,9 +2542,41 @@ const EXPLORE_KINDS = {
   gallery: ['藝廊', 'Gallery'], park: ['公園', 'Park'], monument: ['古蹟', 'Monument'],
 };
 
+function exploreAISection(view) {
+  const ai = view.ai;
+  const cards = ai?.suggestions.map((item) => {
+    const query = [item.name, item.address, 'Hong Kong'].filter(Boolean).join(' ');
+    const maps = new URLSearchParams({ api: '1', query });
+    return h('article', { class: 'card explore-ai-card' },
+      h('strong', {}, item.name),
+      item.address && h('div', { class: 'tiny muted' }, item.address),
+      h('div', { class: 'small' }, item.reason),
+      ai.unmatched === item && h('div', { class: 'tiny muted', role: 'status' }, t('未能確認地點，可先在地圖查看。', "Couldn't confirm the location. You can check it on a map.")),
+      h('div', { class: 'explore-actions tiny' },
+        h('button', { class: 'link', disabled: !!ai.choosing, onclick: () => planToExploreAI(view, item) },
+          ai.choosing === item ? t('正在確認地點…', 'Confirming place…') : t('規劃到這裡', 'Plan a route here')),
+        h('a', { class: 'link', href: item.source.url, target: '_blank', rel: 'noopener noreferrer', title: item.source.title },
+          t('查看來源', 'Read source')),
+        h('a', { class: 'link', href: `https://www.google.com/maps/search/?${maps}`, target: '_blank', rel: 'noopener noreferrer' },
+          t('在地圖查看', 'Find on a map'))));
+  });
+  return [
+    h('button', { class: 'link explore-ai-button', 'aria-expanded': String(!!ai?.open), disabled: ai?.busy, onclick: () => showExploreAI(view) },
+      icon('spark', 15), t('AI 建議', 'AI suggestions')),
+    ai?.open && h('section', { class: 'explore-ai-results', 'aria-busy': String(ai.busy) },
+      ai.busy && h('div', { class: 'status', role: 'status' }, h('span', { class: 'spinner' }), t('AI 正在搜尋網頁及整理建議…', 'AI is searching the web and preparing suggestions…')),
+      !ai.busy && !cards.length && h('div', { class: 'notice', role: 'status' }, ai.status === 429
+        ? t('AI 建議暫達使用上限，請稍後再試。', 'AI suggestions have reached their limit. Try again later.')
+        : ai.status ? t('暫時未能取得 AI 建議，請稍後再試。', 'AI suggestions are unavailable. Try again later.')
+          : t('暫時找不到有網頁來源支持的建議。', 'No suggestions with usable web sources were found.')),
+      cards.length > 0 && h('div', { class: 'tiny muted' },
+        t(`找到 ${cards.length} 個有來源的建議 · 搜尋範圍約 1.5 公里`, `${cards.length} suggestions with sources · Search area about 1.5 km`)),
+      cards),
+  ];
+}
+
 function exploreSheet(view) {
   const { category, destination, radius, places, sources, selected, busy, provider } = view;
-  const locale = state.lang === 'en' ? 'en' : state.script === 'hans' ? 'zh-Hans' : 'zh-Hant';
   const tabs = segments([['food', t('美食', 'Food')], ['sights', t('好去處', 'Things to do')]], category, (choice) => {
     if (choice !== category) void searchExplore(choice, radius);
   });
@@ -2513,6 +2607,7 @@ function exploreSheet(view) {
       h('div', { class: 'title' }, t(`探索「${destination.name}」附近`, `Explore around ${destination.name}`)),
       h('div', { class: 'tiny muted' }, t(`目的地周邊 ${distanceText(radius)}`, `Within ${distanceText(radius)} of the destination`))),
     tabs,
+    exploreAISection(view),
     busy && h('div', { class: 'status', role: 'status' }, h('span', { class: 'spinner' }), t('搜尋附近地點及網頁…', 'Searching nearby places and guides…')),
     !busy && !places.length && h('div', { class: 'notice', role: 'status' }, t('這個範圍內暫時找不到合適的地點。', 'No places found in this area.')),
     places.length > 0 && (provider === 'google' ? h('div', { class: 'explore-google', translate: 'no' }, 'Google Maps')
@@ -2523,7 +2618,7 @@ function exploreSheet(view) {
     h('div', { class: 'card explore-sources small' },
       h('strong', {}, t('附近網頁及攻略', 'Nearby guides and web sources')),
       sources.slice(0, 4).map(sourceLink),
-      h('a', { class: 'link', href: exploreWebSearchURL(destination.name, category, locale), target: '_blank', rel: 'noopener noreferrer' },
+      h('a', { class: 'link', href: exploreWebSearchURL(destination.name, category, exploreLocale()), target: '_blank', rel: 'noopener noreferrer' },
         icon('search', 14), t('在瀏覽器搜尋更多', 'Search the web'))));
 }
 
@@ -3120,7 +3215,7 @@ function settingsSheet() {
         '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會經本站伺服器傳送給 Google，或在額度用完時傳送給 OpenStreetMap 的 Photon 服務，用來搜尋你身邊 5 公里內的地點。AI 請求及店舖搜尋經本站伺服器轉送給 DeepSeek 及 Google，伺服器不會保存內容。傳送給 DeepSeek 的只有你輸入的文字、地區、站名、路線號碼及店舖資料，不包括座標。規劃公共交通路線時，起終點座標及所選時間會經本站伺服器傳送給 Transitous 或 Google。Google 亦會收到步行路段兩端的座標。Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
         'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go through this site\'s server to Google, or to OpenStreetMap\'s Photon service once the allowance is used up, to search within 5 km of you. AI requests and shop searches pass through this site\'s server to DeepSeek and Google, and the server keeps none of it. DeepSeek only receives your text, the district, stop names, route numbers and shop details, never coordinates. For public transport directions, the start and end coordinates and selected time go through this site\'s server to Transitous or Google. Google also receives the two ends of walking segments. Google Maps loads straight into your browser under Google\'s privacy policy.')),
       aboutItem(t('資料來源', 'Data sources'), t('路線資料來自 hkbus.app；到站時間來自各營辦商；公共交通路線由 Transitous、Google 地圖或內置演算法規劃；地圖、地點、步行路線及店舖來自 Google，額度用完後改用 OpenFreeMap、OpenStreetMap 及政府地理資訊。', 'Route data from hkbus.app; arrivals from the operators; public transport routes from Transitous, Google Maps or the built-in planner; maps, places, walking routes and shops from Google, and after the allowance, OpenFreeMap, OpenStreetMap and Government GIS.')),
-      aboutItem(t('探索目的地附近', 'Explore nearby'), t('開啟探索後，目的地座標會用於 Google 地圖或 OpenStreetMap 的 Photon 地點搜尋，目的地名稱會用於維基導遊或 Brave Search 的網頁搜尋。', 'Opening Explore uses the destination coordinates to find places through Google Maps or OpenStreetMap Photon. It uses the destination name to search Wikivoyage or Brave Search for web sources.')),
+      aboutItem(t('探索目的地附近', 'Explore nearby'), t('開啟探索後，目的地座標會用於 Google 地圖或 OpenStreetMap 的 Photon 地點搜尋，目的地名稱會用於維基導遊或 Brave Search 的網頁搜尋。點選 AI 建議時，目的地名稱及所選類別會交給 DeepSeek 搜尋。', 'Opening Explore uses the destination coordinates to find places through Google Maps or OpenStreetMap Photon. It uses the destination name to search Wikivoyage or Brave Search for web sources. AI suggestions send the destination name and selected category to DeepSeek for web search.')),
       h('a', { class: 'small link', href: 'https://data.gov.hk/en-data/dataset/mtr-data-routes-fares-barrier-free-facilities', target: '_blank', rel: 'noopener' },
         t('八達通鐵路車費 © 港鐵公司（資料來自 DATA.GOV.HK）', 'Octopus rail fares © MTR Corporation Limited via DATA.GOV.HK')),
       h('a', { class: 'small link', href: 'https://www.google.com/help/terms_maps/', target: '_blank', rel: 'noopener' }, t('Google 地圖使用條款', 'Google Maps Terms of Service')),
