@@ -28,6 +28,21 @@ const noon = Date.parse('2026-11-04T12:00:00+08:00');
 const at = (id) => db.stops[id].location;
 const close = (a, b, tolerance = 0.01) => assert.ok(Math.abs(a - b) <= tolerance, `${a} !~ ${b}`);
 
+test('exploration stays near the destination, with sources matched to the right branch', () => {
+  const center = { lat: 22.33, lng: 114.16 };
+  const place = (id, offset, address, status) => ({
+    id, name: 'Test Café', address, status, location: { ...center, lat: center.lat + offset / 111_000 },
+  });
+  const branch = place('one', 70, '10 Test Street');
+  const other = place('two', 130, '18 Other Street');
+  const source = { title: 'Test Café guide', snippet: 'Visit Test Café at 10 Test Street.' };
+  const results = P.exploreResults([
+    branch, place('duplicate', 88, '10 Test Street'), other,
+    place('closed', 200, '20 Test Street', 'CLOSED_TEMPORARILY'), place('far', 900, '90 Test Street'),
+  ], [source], center, 800);
+  assert.deepEqual(results.map((item) => [item.id, item.source]), [['one', source], ['two', undefined]]);
+});
+
 test('frequency keeps single departures and sorts bands', () => {
   assert.deepEqual(T.parseFrequency({ 1: { '0800': ['0900', '600'], '0700': null } })[1], [{ start: 420, end: null, headway: null }, { start: 480, end: 540, headway: 600 }]);
 });

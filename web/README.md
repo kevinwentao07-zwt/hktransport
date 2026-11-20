@@ -37,6 +37,9 @@ Transitous is enabled on the server by default. Set `TRANSITOUS_ENABLED=0`
 in the service environment to disable it. The proxy identifies the application to Transitous
 and caps usage at 300 requests per day across the site.
 
+Explore nearby uses Google Places and Wikivoyage. To enable Brave web search, set
+`BRAVE_SEARCH_API_KEY` in the server's `/etc/hktransport/search.env` and restart
+`hktransport-ai`. The service uses Wikivoyage when Brave is unavailable.
 
 To publish to GitHub Pages, push `web/` to the `gh-pages` branch:
 

@@ -1,7 +1,7 @@
 // Finding places: the Government's location search for landmarks and buildings,
 // and Photon (OpenStreetMap) for shops, neither of which needs a key. Google goes through the
 // site's server, which holds the key and its limits.
-import { meters } from './transit.js?v=dev';
+import { meters, normalizePlace } from './transit.js?v=dev';
 
 const HK_BBOX = '113.82,22.13,114.45,22.58';
 export const inHongKong = (l) => l.lat >= 22.13 && l.lat <= 22.58 && l.lng >= 113.82 && l.lng <= 114.45;
@@ -153,9 +153,9 @@ export function hk80ToWgs84(easting, northing) {
   return { lat: lat / rad - 5.5 / 3600, lng: lng / rad + 8.8 / 3600 };
 }
 
-async function json(url) {
+async function json(url, options = {}) {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    const response = await fetch(url, { signal: AbortSignal.timeout(10_000), ...options });
     return response.ok ? await response.json() : null;
   } catch {
     return null;
@@ -205,6 +205,52 @@ export function insideArea(places, area) {
 }
 
 export const withinArea = (places, area) => insideArea(places, area).sort((a, b) => a.meters - b.meters);
+
+const EXPLORE_TAGS = {
+  food: ['amenity:restaurant', 'amenity:cafe', 'amenity:fast_food', 'shop:bakery'],
+  sights: ['tourism:attraction', 'tourism:museum', 'tourism:gallery', 'leisure:park', 'historic:monument'],
+};
+
+export function exploreResults(places, sources, center, radius) {
+  const names = new Map(), ids = new Set();
+  return insideArea(places.filter((place) => place?.name && place.location && inHongKong(place.location)
+    && !['CLOSED_PERMANENTLY', 'CLOSED_TEMPORARILY', 'FUTURE_OPENING'].includes(place.status)), { center, radius })
+    .filter((place) => {
+      const name = normalizePlace(place.name);
+      const branches = names.get(name) ?? [];
+      if ((place.id && ids.has(place.id)) || branches.some((point) => meters(point, place.location) < 40)) return false;
+      if (place.id) ids.add(place.id);
+      names.set(name, [...branches, place.location]);
+      return true;
+    }).map((place) => {
+      const name = normalizePlace(place.name), address = normalizePlace(place.address ?? '');
+      // A name on its own could refer to another branch, especially for chain restaurants.
+      const source = name.length >= 3 && address.length >= 6 ? sources.find(({ title, snippet }) => {
+        const text = normalizePlace(`${title} ${snippet ?? ''}`);
+        return text.includes(name) && text.includes(address);
+      }) : null;
+      return { ...place, source };
+    }).sort((a, b) => Math.floor(a.meters / 250) - Math.floor(b.meters / 250)
+      || Number(Boolean(b.source)) - Number(Boolean(a.source))).slice(0, 8);
+}
+
+export async function exploreDestination(destination, category, radius, lang, signal) {
+  const center = destination.location;
+  const answer = await json('api/explore', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ area: destination.name.slice(0, 100), center, category, radius, lang }),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+  });
+  const sources = Array.isArray(answer?.sources) ? answer.sources : [];
+  const places = exploreResults(Array.isArray(answer?.places) ? answer.places : [], sources, center, radius);
+  if (places.length || signal.aborted) return { places, sources, provider: 'google' };
+
+  const params = new URLSearchParams({ lat: center.lat, lon: center.lng, radius: radius / 1000, limit: 20 });
+  for (const tag of EXPLORE_TAGS[category]) params.append('osm_tag', tag);
+  const found = await json(`https://photon.komoot.io/reverse?${params}`, { signal: AbortSignal.any([signal, AbortSignal.timeout(5500)]) });
+  const nearby = (found?.features ?? []).map(photonItem);
+  return { places: exploreResults(nearby, sources, center, radius), sources, provider: 'osm' };
+}
 
 /** Two lists as one, best of each first, with each place once. */
 export function mergeShops(first, second, limit) {

@@ -277,6 +277,15 @@ svg.icon.solid { fill: currentColor; }
 #place-history .list { max-height: 52vh; overflow-y: auto; }
 #plan-when { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; }
 #plan-when { row-gap: 6px; }
+#near-stops { display: flex; flex-wrap: wrap; gap: 6px; }
+#near-stops:empty { display: none; }
+#panel:has(#explore-panel) :is(#top, #bottom) { display: none; }
+#explore-panel { display: flex; flex-direction: column; gap: 10px; }
+.explore-facts { display: block; margin-top: 3px; }
+.explore-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.explore-evidence { border-inline-start: 2px solid var(--line); padding-inline-start: 9px; }
+.explore-evidence p { margin: 0 0 3px; }
+.explore-google { color: var(--ink); font-size: 12px; white-space: nowrap; }
 .when-chip { display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600; transition: transform .35s var(--pop); }
 .when-chip:active { transform: scale(.95); }
 .when-chip[aria-expanded="true"] .icon:last-child { transform: rotate(180deg); }

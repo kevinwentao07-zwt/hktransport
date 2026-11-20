@@ -317,6 +317,19 @@ class ProxyTests(unittest.TestCase):
             self.assertEqual(self.post(trip, path='/api/transitous')[0], 429)
             upstream.assert_called_once()
 
+    def test_explore_returns_guides_even_when_the_map_provider_fails(self):
+        ai_proxy.budget = budget(explore=(1, 10, 10))
+        request = {'area': '深水埗站', 'center': {'lat': 22.33, 'lng': 114.16}, 'category': 'food', 'radius': 800}
+        source = {'title': '香港/九龍 · 用餐', 'url': 'https://zh.wikivoyage.org/wiki/Hong_Kong/Kowloon'}
+        with patch.object(ai_proxy, 'nearby_places', side_effect=OSError), \
+                patch.object(ai_proxy, 'explore_web', return_value=[source]) as web:
+            self.assertEqual(self.post(request, origin=False, path='/api/explore')[0], 403)
+            self.assertEqual(self.post({**request, 'radius': 5000}, path='/api/explore')[0], 400)
+            status, result = self.post(request, path='/api/explore')
+            self.assertEqual((status, json.loads(result)), (200, {'places': [], 'sources': [source]}))
+            self.assertEqual(self.post(request, path='/api/explore')[0], 429)
+            web.assert_called_once_with('深水埗站', 'food', 'zh-HK')
+
     def test_walking_route_stops_at_the_limit(self):
         ai_proxy.budget = budget(walk=(1, 10, 10))
         ai_proxy.walking_route = lambda start, end: {'points': [start, end], 'meters': 120, 'seconds': 95}

@@ -1,13 +1,13 @@
 // The page itself: tabs, map, and the flows that tie the modules together.
 import { meters,
   OP_COLORS, OP_LABELS, MODES, LIVE_AHEAD_MS, arrivalTime, arrivesLate, buildStopIndex, closestPosition, nextRouteKeys, planAdvice, routeFamily, routeWays, exactSite, instruction, journeyID, journeyPath, RETURN_COLOR, circularTurn, roadBetween, lineColor, lineName, matchingSites,
-  nameText, normalizeDB, partialSite, pathAhead, glideOnTrack, primaryMode, progressAt, retime, rides, routeTrack, fitsWalkLimit, journeyFare, MAX_WALK_LEG_MINUTES, rankCombinedTripOptions, searchRoutes, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
+  nameText, normalizeDB, normalizePlace, partialSite, pathAhead, glideOnTrack, primaryMode, progressAt, retime, rides, routeTrack, fitsWalkLimit, journeyFare, MAX_WALK_LEG_MINUTES, rankCombinedTripOptions, searchRoutes, siteHasMode, stopName, stopsNear, trackBetween, vehiclesOnRoute,
   totalMinutes, transfers, walkEnds, walkingMeters, withWalkTimes,
 } from './transit.js?v=dev';
 import { fetchETA, liveArrivalCache, routeArrivals } from './eta.js?v=dev';
 import { toSimplified } from './hans.js?v=dev';
 import { chatMessage, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
-import { HONG_KONG, cleanArea, googlePlaceLocation, googleSearch, googleSuggest, googleWalk, inHongKong, insideArea, isNearby, knownShape, knownWalk, knownWalkTime, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
+import { HONG_KONG, cleanArea, exploreDestination, googlePlaceLocation, googleSearch, googleSuggest, googleWalk, governmentSearch, inHongKong, insideArea, isNearby, knownShape, knownWalk, knownWalkTime, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
 
 import { googleJourneys, requestGoogleTransit } from './google-transit.js?v=dev';
 import { requestTransitous, transitousJourneys } from './transitous.js?v=dev';
@@ -63,7 +63,7 @@ const state = {
   transitMode: ['mtr', 'bus'].includes(savedTransitMode) ? savedTransitMode : 'all',
   fareProfile: Object.hasOwn(FARE_PROFILES, savedFareProfile) ? savedFareProfile : 'adult',
   from: null, to: null, journeys: [], candidates: [], allowLongWalk: false, onMap: null, expanded: null, explanation: null, aiNotice: null, lastChat: null,
-  discovery: null,
+  discovery: null, explore: null,
   stopQuery: '', stopPlace: null, stops: [], stopMode: 'all', stopRadius: 500, stopBusy: false, stopError: null, stopOpen: null,
   routeQuery: '', routeKey: null, routeKeyboard: false, recentRoutes: store.get('recentRoutes', []), thread: null, lastSearch: null, saved: store.get('saved', []),
   talk: [], focus: null, routeView: false, nav: null, fix: null, speechLang: store.get('speechLang', 'zh-HK'), listening: false,
@@ -872,13 +872,14 @@ async function here() {
   return fix ? { name: t('我的位置', 'My location'), location: { lat: fix.lat, lng: fix.lng } } : null;
 }
 
-function resetPlan() {
+function resetPlan(keepExplore = false) {
   transitRequest?.abort();
+  if (!keepExplore) clearExplore();
   Object.assign(state, { focus: null, journeys: [], candidates: [], allowLongWalk: false, onMap: null, expanded: null, explanation: null, aiNotice: null, from: null, to: null, error: null, arrivals: null });
 }
 
 function showRouteView() {
-  if (!whenOpen) sheet.snap('half');
+  if (!whenOpen && !state.explore) sheet.snap('half');
   if (state.routeView) return;
   state.routeView = true;
   renderPlanTop();
@@ -933,7 +934,8 @@ async function runPlan(request) {
   const startOver = () => {
     const notice = state.aiNotice;
     stopNavigation();
-    resetPlan();
+    const sameDestination = state.explore && (previous?.end ?? request.place) === state.explore.destination;
+    resetPlan(sameDestination);
     state.aiNotice = notice;
     // A place already known stays reachable even if the trip to it can't be planned.
     if (request.place) state.to = request.place;
@@ -993,17 +995,18 @@ async function runPlan(request) {
   const inputs = [state.origin, state.destination];
   setPhase('locating');
   const noLocation = t('未能取得你的位置：請允許定位，或在上方輸入起點。', "Couldn't get your location: allow Location access, or type a start above.");
-  const start = previous?.start ?? (intent.origin ? await resolvePlace(intent.origin) : await here());
-  if (stale()) return;
-  if (!start) return setPhase('failed', intent.origin ? t(`找不到起點「${intent.origin}」。`, `Couldn't find the start "${intent.origin}".`) : noLocation);
+  const startRequest = Promise.resolve(previous?.start ?? request.start ?? (intent.origin ? resolvePlace(intent.origin) : here())).catch(() => null);
   // A shop on screen is already known, so it needs no search.
   let end = previous?.end ?? request.place ?? request.shops?.find((shop) => shop.name === intent.destination);
   if (!end) end = isCurrentLocation(intent.destination) ? await here() : await resolvePlace(intent.destination);
   if (stale()) return;
   if (!end) return setPhase('failed', t(`找不到目的地「${intent.destination}」。`, `Couldn't find "${intent.destination}".`));
-  state.from = start;
   state.to = end;
   renderNearStops();
+  const start = await startRequest;
+  if (stale()) return;
+  if (!start) return setPhase('failed', intent.origin ? t(`找不到起點「${intent.origin}」。`, `Couldn't find the start "${intent.origin}".`) : noLocation);
+  state.from = start;
   // A search can land somewhere other than the words typed, so the boxes say where it went.
   if (request.kind === 'search') {
     if (intent.origin && state.origin === inputs[0]) state.origin = inputs[0] = start.name;
@@ -2277,13 +2280,90 @@ function renderWhen() {
 /** Beside the time, and apart from it, so that planning again leaves a half-picked time alone. */
 function renderNearStops() {
   const slot = $('near-stops');
-  if (slot) clear(slot, state.to && h('button', { class: 'when-chip', onclick: () => showStopsNear(state.to) }, icon('bus', 15), t('目的地附近站點', 'Stops near destination')));
+  if (slot) clear(slot, state.to && h('button', { class: 'when-chip', onclick: () => showStopsNear(state.to) }, icon('bus', 15), t('目的地附近站點', 'Stops near destination')),
+    state.to && inHongKong(state.to.location) && h('button', { id: 'explore-destination', class: 'when-chip', onclick: openExplore },
+      icon('search', 15), t('探索目的地附近', 'Explore nearby')));
 }
 
 function showStopsNear(place) {
   state.stopQuery = place.name;
   setTab('stops');
   searchStops(false, place);
+}
+
+function clearExplore() {
+  state.explore?.request?.abort();
+  state.explore = null;
+}
+
+function openExplore() {
+  if (state.explore || !state.to || !inHongKong(state.to.location)) return;
+  state.explore = { destination: state.to, snap: sheet.current, scroll: $('sheet').scrollTop };
+  sheet.snap('full');
+  void searchExplore('food', 800);
+  document.querySelector('#explore-panel > .back')?.focus({ preventScroll: true });
+}
+
+function closeExplore() {
+  const view = state.explore;
+  if (!view) return;
+  clearExplore();
+  renderSheet();
+  $('sheet').scrollTop = view.scroll;
+  sheet.snap(view.snap);
+  $('explore-destination')?.focus({ preventScroll: true });
+}
+
+async function searchExplore(category, radius) {
+  const view = state.explore;
+  view.request?.abort();
+  const request = new AbortController();
+  Object.assign(view, { category, radius, request, places: [], sources: [], selected: null, busy: true, choosing: false, notice: null });
+  renderSheet();
+  $('sheet').scrollTop = 0;
+  const results = await exploreDestination(view.destination, category, radius, state.lang, request.signal)
+    .catch(() => ({ places: [], sources: [] }));
+  if (state.explore !== view || request.signal.aborted) return;
+  Object.assign(view, results, { busy: false });
+  renderSheet();
+}
+
+function showExplorePlace(view, place) {
+  if (view.choosing) return;
+  view.selected = view.selected === place ? null : place;
+  view.notice = null;
+  renderSheet();
+  if (view.selected && mapView === googleMap) {
+    googleWalk(view.destination.location, place.location).then(() => {
+      if (state.explore === view && view.selected === place) renderSheet();
+    });
+  }
+}
+
+async function planToExplorePlace(view, place) {
+  if (view.choosing) return;
+  view.choosing = true;
+  view.notice = null;
+  renderSheet();
+  let target = place;
+  if (view.provider === 'google' && mapView !== googleMap) {
+    const [government, osm] = await Promise.all([governmentSearch(place.name), photonSearch(place.name, place.location, 180)]);
+    if (state.explore !== view || view.selected !== place) return;
+    const key = (name) => normalizePlace(toSimplified(name ?? ''));
+    target = withinArea([...government, ...osm], { center: place.location, radius: 180 })
+      .find((candidate) => [candidate.name, candidate.nameEn].some((name) => key(name) === key(place.name)));
+  }
+  if (state.explore !== view || view.selected !== place) return;
+  view.choosing = false;
+  if (!target) {
+    view.notice = t('未能配對到這個地點。可以在 Google 地圖查看。', "Couldn't match this place for routing. You can open it in Google Maps.");
+    return renderSheet();
+  }
+  const start = state.from;
+  state.destination = place.name;
+  state.discovery = null;
+  syncPlaceInputs();
+  runPlan({ kind: 'place', place: { name: place.name, location: target.location }, start });
 }
 
 function googleDirections() {
@@ -2394,6 +2474,56 @@ function shopLinks(place, suggestion) {
   return links.length > 0 && h('div', { class: 'shop-links tiny' }, links);
 }
 
+const EXPLORE_KINDS = {
+  restaurant: ['餐廳', 'Restaurant'], cafe: ['咖啡店', 'Café'], fast_food: ['快餐', 'Fast food'],
+  bakery: ['麵包店', 'Bakery'], attraction: ['景點', 'Attraction'], museum: ['博物館', 'Museum'],
+  gallery: ['藝廊', 'Gallery'], park: ['公園', 'Park'], monument: ['古蹟', 'Monument'],
+};
+
+function exploreSheet(view) {
+  const { category, destination, radius, places, sources, selected, busy, provider } = view;
+  const tabs = segments([['food', t('美食', 'Food')], ['sights', t('好去處', 'Things to do')]], category, (choice) => {
+    if (choice !== category) void searchExplore(choice, radius);
+  });
+  const sourceLink = (source) => h('a', { href: source.url, target: '_blank', rel: 'noopener noreferrer' }, source.title);
+  const placeCards = places.map((place) => {
+    const open = selected === place;
+    const walk = open && knownWalkTime(destination.location, place.location);
+    const kind = EXPLORE_KINDS[place.kind];
+    return h('article', { class: 'card explore-place' },
+      h('button', { class: 'tap', disabled: view.choosing, 'aria-expanded': String(open), onclick: () => showExplorePlace(view, place) },
+        h('span', { class: 'row' }, h('span', { class: 'bold grow' }, place.name), icon(open ? 'down' : 'next', 14)),
+        h('span', { class: 'explore-facts tiny muted' }, [
+          kind ? t(...kind) : place.kind, t(`直線 ${distanceText(place.meters)}`, `${distanceText(place.meters)} straight-line`),
+        ].filter(Boolean).join(' · '))),
+      open && h('div', { class: 'stack small' },
+        place.address && h('div', { class: 'muted' }, place.address),
+        walk && h('div', { class: 'muted' }, t(`由目的地步行約 ${Math.max(1, Math.round(walk.minutes))} 分鐘 · Google Maps`, `About ${Math.max(1, Math.round(walk.minutes))} min on foot from the destination · Google Maps`)),
+        place.source && h('div', { class: 'explore-evidence tiny' }, h('p', {}, place.source.snippet), sourceLink(place.source)),
+        view.notice && h('div', { class: 'notice', role: 'status' }, view.notice),
+        h('div', { class: 'explore-actions' },
+          h('button', { class: 'link', disabled: view.choosing, onclick: () => planToExplorePlace(view, place) },
+            view.choosing ? t('正在確認地點…', 'Confirming place…') : t('規劃到這裡', 'Plan a route here')),
+          place.mapsUrl && h('a', { class: 'link', href: place.mapsUrl, target: '_blank', rel: 'noopener noreferrer', translate: 'no' }, 'Google Maps'))));
+  });
+  return h('section', { id: 'explore-panel', 'aria-busy': String(busy), onkeydown: (event) => { if (event.key === 'Escape') closeExplore(); } },
+    h('button', { class: 'back', onclick: closeExplore }, icon('back', 17), t('返回路線', 'Back to route')),
+    h('div', {},
+      h('div', { class: 'title' }, t(`探索「${destination.name}」附近`, `Explore around ${destination.name}`)),
+      h('div', { class: 'tiny muted' }, t(`目的地周邊 ${distanceText(radius)}`, `Within ${distanceText(radius)} of the destination`))),
+    tabs,
+    busy && h('div', { class: 'status', role: 'status' }, h('span', { class: 'spinner' }), t('搜尋附近地點及網頁…', 'Searching nearby places and guides…')),
+    !busy && !places.length && h('div', { class: 'notice', role: 'status' }, t('這個範圍內暫時找不到合適的地點。', 'No places found in this area.')),
+    places.length > 0 && (provider === 'google' ? h('div', { class: 'explore-google', translate: 'no' }, 'Google Maps')
+      : h('a', { class: 'tiny muted', href: 'https://www.openstreetmap.org/copyright', target: '_blank', rel: 'noopener' }, '© OpenStreetMap contributors')),
+    placeCards,
+    !busy && radius === 800 && places.length < 6 && h('button', { class: 'link', onclick: () => searchExplore(category, 1500) },
+      t('擴大到 1.5 公里', 'Expand to 1.5 km')),
+    !busy && sources.length > 0 && h('div', { class: 'card explore-sources small' },
+      h('strong', {}, t('附近網頁及攻略', 'Nearby guides and web sources')),
+      sources.slice(0, 4).map(sourceLink)));
+}
+
 function suggestionList({ wish, areaName, suggestions, notice }) {
   return [
     notice && h('div', { class: 'notice' }, notice),
@@ -2448,6 +2578,7 @@ const PHASES = {
 };
 
 function planSheet() {
+  if (state.explore) return exploreSheet(state.explore);
   const items = [];
   if (!state.db) {
     items.push(state.dbError
@@ -2986,6 +3117,7 @@ function settingsSheet() {
         '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會經本站伺服器傳送給 Google，或在額度用完時傳送給 OpenStreetMap 的 Photon 服務，用來搜尋你身邊 5 公里內的地點。AI 請求及店舖搜尋經本站伺服器轉送給 DeepSeek 及 Google，伺服器不會保存內容。傳送給 DeepSeek 的只有你輸入的文字、地區、站名、路線號碼及店舖資料，不包括座標。規劃公共交通路線時，起終點座標及所選時間會經本站伺服器傳送給 Transitous 或 Google。Google 亦會收到步行路段兩端的座標。Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
         'This site collects no personal data. Saved stops and history stay in your browser. Arrivals come straight from the operators. When finding places nearby, your coordinates go through this site\'s server to Google, or to OpenStreetMap\'s Photon service once the allowance is used up, to search within 5 km of you. AI requests and shop searches pass through this site\'s server to DeepSeek and Google, and the server keeps none of it. DeepSeek only receives your text, the district, stop names, route numbers and shop details, never coordinates. For public transport directions, the start and end coordinates and selected time go through this site\'s server to Transitous or Google. Google also receives the two ends of walking segments. Google Maps loads straight into your browser under Google\'s privacy policy.')),
       aboutItem(t('資料來源', 'Data sources'), t('路線資料來自 hkbus.app；到站時間來自各營辦商；公共交通路線由 Transitous、Google 地圖或內置演算法規劃；地圖、地點、步行路線及店舖來自 Google，額度用完後改用 OpenFreeMap、OpenStreetMap 及政府地理資訊。', 'Route data from hkbus.app; arrivals from the operators; public transport routes from Transitous, Google Maps or the built-in planner; maps, places, walking routes and shops from Google, and after the allowance, OpenFreeMap, OpenStreetMap and Government GIS.')),
+      aboutItem(t('探索目的地附近', 'Explore nearby'), t('開啟探索後，目的地座標會用於 Google 地圖或 OpenStreetMap 的 Photon 地點搜尋，目的地名稱會用於維基導遊或 Brave Search 的網頁搜尋。', 'Opening Explore uses the destination coordinates to find places through Google Maps or OpenStreetMap Photon. It uses the destination name to search Wikivoyage or Brave Search for web sources.')),
       h('a', { class: 'small link', href: 'https://data.gov.hk/en-data/dataset/mtr-data-routes-fares-barrier-free-facilities', target: '_blank', rel: 'noopener' },
         t('八達通鐵路車費 © 港鐵公司（資料來自 DATA.GOV.HK）', 'Octopus rail fares © MTR Corporation Limited via DATA.GOV.HK')),
       h('a', { class: 'small link', href: 'https://www.google.com/help/terms_maps/', target: '_blank', rel: 'noopener' }, t('Google 地圖使用條款', 'Google Maps Terms of Service')),
@@ -3220,6 +3352,7 @@ function fitStopArea() {
 }
 
 function setTab(tab) {
+  if (tab !== 'plan') clearExplore();
   const direction = tab === 'plan' ? 'back' : 'forward', hadFocus = !!state.focus;
   state.tab = tab;
   state.focus = null;

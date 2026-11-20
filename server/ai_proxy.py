@@ -9,6 +9,7 @@ It also holds Google use under the free allowance. Each map and place search is 
 disk, and at the limit the site quietly goes back to its free map and search.
 """
 import csv
+import html
 import io
 import json
 import os
@@ -182,7 +183,7 @@ spending = Spending(
 # budgeted space in Routes API usage.
 budget = Budget(
     Path(os.environ.get('STATE_DIRECTORY', tempfile.gettempdir())) / 'usage.json',
-    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 5000, 40), 'transit': (120, 4000, 25), 'transitous': (300, 9000, 30), 'details': (30, 900, 12), 'suggest': (300, 9000, 60), 'place': (300, 9000, 60)},
+    {'map': (300, 9000, 15), 'places': (150, 4500, 30), 'walk': (300, 5000, 40), 'transit': (120, 4000, 25), 'transitous': (300, 9000, 30), 'details': (30, 900, 12), 'suggest': (300, 9000, 60), 'place': (300, 9000, 60), 'explore': (120, 3000, 12)},
 )
 
 
@@ -258,6 +259,10 @@ def search_places(query, lat, lng, radius, language, details=False):
     )
     with urllib.request.urlopen(request, timeout=15) as response:
         found = json.load(response).get('places', [])
+    return place_cards(found)
+
+
+def place_cards(found):
     return [{
         'id': place['id'], 'name': place['displayName']['text'], 'address': place.get('formattedAddress'),
         'location': {'lat': place['location']['latitude'], 'lng': place['location']['longitude']},
@@ -266,6 +271,84 @@ def search_places(query, lat, lng, radius, language, details=False):
         'price': place.get('priceLevel'), 'open': place.get('currentOpeningHours', {}).get('openNow'),
         'phone': place.get('nationalPhoneNumber'),
     } for place in found]
+
+
+EXPLORE_TYPES = {
+    'food': (['restaurant', 'cafe', 'bakery', 'dessert_shop'], 'local food restaurants', '美食 小食'),
+    'sights': (['tourist_attraction', 'museum', 'art_gallery', 'park', 'historical_landmark'], 'attractions things to do', '景點 好去處'),
+}
+EXPLORE_AGENT = 'hktransport/1.1 (+https://github.com/kevinwentao07-zwt/hktransport/issues)'
+
+
+def nearby_places(center, radius, category, language):
+    request = urllib.request.Request(
+        'https://places.googleapis.com/v1/places:searchNearby',
+        data=json.dumps({
+            'includedTypes': EXPLORE_TYPES[category][0],
+            'locationRestriction': {'circle': {'center': {'latitude': center['lat'], 'longitude': center['lng']}, 'radius': radius}},
+            'rankPreference': 'POPULARITY', 'maxResultCount': 16, 'languageCode': language, 'regionCode': 'HK',
+        }).encode(),
+        headers={'Content-Type': 'application/json', 'X-Goog-Api-Key': places_key(), 'X-Goog-FieldMask': BASIC_FIELDS},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return place_cards(json.load(response).get('places', []))
+
+
+def explore_web(area, category, language):
+    def read(url, params, headers, timeout=3):
+        request = urllib.request.Request(f'{url}?{urllib.parse.urlencode(params)}', headers=headers)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.load(response)
+
+    def plain(value, length):
+        return html.unescape(re.sub(r'<[^>]+>', '', value or '')).strip()[:length]
+
+    brave_key = os.environ.get('BRAVE_SEARCH_API_KEY', '').strip()
+    if brave_key:
+        suffix = ('Hong Kong ' + EXPLORE_TYPES[category][1]) if language == 'en' else ('香港 ' + EXPLORE_TYPES[category][2])
+        try:
+            answer = read('https://api.search.brave.com/res/v1/web/search', {
+                'q': f'{area} {suffix}', 'count': 6, 'safesearch': 'moderate',
+            }, {'X-Subscription-Token': brave_key, 'Accept': 'application/json'})
+            sources = []
+            for row in answer.get('web', {}).get('results', []):
+                url = row.get('url', '')
+                title = plain(row.get('title'), 160)
+                if title and urllib.parse.urlsplit(url).scheme in ('https', 'http'):
+                    sources.append({'title': title, 'url': url, 'snippet': plain(row.get('description'), 360), 'provider': 'brave'})
+            if sources:
+                return sources[:6]
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+
+    # Live destination guide search with no key. Area guides stay separate from exact place facts.
+    name = re.sub(r'\s+(?:MTR\s+)?Station$|(?:港鐵站|地鐵站|站)$', '', area, flags=re.I).replace('"', '').strip()
+    if not name:
+        return []
+    host = 'en.wikivoyage.org' if language == 'en' else 'zh.wikivoyage.org'
+    api = f'https://{host}/w/api.php'
+    headers = {'User-Agent': EXPLORE_AGENT, 'Accept': 'application/json'}
+    answer = read(api, {
+        'action': 'query', 'list': 'search', 'srsearch': f'"{name}"',
+        'srnamespace': 0, 'srlimit': 4, 'srprop': 'snippet', 'format': 'json',
+    }, headers)
+    pages = [row for row in answer.get('query', {}).get('search', [])
+             if re.search(r'香港|Hong Kong', row.get('title', ''), re.I)]
+    if not pages:
+        return []
+    page = pages[0]
+    title = plain(page['title'], 160)
+    url = f'https://{host}/wiki/{urllib.parse.quote(page["title"].replace(" ", "_"))}'
+    labels = ('Eat', '用餐', '美食', '飲食') if category == 'food' else ('See', 'Do', '觀光', '观光', '景點', '活动')
+    try:
+        guide = read(api, {'action': 'parse', 'page': page['title'], 'prop': 'sections', 'format': 'json'}, headers, timeout=2)
+        sections = [section for section in guide.get('parse', {}).get('sections', []) if plain(section.get('line'), 80) in labels]
+        if sections:
+            return [{'title': f'{title} · {plain(section["line"], 80)}', 'url': f'{url}#{urllib.parse.quote(section["anchor"])}',
+                     'provider': 'wikivoyage'} for section in sections[:2]]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return [{'title': title, 'url': url, 'provider': 'wikivoyage'}]
 
 
 def suggest_places(query, origin, language):
@@ -550,12 +633,36 @@ class Handler(BaseHTTPRequestHandler):
         return body
 
     def do_POST(self):
-        if self.path not in ('/api/ai', '/api/places', '/api/walk', '/api/transit', '/api/transitous', '/api/suggest', '/api/place'):
+        handlers = {'/api/ai': self.ask, '/api/places': self.places, '/api/walk': self.walk, '/api/transit': self.transit,
+                    '/api/transitous': self.transit, '/api/suggest': self.suggest, '/api/place': self.place, '/api/explore': self.explore}
+        handler = handlers.get(self.path)
+        if handler is None:
             return self.send(404, {'error': 'Not found'})
         body = self.read_json()
         if body is None:
             return None
-        return {'/api/places': self.places, '/api/walk': self.walk, '/api/transit': self.transit, '/api/transitous': self.transit, '/api/suggest': self.suggest, '/api/place': self.place}.get(self.path, self.ask)(body)
+        return handler(body)
+
+    def explore(self, body):
+        area, center, radius, category = (body.get(key) for key in ('area', 'center', 'radius', 'category'))
+        if (not isinstance(area, str) or not 0 < len(area.strip()) <= 100 or not in_hong_kong(center)
+                or radius not in (800, 1500) or category not in ('food', 'sights')):
+            return self.send(400, {'error': 'Bad request'})
+        visitor = self.visitor()
+        if not budget.spend('explore', visitor):
+            return self.send(429, {'error': 'Limit reached'})
+        language = 'en' if body.get('lang') == 'en' else 'zh-HK'
+
+        def result(future):
+            try:
+                return future.result()
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                return []
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            web = pool.submit(explore_web, area.strip(), category, language)
+            nearby = pool.submit(nearby_places, center, radius, category, language) if places_key() and budget.spend('places', visitor) else None
+            return self.send(200, {'places': result(nearby) if nearby else [], 'sources': result(web)})
 
     def suggest(self, body):
         query, origin = body.get('query'), body.get('from')
