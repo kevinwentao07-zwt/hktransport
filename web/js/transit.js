@@ -269,17 +269,25 @@ export const journeyID = (journey) => journey.id ?? (rides(journey).map((r) => `
 export const MAX_WALK_LEG_MINUTES = 10;
 export const fitsWalkLimit = (journey) => journey.legs.every((leg) => leg.type !== 'walk' || leg.minutes <= MAX_WALK_LEG_MINUTES);
 
-/** Practical picks stay on transit and weigh short walks and straightforward transfers before journey time. */
+/** Practical picks compare time once walking and transfers are nearly equivalent. */
 export function rankTripOptions(journeys, preference, limit = 5) {
-  const criteria = (journey) => {
-    const base = [Number(!fitsWalkLimit(journey)), Number(arrivesLate(journey))];
-    if (preference === 'fastest') return [...base, totalMinutes(journey)];
+  const walkByGroup = new Map();
+  const options = journeys.map((journey) => {
+    const group = [Number(!fitsWalkLimit(journey)), Number(arrivesLate(journey))];
+    const duration = totalMinutes(journey);
+    if (preference === 'fastest') return { journey, group, duration };
+    group.push(Number(!rides(journey).length));
     const changes = transfers(journey), walk = walkingMinutes(journey);
-    return [...base, Number(!rides(journey).length),
-      ...(preference === 'fewerTransfers' ? [changes, walk] : [walk + changes * 4, walk]), totalMinutes(journey)];
-  };
+    if (preference === 'fewerTransfers') group.push(changes);
+    const effort = preference === 'fewerTransfers' ? walk : walk + changes * 4;
+    const key = group.join();
+    walkByGroup.set(key, Math.min(walkByGroup.get(key) ?? Infinity, effort));
+    return { journey, group, duration, effort, key };
+  });
+  const criteria = ({ group, duration, effort, key }) => key == null ? [...group, duration]
+    : [...group, Math.floor((effort - walkByGroup.get(key)) / 2), duration, effort];
   const seen = new Set();
-  return journeys.map((journey) => ({ journey, values: criteria(journey) })).sort((a, b) => {
+  return options.map((option) => ({ journey: option.journey, values: criteria(option) })).sort((a, b) => {
     for (const [i, value] of a.values.entries()) {
       const diff = value - b.values[i];
       if (diff) return diff;

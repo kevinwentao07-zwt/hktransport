@@ -616,6 +616,8 @@ test('the default ranking prefers a shorter walk over saving a few minutes', () 
   const short = option('short', 4, 24), fast = option('fast', 9, 14), tooFar = option('too-far', 17, 1);
   assert.deepEqual(T.rankTripOptions([tooFar, fast, short], 'lessWalking'), [short, fast, tooFar]);
   assert.deepEqual(T.rankTripOptions([tooFar, fast, short], 'fastest'), [fast, short, tooFar]);
+  const sameEffort = option('similar', 5, 14);
+  assert.deepEqual(T.rankTripOptions([short, sameEffort], 'lessWalking'), [sameEffort, short]);
 });
 
 test('a changed ETA that misses a Google connection invalidates the itinerary', async () => {
