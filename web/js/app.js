@@ -1057,7 +1057,7 @@ async function runPlan(request) {
     syncPlaceInputs();
   }
   plannedInputs = inputs;
-  mapView.fit([start.location, end.location]);
+  if (!state.explore?.preview) mapView.fit([start.location, end.location]);
   if (!inHongKong(start.location) || !inHongKong(end.location)) return setPhase('failed', t('起點及目的地須在香港範圍內。', 'The start and destination must be in Hong Kong.'));
   if (meters(start.location, end.location) < SAME_PLACE_METERS) return setPhase('failed', t('出發地和目的地是同一個地方。', 'The start and destination are the same place.'));
 
