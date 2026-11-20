@@ -3517,6 +3517,15 @@ function settingsSheet() {
         })),
       h('div', { class: 'tiny muted' }, t('這些資料只保存在這部裝置。', 'These stay on this device.'))),
     settingGroup(t('關於', 'About'),
+      aboutItem(t('關於作者', 'About the author'),
+        h('p', {}, t(
+          '你好，我係 Kevin，hktransport 係我整嘅。我想喺香港搭車嗰陣，可以快啲睇到下班車幾時到，又可以一眼睇清楚成程點行，所以就整咗呢個工具。',
+          'Hi, I’m Kevin, the creator of hktransport. I built it so I could quickly see when the next ride is due and how the whole trip fits together when getting around Hong Kong.')),
+        h('p', {}, t(
+          '多謝你用 hktransport！亦都多謝每一位肯花時間同我講邊度好用、邊度仲可以改嘅朋友。希望呢個工具可以幫你搭車嗰陣少啲估、少啲等。',
+          'Thanks for using hktransport! And thanks to everyone who has taken the time to tell me what works well and what I could improve. I hope it makes your trips a little easier, with less guesswork and less waiting.')),
+        'Kevin · ',
+        h('a', { class: 'link', href: 'https://github.com/kevinwentao07-zwt', target: '_blank', rel: 'noopener' }, 'GitHub @kevinwentao07-zwt')),
       aboutItem(t('安裝到手機', 'Install on your phone'), t('iPhone：在 Safari 按分享，再選「加入主畫面」。Android：在 Chrome 選單按「安裝應用程式」。', 'iPhone: in Safari, tap Share, then Add to Home Screen. Android: in the Chrome menu, tap Install app.')),
       aboutItem(t('私隱', 'Privacy'), t(
         '此網站不收集個人資料。收藏及搜尋記錄只保存在你的瀏覽器。到站查詢直接連到各營辦商。使用「附近」找地點時，你的座標會經本站伺服器傳送給 Google，或在額度用完時傳送給 OpenStreetMap 的 Photon 服務，用來搜尋你身邊 5 公里內的地點。AI 請求由本站伺服器轉送至你設定的 AI 平台，店舖搜尋會轉送至 Google。本站伺服器不會保存 API Key 或請求內容。規劃公共交通路線時，起終點座標及所選時間會經本站伺服器傳送給 Transitous 或 Google。Google 亦會收到步行路段兩端的座標。Google 地圖會由你的瀏覽器直接載入，並受 Google 私隱政策約束。',
