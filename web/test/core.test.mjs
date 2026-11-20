@@ -43,6 +43,19 @@ test('exploration stays near the destination, with sources matched to the right 
   assert.deepEqual(results.map((item) => [item.id, item.source]), [['one', source], ['two', undefined]]);
 });
 
+test('exploration web searches use the selected category and language', () => {
+  for (const [name, category, locale, query, language] of [
+    ['銅鑼灣', 'food', 'zh-Hant', '銅鑼灣附近好吃的地方', 'zh-TW'],
+    ['銅鑼灣', 'sights', 'zh-Hans', '铜锣湾附近好去处', 'zh-CN'],
+    ['Central & Western District', 'food', 'en', 'places to eat near Central & Western District', 'en'],
+    ['Mong Kok', 'sights', 'en', 'things to do near Mong Kok', 'en'],
+  ]) {
+    const url = new URL(P.exploreWebSearchURL(name, category, locale));
+    assert.equal(url.searchParams.get('q'), query);
+    assert.equal(url.searchParams.get('hl'), language);
+  }
+});
+
 test('frequency keeps single departures and sorts bands', () => {
   assert.deepEqual(T.parseFrequency({ 1: { '0800': ['0900', '600'], '0700': null } })[1], [{ start: 420, end: null, headway: null }, { start: 480, end: 540, headway: 600 }]);
 });

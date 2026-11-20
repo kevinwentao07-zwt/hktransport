@@ -2,6 +2,7 @@
 // and Photon (OpenStreetMap) for shops, neither of which needs a key. Google goes through the
 // site's server, which holds the key and its limits.
 import { meters, normalizePlace } from './transit.js?v=dev';
+import { toSimplified } from './hans.js?v=dev';
 
 const HK_BBOX = '113.82,22.13,114.45,22.58';
 export const inHongKong = (l) => l.lat >= 22.13 && l.lat <= 22.58 && l.lng >= 113.82 && l.lng <= 114.45;
@@ -210,6 +211,19 @@ const EXPLORE_TAGS = {
   food: ['amenity:restaurant', 'amenity:cafe', 'amenity:fast_food', 'shop:bakery'],
   sights: ['tourism:attraction', 'tourism:museum', 'tourism:gallery', 'leisure:park', 'historic:monument'],
 };
+
+export function exploreWebSearchURL(destination, category, locale) {
+  const name = destination.trim(), food = category === 'food';
+  const query = locale === 'en' ? `${food ? 'places to eat' : 'things to do'} near ${name}`
+    : `${name}附近${food ? '好吃的地方' : '好去處'}`;
+  const simplified = locale === 'zh-Hans';
+  const params = new URLSearchParams({
+    q: simplified ? toSimplified(query) : query,
+    hl: locale === 'en' ? 'en' : simplified ? 'zh-CN' : 'zh-TW',
+    gl: 'hk',
+  });
+  return `https://www.google.com/search?${params}`;
+}
 
 export function exploreResults(places, sources, center, radius) {
   const names = new Map(), ids = new Set();

@@ -7,7 +7,7 @@ import { meters,
 import { fetchETA, liveArrivalCache, routeArrivals } from './eta.js?v=dev';
 import { toSimplified } from './hans.js?v=dev';
 import { chatMessage, sharedAI, isCurrentLocation, normalizedOrigin, parseFollowUp, parseSearch, parseWish, searchMessage } from './ai.js?v=dev';
-import { HONG_KONG, cleanArea, exploreDestination, googlePlaceLocation, googleSearch, googleSuggest, googleWalk, governmentSearch, inHongKong, insideArea, isNearby, knownShape, knownWalk, knownWalkTime, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
+import { HONG_KONG, cleanArea, exploreDestination, exploreWebSearchURL, googlePlaceLocation, googleSearch, googleSuggest, googleWalk, governmentSearch, inHongKong, insideArea, isNearby, knownShape, knownWalk, knownWalkTime, loadShape, lookupPlace, mergeShops, mergeSuggestions, photonSearch, withinArea } from './places.js?v=dev';
 
 import { googleJourneys, requestGoogleTransit } from './google-transit.js?v=dev';
 import { requestTransitous, transitousJourneys } from './transitous.js?v=dev';
@@ -2482,6 +2482,7 @@ const EXPLORE_KINDS = {
 
 function exploreSheet(view) {
   const { category, destination, radius, places, sources, selected, busy, provider } = view;
+  const locale = state.lang === 'en' ? 'en' : state.script === 'hans' ? 'zh-Hans' : 'zh-Hant';
   const tabs = segments([['food', t('美食', 'Food')], ['sights', t('好去處', 'Things to do')]], category, (choice) => {
     if (choice !== category) void searchExplore(choice, radius);
   });
@@ -2519,9 +2520,11 @@ function exploreSheet(view) {
     placeCards,
     !busy && radius === 800 && places.length < 6 && h('button', { class: 'link', onclick: () => searchExplore(category, 1500) },
       t('擴大到 1.5 公里', 'Expand to 1.5 km')),
-    !busy && sources.length > 0 && h('div', { class: 'card explore-sources small' },
+    h('div', { class: 'card explore-sources small' },
       h('strong', {}, t('附近網頁及攻略', 'Nearby guides and web sources')),
-      sources.slice(0, 4).map(sourceLink)));
+      sources.slice(0, 4).map(sourceLink),
+      h('a', { class: 'link', href: exploreWebSearchURL(destination.name, category, locale), target: '_blank', rel: 'noopener noreferrer' },
+        icon('search', 14), t('在瀏覽器搜尋更多', 'Search the web'))));
 }
 
 function suggestionList({ wish, areaName, suggestions, notice }) {
