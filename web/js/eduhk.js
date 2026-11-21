@@ -88,6 +88,17 @@ const routes = Object.fromEntries(Object.entries(timetable).map(([key, direction
 
 export const includesEdUHK = (journey) => journey.legs.some((leg) => leg.op === 'eduhk');
 
+// Single-trip Octopus fares in cents, as printed on the two school timetables.
+const shuttleFares = {
+  'EdUHK University': { promotional: { student: 500, staff: 850 }, regular: { student: 640, staff: 1080 } },
+  'EdUHK Tai Wai': { promotional: { student: 600, staff: 1000 }, regular: { student: 730, staff: 1220 } },
+};
+
+export function eduhkFare(ride, { role, rate } = {}) {
+  const route = timetable[ride.routeKey]?.route;
+  return shuttleFares[route]?.[rate]?.[role] ?? null;
+}
+
 export function withEdUHKShuttle(db) {
   return { ...db, stops: { ...db.stops, ...stops }, routes: { ...db.routes, ...routes } };
 }

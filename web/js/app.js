@@ -11,7 +11,7 @@ import { HONG_KONG, cleanArea, exploreDestination, exploreWebSearchURL, googlePl
 
 import { googleJourneys, requestGoogleTransit } from './google-transit.js?v=dev';
 import { requestTransitous, transitousJourneys } from './transitous.js?v=dev';
-import { EDUHK_TIMETABLE, EDUHK_TRANSPORT, EDUHK_UNIVERSITY, includesEdUHK, withEdUHKShuttle } from './eduhk.js?v=dev';
+import { EDUHK_TIMETABLE, EDUHK_TRANSPORT, EDUHK_UNIVERSITY, eduhkFare, includesEdUHK, withEdUHKShuttle } from './eduhk.js?v=dev';
 
 // MARK: Storage
 
@@ -2855,6 +2855,14 @@ function googleDirections() {
   return `https://www.google.com/maps/dir/?${params}`;
 }
 
+const fareMoney = (cents) => `HK$${(cents / 100).toFixed(2)}`;
+
+function studentStaffFares(fare) {
+  const student = fare('student'), staff = fare('staff');
+  return student == null || staff == null ? null
+    : t(`學生 ${fareMoney(student)} · 職員 ${fareMoney(staff)}`, `Student ${fareMoney(student)} · Staff ${fareMoney(staff)}`);
+}
+
 function journeyCard(journey) {
   const id = journeyID(journey), isOpen = state.expanded === id, isNavigating = state.nav?.id === id;
   const shown = journey.legs.filter((leg) => leg.type === 'ride' || leg.minutes >= 0.5);
@@ -2862,9 +2870,12 @@ function journeyCard(journey) {
   const arrive = clock(arrivalTime(journey));
   const shuttle = includesEdUHK(journey);
   const universityShuttle = shuttle && rides(journey).some((ride) => ride.route === 'EdUHK University' && ride.op === 'eduhk');
-  const cents = journeyFare(journey, planningDB(), railFares.get(state.fareProfile), state.fareProfile);
-  const money = cents == null ? null : `HK$${(cents / 100).toFixed(2)}`;
-  const fare = money ? (cents === 0 ? t(`全程車費 ${money}`, `Total fare ${money}`) : t(`全程車費約 ${money}`, `Est. fare ${money}`))
+  const totalFare = (tariff) => journeyFare(journey, planningDB(), railFares.get(state.fareProfile), state.fareProfile, tariff);
+  const cents = shuttle ? null : totalFare();
+  const promotional = shuttle && studentStaffFares((role) => totalFare({ role, rate: 'promotional' }));
+  const regular = isOpen && shuttle && studentStaffFares((role) => totalFare({ role, rate: 'regular' }));
+  const fare = promotional ? t(`全程約（優惠）${promotional}`, `Est. total (promo) · ${promotional}`)
+    : cents != null ? (cents === 0 ? t(`全程車費 ${fareMoney(cents)}`, `Total fare ${fareMoney(cents)}`) : t(`全程車費約 ${fareMoney(cents)}`, `Est. fare ${fareMoney(cents)}`))
     : railFareRequests.has(state.fareProfile) && usesRail(journey) ? t('正在查詢車費…', 'Checking fare…')
       : t('全程車費暫缺資料', 'Total fare unavailable');
   const canNavigate = !shuttle && rides(journey).every((ride) => ride.routeKey || ride.providerStops?.length >= 2);
@@ -2902,10 +2913,12 @@ function journeyCard(journey) {
       h('div', { class: 'journey-summary tiny muted' },
         h('span', {}, `${changes ? t(`轉 ${changes} 次`, `${changes} change${changes > 1 ? 's' : ''}`) : t('直達', 'Direct')} · ${t(`步行 ${Math.round(walkingMeters(journey))} 米`, `walk ${Math.round(walkingMeters(journey))} m`)}`),
         shuttle && h('span', { class: 'late bold' }, t('只限教大師生', 'EdUHK students and staff only')),
-        h('span', { class: cents == null ? 'journey-fare' : 'journey-fare bold' }, fare))),
+        h('span', { class: promotional || cents != null ? 'journey-fare bold' : 'journey-fare' }, fare))),
     isOpen && h('div', { class: 'timeline' }, journey.legs.map(legDetail)),
     isOpen && shuttle && h('div', { class: 'stack' },
       h('div', { class: 'small muted' }, t('上車須拍教大學生證或職員證。開車時間按校方班表，車程和地圖位置為估算。', 'Tap your EdUHK student or staff card when boarding. Departure times follow the timetable. Journey times and map locations are approximate.')),
+      regular && h('div', { class: 'tiny muted' }, t(`全程約（校巴原價）${regular}`, `Est. total (regular shuttle fare) · ${regular}`)),
+      h('div', { class: 'tiny muted' }, t('優惠可能調整，實收以校方公布為準。其他交通路段按設定的八達通票價估算。', 'Promotional fares may change. Check EdUHK for the actual fare. Other legs use the Octopus profile in Settings.')),
       h('a', { class: 'link', href: universityShuttle ? EDUHK_UNIVERSITY : EDUHK_TIMETABLE, target: '_blank', rel: 'noopener' },
         universityShuttle ? t('校方大學站線服務資料', 'University Station shuttle information') : t('校方時刻表及車費', 'Official timetable and fares'))),
     isOpen && cents > 0 && h('div', { class: 'tiny muted' },
@@ -2941,12 +2954,16 @@ function legDetail(leg) {
   const stops = leg.stopCount ?? (leg.alightPosition - leg.boardPosition);
   const board = leg.boardName ?? name(leg.boardStopID), alight = leg.alightName ?? name(leg.alightStopID);
   const duration = t(`約 ${Math.round(leg.rideMinutes)} 分鐘`, `about ${Math.round(leg.rideMinutes)} min`);
+  const shuttlePromo = leg.op === 'eduhk' && studentStaffFares((role) => eduhkFare(leg, { role, rate: 'promotional' }));
+  const shuttleRegular = leg.op === 'eduhk' && studentStaffFares((role) => eduhkFare(leg, { role, rate: 'regular' }));
   const element = h('div', { class: 'leg' },
     h('div', { class: 'track' }, h('i', { class: 'node' })),
     h('div', { class: 'body' },
       h('div', { class: 'row' }, h('span', { class: 'bold ellipsis' }, board), badge(leg.op, leg.route)),
       h('div', { class: 'tiny muted' }, t(`往 ${leg.dest.zh}`, `To ${leg.dest.en}`)),
       h('div', { class: `tiny ${leg.liveDeparture ? 'live' : 'muted'}` }, when),
+      shuttlePromo && h('div', { class: 'tiny muted' }, t(`校巴優惠車費 ${shuttlePromo}`, `Promotional shuttle fare · ${shuttlePromo}`)),
+      shuttleRegular && h('div', { class: 'tiny muted' }, t(`校巴原價 ${shuttleRegular}`, `Regular shuttle fare · ${shuttleRegular}`)),
       h('div', { class: 'tiny muted', style: 'margin-top:4px' }, Number.isFinite(stops) ? t(`${stops} 個站 · ${duration}`, `${stops} stops · ${duration}`) : duration),
       h('div', { class: 'bold small', style: 'margin-top:4px' }, t(`${alight} 下車`, `Get off at ${alight}`))));
   element.style.setProperty('--leg', lineColor(leg.op, leg.route));

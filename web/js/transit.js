@@ -1,6 +1,6 @@
 // Route data, the RAPTOR search and journey maths. No DOM, so it also runs in
 // the worker and in Node tests. A port of RoutePlanner.swift and friends.
-import { eduhkDeparture, includesEdUHK } from './eduhk.js?v=dev';
+import { eduhkDeparture, eduhkFare, includesEdUHK } from './eduhk.js?v=dev';
 
 export const OPERATORS = ['kmb', 'ctb', 'nlb', 'gmb', 'lightRail', 'mtr'];
 
@@ -334,8 +334,8 @@ function busFare(ride, db, at, holidays, profile) {
 }
 
 /** Fare in HK cents for the selected Octopus profile. */
-export function journeyFare(journey, db, railFares, profile = 'adult') {
-  const providerFare = profile === 'adult' ? journey.fareCents ?? null : null;
+export function journeyFare(journey, db, railFares, profile = 'adult', shuttleTariff) {
+  const providerFare = profile === 'adult' && !includesEdUHK(journey) ? journey.fareCents ?? null : null;
   const holidays = new Set(db.holidays);
   let total = 0, at = journey.departure, railTrip = null;
   const finishRail = () => {
@@ -373,7 +373,8 @@ export function journeyFare(journey, db, railFares, profile = 'adult') {
       }
     } else {
       if (!finishRail()) return providerFare;
-      const fare = busFare(leg, db, leg.liveDeparture ?? leg.scheduledDeparture ?? boardAt, holidays, profile);
+      const fare = leg.op === 'eduhk' ? eduhkFare(leg, shuttleTariff)
+        : busFare(leg, db, leg.liveDeparture ?? leg.scheduledDeparture ?? boardAt, holidays, profile);
       if (fare == null) return providerFare;
       total += fare;
     }

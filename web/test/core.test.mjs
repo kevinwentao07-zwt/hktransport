@@ -994,3 +994,26 @@ test('fewer transfers outranks provider priority, then compares Google and faste
     [directSchool, directGoogle, directLocal, schoolTransfer, google]);
   assert.deepEqual(T.rankCombinedTripOptions([google, directLocal], 'fastest'), [google, directLocal]);
 });
+
+test('EdUHK fare estimates use student and staff Octopus prices without public bus discounts', () => {
+  const base = withEdUHKShuttle(db);
+  const cases = [
+    ['eduhk-university-in', 500, 850, 640, 1080],
+    ['eduhk-university-out', 500, 850, 640, 1080],
+    ['eduhk-tai-wai-in', 600, 1000, 730, 1220],
+    ['eduhk-tai-wai-out', 600, 1000, 730, 1220],
+  ];
+  for (const [routeKey, studentPromo, staffPromo, studentRegular, staffRegular] of cases) {
+    const ride = { type: 'ride', op: 'eduhk', routeKey, transferMinutes: 0, waitMinutes: 0, rideMinutes: 20 };
+    const direct = { departure: noon, legs: [ride] };
+    assert.equal(T.journeyFare(direct, base, {}, 'joyyou65', { role: 'student', rate: 'promotional' }), studentPromo);
+    assert.equal(T.journeyFare(direct, base, {}, 'adult', { role: 'staff', rate: 'promotional' }), staffPromo);
+    assert.equal(T.journeyFare(direct, base, {}, 'child', { role: 'student', rate: 'regular' }), studentRegular);
+    assert.equal(T.journeyFare(direct, base, {}, 'adult', { role: 'staff', rate: 'regular' }), staffRegular);
+
+    const rail = { ...ride, op: 'mtr', route: 'EAL', routeKey: null, boardStopID: 'TAW', alightStopID: 'UNI' };
+    const mixed = { ...direct, legs: [rail, ride] };
+    assert.equal(T.journeyFare(mixed, base, { mtr: { 'TAW>UNI': 750 } }, 'adult', { role: 'student', rate: 'promotional' }), 750 + studentPromo);
+    assert.equal(T.journeyFare(mixed, base, {}, 'adult', { role: 'student', rate: 'promotional' }), null);
+  }
+});
