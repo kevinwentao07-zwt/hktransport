@@ -405,10 +405,11 @@ function mostlyUsesMode(journey, mode) {
 }
 
 /** Practical picks compare time once walking and transfers are nearly equivalent. */
-export function rankTripOptions(journeys, preference, limit = 5, identity = journeyID, preferredMode = 'all') {
+export function rankTripOptions(journeys, preference, limit = 5, identity = journeyID, preferredMode = 'all', sourcePriority = null) {
   const walkByGroup = new Map();
   const options = journeys.map((journey) => {
     const group = [Number(!fitsWalkLimit(journey)), Number(arrivesLate(journey))];
+    if (sourcePriority) group.push(sourcePriority(journey));
     if (preferredMode !== 'all') group.push(Number(!mostlyUsesMode(journey, preferredMode)));
     const duration = totalMinutes(journey);
     if (preference === 'fastest') return { journey, group, duration };
@@ -437,6 +438,7 @@ export function rankTripOptions(journeys, preference, limit = 5, identity = jour
 }
 
 const combinedTripID = (journey) => rides(journey).every((ride) => ride.routeKey) ? routeSequence(journey) : journeyID(journey);
+const tripEligibility = (journey) => 2 * Number(!fitsWalkLimit(journey)) + Number(arrivesLate(journey));
 
 /** Keep one version of an itinerary when different sources match the same local boarding and alighting stops. */
 export function rankCombinedTripOptions(journeys, preference, limit = 8, preferredMode = 'all') {
@@ -453,9 +455,26 @@ export function rankCombinedTripOptions(journeys, preference, limit = 8, preferr
       const walks = legs.filter((leg) => leg.type === 'walk');
       return walks.length > 0 && walks.every((walk) => walk.walkFromMap);
     });
-    return measured.length ? measured : group;
+    const candidates = measured.length ? group.filter((journey) => journey.provider === 'google' || measured.includes(journey)) : group;
+    const best = Math.min(...candidates.map(tripEligibility));
+    const eligible = candidates.filter((journey) => tripEligibility(journey) === best);
+    const google = eligible.filter((journey) => journey.provider === 'google');
+    return google.length ? google : eligible;
   });
-  return rankTripOptions(comparable, preference, limit, combinedTripID, preferredMode);
+  const fastestGoogle = new Map(), fastestRegular = new Map();
+  for (const journey of comparable) {
+    if (includesEdUHK(journey)) continue;
+    const times = journey.provider === 'google' ? fastestGoogle : fastestRegular;
+    const group = tripEligibility(journey);
+    times.set(group, Math.min(times.get(group) ?? Infinity, totalMinutes(journey)));
+  }
+  const sourcePriority = (journey) => {
+    const group = tripEligibility(journey);
+    const reference = fastestGoogle.get(group) ?? fastestRegular.get(group);
+    if (includesEdUHK(journey) && reference != null && totalMinutes(journey) < reference) return 0;
+    return journey.provider === 'google' ? 1 : 2;
+  };
+  return rankTripOptions(comparable, preference, limit, combinedTripID, preferredMode, sourcePriority);
 }
 
 const LATE_PENALTY = 100_000;

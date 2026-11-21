@@ -945,3 +945,38 @@ test('EdUHK-only planning can use public transport before and after the shuttle'
   assert.deepEqual(T.planLocal(required, start, end, departure + 6 * 86_400_000, 'fastest'), []);
   assert.deepEqual(T.planLocal(required, start, start, departure, 'fastest'), []);
 });
+
+test('combined planning puts Google first unless an eligible EdUHK trip is faster than the fastest Google option', () => {
+  const trip = (id, provider, rideMinutes, op = 'kmb') => ({
+    id, provider, departure: noon,
+    legs: [{ type: 'ride', op, rideMinutes, waitMinutes: 0, transferMinutes: 0 }],
+  });
+  const google = trip('google', 'google', 32);
+  const slowerGoogle = trip('google-other', 'google', 42);
+  const transitous = trip('transitous', 'transitous', 28);
+  const local = trip('local', null, 24);
+  const school = trip('school', null, 29, 'eduhk');
+  const equalSchool = trip('same', null, 32, 'eduhk');
+  const slowerSchool = trip('slower', null, 35, 'eduhk');
+  assert.deepEqual(
+    T.rankCombinedTripOptions([slowerSchool, local, transitous, school, slowerGoogle, equalSchool, google], 'fastest'),
+    [school, google, slowerGoogle, local, transitous, equalSchool, slowerSchool],
+  );
+  assert.deepEqual(T.rankCombinedTripOptions([transitous, school], 'fastest'), [transitous, school]);
+  assert.deepEqual(T.rankCombinedTripOptions([transitous, trip('fast-school', null, 26, 'eduhk')], 'fastest').map(journey => journey.id),
+    ['fast-school', 'transitous']);
+  const longWalk = { ...school, legs: [{ type: 'walk', minutes: 11 }, { ...school.legs[0], rideMinutes: 10 }] };
+  assert.deepEqual(T.rankCombinedTripOptions([longWalk, google], 'fastest'), [google, longWalk]);
+});
+
+test('matching itineraries prefer Google without discarding an on-time alternative', () => {
+  const [base] = T.plan(network, at('A'), at('C'), noon);
+  const [ride] = T.rides(base);
+  const duplicate = (provider, rideMinutes) => ({
+    ...base, provider, id: provider, arriveBy: noon + 40 * 60_000,
+    legs: [{ ...ride, rideMinutes, waitMinutes: 0 }],
+  });
+  const google = duplicate('google', 34), transitous = duplicate('transitous', 25), late = duplicate('google', 45);
+  assert.deepEqual(T.rankCombinedTripOptions([transitous, google], 'fastest'), [google]);
+  assert.deepEqual(T.rankCombinedTripOptions([late, transitous], 'fastest'), [transitous]);
+});
