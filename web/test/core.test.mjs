@@ -894,3 +894,22 @@ test('the opt-in shuttle is routable and retimed from its timetable without a li
   assert.equal(ride.scheduledDeparture, Date.parse('2026-11-23T08:20:00+08:00'));
   assert.equal(ride.liveDeparture, null);
 });
+
+test('EdUHK University Station shuttle uses inbound-only weekday and Saturday timetables', () => {
+  const at = (day, time) => Date.parse(`${day}T${time}:00+08:00`);
+  const route = 'eduhk-university-in';
+  assert.equal(eduhkDeparture(route, at('2026-09-28', '08:11')), at('2026-09-28', '08:12'));
+  assert.equal(eduhkDeparture(route, at('2026-11-23', '08:21')), at('2026-11-23', '08:22'));
+  assert.equal(eduhkDeparture(route, at('2026-11-21', '08:11')), at('2026-11-21', '08:15'));
+  assert.equal(eduhkDeparture(route, at('2026-11-23', '22:46')), at('2026-11-23', '23:00'));
+  assert.equal(eduhkDeparture(route, at('2026-11-21', '19:01')), null);
+  assert.equal(eduhkDeparture(route, at('2026-11-22', '08:00')), null);
+  assert.equal(eduhkDeparture(route, at('2026-10-01', '08:00')), null);
+  assert.equal(eduhkDeparture(route, at('2026-09-27', '08:00')), null);
+  assert.equal(eduhkDeparture('eduhk-university-out', at('2026-11-23', '08:00')), null);
+  const augmented = withEdUHKShuttle(db), shuttleNetwork = T.buildNetwork(augmented);
+  const from = augmented.stops['eduhk-university-b'].location;
+  const to = augmented.stops['eduhk-campus-a'].location;
+  assert.ok(T.search(shuttleNetwork, from, to, at('2026-11-21', '08:11')).some(includesEdUHK));
+  assert.ok(!T.search(shuttleNetwork, to, from, at('2026-11-21', '08:11')).some(includesEdUHK));
+});

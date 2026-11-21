@@ -19,7 +19,7 @@ const MTR_LINES = {
 
 /** What riders call a route: "東鐵綫" rather than the MTR's "EAL". */
 export function lineName(op, route, lang) {
-  if (op === 'eduhk') return lang === 'zh' ? '教大校巴' : 'EdUHK shuttle';
+  if (op === 'eduhk') return lang === 'zh' ? (route === 'EdUHK University' ? '教大校巴・大學站' : '教大校巴・大圍') : route;
   const line = op === 'mtr' ? MTR_LINES[route] : null;
   return line ? line[lang === 'zh' ? 1 : 0] : route;
 }

@@ -11,7 +11,7 @@ import { HONG_KONG, cleanArea, exploreDestination, exploreWebSearchURL, googlePl
 
 import { googleJourneys, requestGoogleTransit } from './google-transit.js?v=dev';
 import { requestTransitous, transitousJourneys } from './transitous.js?v=dev';
-import { EDUHK_TIMETABLE, EDUHK_TRANSPORT, includesEdUHK, withEdUHKShuttle } from './eduhk.js?v=dev';
+import { EDUHK_TIMETABLE, EDUHK_TRANSPORT, EDUHK_UNIVERSITY, includesEdUHK, withEdUHKShuttle } from './eduhk.js?v=dev';
 
 // MARK: Storage
 
@@ -2849,6 +2849,7 @@ function journeyCard(journey) {
   const changes = transfers(journey);
   const arrive = clock(arrivalTime(journey));
   const shuttle = includesEdUHK(journey);
+  const universityShuttle = shuttle && rides(journey).some((ride) => ride.route === 'EdUHK University' && ride.op === 'eduhk');
   const cents = journeyFare(journey, planningDB(), railFares.get(state.fareProfile), state.fareProfile);
   const money = cents == null ? null : `HK$${(cents / 100).toFixed(2)}`;
   const fare = money ? (cents === 0 ? t(`全程車費 ${money}`, `Total fare ${money}`) : t(`全程車費約 ${money}`, `Est. fare ${money}`))
@@ -2895,7 +2896,8 @@ function journeyCard(journey) {
       journey.provider === 'transitous' ? 'Transitous' : journey.provider === 'google' ? 'Google Maps' : t('內置規劃', 'Built-in planner')),
     isOpen && shuttle && h('div', { class: 'stack' },
       h('div', { class: 'small muted' }, t('上車須拍教大學生證或職員證。開車時間按校方班表，車程和地圖位置為估算。', 'Tap your EdUHK student or staff card when boarding. Departure times follow the timetable. Journey times and map locations are approximate.')),
-      h('a', { class: 'link', href: EDUHK_TIMETABLE, target: '_blank', rel: 'noopener' }, t('校方時刻表及車費', 'Official timetable and fares'))),
+      h('a', { class: 'link', href: universityShuttle ? EDUHK_UNIVERSITY : EDUHK_TIMETABLE, target: '_blank', rel: 'noopener' },
+        universityShuttle ? t('校方大學站線服務資料', 'University Station shuttle information') : t('校方時刻表及車費', 'Official timetable and fares'))),
     isOpen && cents > 0 && h('div', { class: 'tiny muted' },
       t('按設定的票價類別估算，實付金額視乎付款方式及優惠。', 'Estimated using the fare profile in Settings. Payment method and discounts may change the actual fare.')),
     isOpen && !canNavigate && !shuttle && h('a', { class: 'link', href: googleDirections(), target: '_blank', rel: 'noopener' }, t('在 Google 地圖查看', 'View in Google Maps')),
@@ -3756,7 +3758,7 @@ function settingsSheet() {
         renderTab();
       }))),
     settingGroup(t('校巴', 'Campus shuttles'),
-      setting(t('教大校巴（大圍線）', 'EdUHK shuttle (Tai Wai)'), segments([[false, t('關閉', 'Off')], [true, t('開啟', 'On')]], state.eduhkShuttle, (enabled) => {
+      setting(t('教大校巴', 'EdUHK shuttles'), segments([[false, t('關閉', 'Off')], [true, t('開啟', 'On')]], state.eduhkShuttle, (enabled) => {
         if (enabled === state.eduhkShuttle) return;
         state.eduhkShuttle = enabled;
         store.set('eduhkShuttle', enabled);
@@ -3764,7 +3766,7 @@ function settingsSheet() {
         if (!enabled && state.candidates.some(includesEdUHK)) showTripOptions(state.candidates.filter((journey) => !includesEdUHK(journey)), true);
         renderSheet();
       })),
-      h('div', { class: 'tiny muted' }, t('開啟後，路線規劃會考慮大圍站往返大埔校園的班次。只限教大學生及教職員，按校方班表估算。', 'When enabled, trip planning can use the Tai Wai–Tai Po Campus shuttle. For EdUHK students and staff only. Times are based on the published timetable.')),
+      h('div', { class: 'tiny muted' }, t('包括大圍站往返大埔校園，以及大學站往大埔校園的回校班次。只限教大學生及教職員，按校方班表估算。', 'Includes Tai Wai–Tai Po Campus in both directions and University Station to Tai Po Campus. For EdUHK students and staff only. Times are based on the published timetable.')),
       h('a', { class: 'link', href: EDUHK_TRANSPORT, target: '_blank', rel: 'noopener' }, t('教大交通及最新安排', 'EdUHK transport and service updates'))),
     settingGroup(t('票價', 'Fares'),
       fareProfilePicker(),
