@@ -60,6 +60,11 @@ svg.icon.solid { fill: currentColor; }
 .panel-toggle { min-height: 44px; padding: 0 14px; border-radius: 999px; font-size: 14px; font-weight: 600; }
 #hide-panel { display: none; }
 #open-panel { position: absolute; z-index: 11; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 24px); translate: -50% 0; color: var(--accent); background: var(--float); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); box-shadow: var(--rim), var(--shadow); animation: rise .34s var(--ease-out) both; }
+.map-stop-preview { position: absolute; z-index: 11; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 78px); translate: -50% 0; width: max-content; max-width: min(420px, calc(100% - 24px)); padding: 5px 8px 5px 12px; border-radius: 16px; background: var(--float); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); box-shadow: var(--rim), var(--shadow); }
+.map-stop-preview .link { min-height: 44px; white-space: nowrap; }
+.stop-visit + .stop-visit { padding-top: 6px; border-top: 1px solid var(--line); }
+.visit-next { white-space: nowrap; }
+.visit-route { align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; min-height: 36px; }
 /* Vertical drags move the sheet until it is full; sideways swipes still scroll chips. */
 #top, #bottom, #app:not(.sheet-full) #sheet { touch-action: pan-x; }
 #grabber { flex: none; padding: 9px 0 7px; display: grid; place-items: center; touch-action: none; cursor: grab; }
@@ -86,6 +91,7 @@ svg.icon.solid { fill: currentColor; }
 
 /* Search */
 .search-card { background: var(--tile); box-shadow: var(--rim), var(--tile-shadow); border-radius: 18px; padding: 2px 6px 2px 12px; display: flex; align-items: center; gap: 8px; }
+#route-inputs { min-inline-size: 0; margin: 0; border: 0; }
 .places { flex: 1; min-width: 0; display: grid; grid-template-columns: 14px 1fr; align-items: center; column-gap: 10px; }
 .places .rail { grid-row: 1 / 4; grid-column: 1; align-self: stretch; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 14px 0; }
 .places .rail i { width: 10px; height: 10px; border-radius: 50%; border: 2.5px solid var(--accent); flex: none; }
@@ -217,6 +223,7 @@ svg.icon.solid { fill: currentColor; }
 /* Map marks */
 .nav-banner { animation: drop .6s var(--spring) both; position: absolute; z-index: 25; top: calc(env(safe-area-inset-top) + 10px); left: 10px; right: 10px; background: rgba(28, 28, 30, .72); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); color: #fff; border-radius: 22px; padding: 13px 15px; display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .18), var(--lift); }
 .nav-banner button { background: rgba(255, 255, 255, .2); color: inherit; border-radius: 9px; padding: 6px 12px; font-size: 13px; font-weight: 600; flex: none; }
+.nav-actions { display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
 .stop-label { background: var(--surface); color: var(--ink); border: 0; box-shadow: 0 1px 3px rgba(0, 0, 0, .18); font-size: 11.5px; font-weight: 500; padding: 1px 5px; border-radius: 5px; }
 .stop-label::before { display: none; }
 #map.far.many-stops .stop-label { display: none; } /* Long routes only name their stops up close. */
@@ -225,6 +232,7 @@ svg.icon.solid { fill: currentColor; }
 .pin { width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50%; border: 2.5px solid #fff; display: grid; place-items: center; color: #fff; font-size: 13px; font-weight: 700; box-shadow: 0 2px 6px rgba(0, 0, 0, .35); }
 .pin.start { width: 18px; height: 18px; margin: -9px 0 0 -9px; background: #fff; border: 5px solid #007aff; }
 .pin.end { width: 22px; height: 22px; margin: -11px 0 0 -11px; border-radius: 7px; }
+.pin.start, .pin.end { pointer-events: none; }
 .settings { display: flex; flex-direction: column; gap: 6px; }
 .settings h2 { margin: 6px 0 0 14px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .setting { display: flex; flex-direction: column; gap: 7px; font-size: 15px; }
@@ -312,7 +320,7 @@ svg.icon.solid { fill: currentColor; }
 #near-stops { display: flex; flex-wrap: wrap; gap: 6px; }
 #near-stops:empty { display: none; }
 #panel:has(#explore-panel) :is(#top, #bottom) { display: none; }
-#app #sheet:has(#explore-panel) { touch-action: pan-y; }
+#app #sheet:has(#explore-panel, .stop-visit) { touch-action: pan-y; }
 #explore-panel { display: flex; flex-direction: column; gap: 10px; }
 .explore-ai-button { gap: 6px; color: var(--ai); background: var(--ai-soft); }
 .explore-ai-button:disabled { color: var(--muted); background: var(--raised); }

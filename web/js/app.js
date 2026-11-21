@@ -67,13 +67,13 @@ function savedAIConfig() {
 
 const state = {
   lang: store.get('lang', 'zh'), script: store.get('script', 'hant'), tab: 'plan', db: null, dbError: null, index: null,
-  origin: '', destination: '', when: null, chat: '', preference: store.get('preference', 'lessWalking'), phase: 'idle', error: null,
+  origin: '', destination: '', when: null, chat: '', preference: store.get('preference', 'lessWalking'), phase: 'idle', error: null, planDirty: false,
   transitMode: ['mtr', 'bus'].includes(savedTransitMode) ? savedTransitMode : 'all',
   fareProfile: Object.hasOwn(FARE_PROFILES, savedFareProfile) ? savedFareProfile : 'adult',
   aiConfig: savedAIConfig(), aiKeyRejected: false,
-  from: null, to: null, journeys: [], candidates: [], allowLongWalk: false, onMap: null, expanded: null, explanation: null, aiNotice: null, lastChat: null,
+  from: null, to: null, journeys: [], candidates: [], allowLongWalk: false, onMap: null, pickedJourney: false, expanded: null, explanation: null, aiNotice: null, lastChat: null,
   discovery: null, explore: null,
-  stopQuery: '', stopPlace: null, stops: [], stopMode: 'all', stopRadius: 500, stopBusy: false, stopError: null, stopOpen: null,
+  stopQuery: '', stopPlace: null, stops: [], stopMode: 'all', stopRadius: 500, stopBusy: false, stopError: null, stopOpen: null, stopVisit: null,
   routeQuery: '', routeKey: null, routeKeyboard: false, recentRoutes: store.get('recentRoutes', []), thread: null, lastSearch: null, saved: store.get('saved', []),
   talk: [], focus: null, routeView: false, nav: null, fix: null, speechLang: store.get('speechLang', 'zh-HK'), listening: false,
 };
@@ -521,8 +521,8 @@ const leafletMap = (() => {
       return 800;
     },
     ends(from, to) {
-      if (from) L.marker(point(from.location), { icon: pin('', 'pin start'), title: from.name }).addTo(content);
-      if (to) L.marker(point(to.location), { icon: pin('', 'pin end', '#ff3b30'), title: to.name, zIndexOffset: 500 }).addTo(content);
+      if (from) L.marker(point(from.location), { icon: pin('', 'pin start'), title: from.name, interactive: false, keyboard: false }).addTo(content);
+      if (to) L.marker(point(to.location), { icon: pin('', 'pin end', '#ff3b30'), title: to.name, interactive: false, keyboard: false, zIndexOffset: 500 }).addTo(content);
     },
     path(path, choose, animate = false) {
       // A few station names always fit; a long bus route's only fit up close.
@@ -1008,8 +1008,9 @@ async function here() {
 
 function resetPlan(keepExplore = false) {
   transitRequest?.abort();
+  clearMapStop();
   if (!keepExplore) clearExplore();
-  Object.assign(state, { focus: null, journeys: [], candidates: [], allowLongWalk: false, onMap: null, expanded: null, explanation: null, aiNotice: null, from: null, to: null, error: null, arrivals: null });
+  Object.assign(state, { focus: null, journeys: [], candidates: [], allowLongWalk: false, onMap: null, pickedJourney: false, expanded: null, explanation: null, aiNotice: null, from: null, to: null, error: null, arrivals: null, planDirty: false });
 }
 
 function showRouteView() {
@@ -1063,8 +1064,10 @@ function currentTrip() {
 
 /** Replanning reuses the resolved places from the current trip. */
 async function runPlan(request) {
+  if (request.kind === 'replan' && (state.planDirty || state.nav)) return;
   const ai = client(), isChat = request.kind === 'chat', key = state.aiConfig, phaseBefore = state.phase;
   if (isChat && !ai) return;
+  clearTimeout(whenTimer);
   const run = ++planRun, stale = () => run !== planRun;
   const previous = request.kind === 'replan' ? { start: state.from, end: state.to } : null;
   const startOver = () => {
@@ -1149,7 +1152,7 @@ async function runPlan(request) {
     syncPlaceInputs();
   }
   plannedInputs = inputs;
-  if (!state.explore?.preview) mapView.fit([start.location, end.location]);
+  if (state.tab === 'plan' && !state.explore?.preview) mapView.fit([start.location, end.location]);
   if (!inHongKong(start.location) || !inHongKong(end.location)) return setPhase('failed', t('起點及目的地須在香港範圍內。', 'The start and destination must be in Hong Kong.'));
   if (meters(start.location, end.location) < SAME_PLACE_METERS) return setPhase('failed', t('出發地和目的地是同一個地方。', 'The start and destination are the same place.'));
 
@@ -1198,6 +1201,7 @@ async function runPlan(request) {
   if (stale()) return;
   if (!candidates.length) {
     showTripOptions([]);
+    if (state.nav) return setPhase('done', t('未能確認原定班次，請留意站內資訊。', "The original departure couldn't be confirmed. Check the information at the stop."));
     return setPhase('failed', t('這些班次已趕不上，請重新搜尋。', 'Those departures can no longer be reached. Search again.'));
   }
   const moved = showTripOptions(candidates, true);
@@ -1220,15 +1224,21 @@ function showTripOptions(candidates, keepSelection = false) {
   state.candidates = candidates;
   const ranked = rankCombinedTripOptions(candidates, state.preference, 8, state.transitMode);
   state.journeys = (state.allowLongWalk ? ranked : ranked.filter(fitsWalkLimit)).slice(0, 5);
-  const selected = (state.expanded || state.nav?.id) && state.journeys.find((journey) => journeyID(journey) === state.onMap);
-  const id = keepSelection && selected ? state.onMap : state.journeys[0] ? journeyID(state.journeys[0]) : null;
+  const nav = state.nav;
+  if (nav && !state.journeys.some((journey) => journeyID(journey) === nav.id)) {
+    state.journeys = [nav.journey, ...state.journeys.slice(0, 4)];
+  }
+  const selected = (nav || (keepSelection && state.pickedJourney)) && state.journeys.some((journey) => journeyID(journey) === state.onMap);
+  const id = selected ? state.onMap : nav?.id ?? (state.journeys[0] ? journeyID(state.journeys[0]) : null);
   const changed = id !== state.onMap;
   if (changed) {
-    stopNavigation();
+    state.pickedJourney = false;
     state.expanded = null;
     state.focus = null;
+    clearMapStop();
   }
   state.onMap = id;
+  if (nav) renderNavBanner();
   writeAdvice();
   return changed;
 }
@@ -1390,7 +1400,8 @@ const arrivalsSeen = new Map();
  */
 function rideOnScreen() {
   if (state.tab === 'plan') {
-    const journey = state.journeys.find((j) => journeyID(j) === (state.nav?.id ?? state.onMap));
+    if (state.planDirty && !state.nav) return null;
+    const journey = state.journeys.find((j) => journeyID(j) === state.onMap);
     // The buses out there now are not the ones a later trip will catch.
     if (!journey || (!state.nav && journey.departure - Date.now() > LIVE_AHEAD_MS)) return null;
     return rides(journey).find((ride) => ride.routeKey && !['mtr', 'lightRail'].includes(ride.op));
@@ -1531,6 +1542,7 @@ function fitFocus() {
 
 function clearFocus() {
   state.focus = null;
+  clearMapStop();
   drawMap();
 }
 
@@ -1557,6 +1569,11 @@ function chooseFocusStop(position) {
   // The route stays drawn: only the pin moves, and the camera slides to it.
   showChosenStop();
   moveVehicles();
+  if (sheet.mapOnly) {
+    const { routeKey, op, position: selected } = state.focus;
+    if (selected == null) return clearMapStop();
+    return showMapStop(name(state.db.routes[routeKey].stops[op][selected]));
+  }
   fitFocus();
 }
 
@@ -1579,8 +1596,9 @@ function arrivalCard(id, close) {
 function chooseLineStop(segment, index) {
   const position = segment.positions?.[index];
   if (position == null || !segment.routeKey) return;
-  const isSame = state.focus?.routeKey === segment.routeKey && state.focus.position === position;
+  const isSame = state.focus?.routeKey === segment.routeKey && state.focus.op === segment.op && state.focus.position === position;
   state.focus = isSame ? null : { routeKey: segment.routeKey, op: segment.op, position };
+  if (state.focus) pauseNavigationFollow();
   showPlanStop();
 }
 
@@ -1596,13 +1614,22 @@ function planStopCard() {
 }
 
 function showPlanStop() {
-  clear($('plan-stop'), planStopCard());
+  const slot = $('plan-stop');
+  if (!slot) return;
+  clear(slot, planStopCard());
   tagShown = '';
   showChosenStop();
   moveVehicles();
-  if (!state.focus) return fitPlanMap();
+  if (!state.focus) {
+    clearMapStop();
+    return fitPlanMap();
+  }
   $('sheet').scrollTop = 0;
   sheet.snap('half');
+  if (sheet.mapOnly) {
+    const { routeKey, op, position } = state.focus;
+    return showMapStop(name(state.db.routes[routeKey].stops[op][position]));
+  }
   return fitFocus();
 }
 
@@ -1790,34 +1817,51 @@ async function useWalkTimes() {
   return true;
 }
 
+const showingNavigation = () => state.nav != null && state.onMap === state.nav.id;
+
 async function startNavigation(journey) {
   const path = journeyPath(journey, state.from.location, state.to.location, state.db), id = journeyID(journey);
   // Tracking follows the real walking line, so progress and the map share one path.
-  state.nav = { id, path: withRoads(path), progress: null, here: null, issue: null };
-  loadRoads(path).then((arrived) => {
-    // Swapping the path once there is progress would put the rider on the wrong edge.
-    if (!arrived || state.nav?.id !== id || state.nav.progress) return;
-    state.nav.path = withRoads(path);
-    drawMap();
-  });
-  watchID = navigator.geolocation?.watchPosition((position) => {
-    if (!state.nav || state.nav.progress?.hasArrived) return;
-    const here = { lat: position.coords.latitude, lng: position.coords.longitude };
-    state.nav.here = here;
-    state.nav.issue = null;
-    state.nav.progress = progressAt(state.nav.path, here, position.coords.accuracy, state.nav.progress);
-    if (state.nav.progress?.hasArrived) stopWatching();
-    drawMap();
-    mapView.follow(here);
-    renderNavBanner();
-  }, (error) => {
-    if (state.nav) state.nav.issue = error.code === 1 ? 'denied' : 'unavailable';
-    renderNavBanner();
-  }, { enableHighAccuracy: true, maximumAge: 3_000, timeout: 20_000 }) ?? null;
-  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* Screen may dim; navigation still works. */ }
+  const nav = state.nav = { id, journey, path: withRoads(path), progress: null, here: null, issue: null, following: true };
+  state.onMap = state.expanded = id;
+  state.focus = null;
+  clearMapStop();
+  whenOpen = false;
+  syncNavControls();
   sheet.snap('peek');
   renderSheet();
   renderNavBanner();
+  loadRoads(path).then((arrived) => {
+    // Swapping the path once there is progress would put the rider on the wrong edge.
+    if (!arrived || state.nav !== nav || nav.progress) return;
+    nav.path = withRoads(path);
+    if (state.tab === 'plan' && showingNavigation()) drawMap();
+  });
+  if (!navigator.geolocation) {
+    nav.issue = 'denied';
+    return renderNavBanner();
+  }
+  watchID = navigator.geolocation.watchPosition((position) => {
+    if (state.nav !== nav || nav.progress?.hasArrived) return;
+    const here = { lat: position.coords.latitude, lng: position.coords.longitude };
+    nav.here = here;
+    nav.issue = null;
+    nav.progress = progressAt(nav.path, here, position.coords.accuracy, nav.progress);
+    if (nav.progress?.hasArrived) stopWatching();
+    if (state.tab !== 'plan') return;
+    drawMap();
+    if (showingNavigation() && nav.following) mapView.follow(here);
+    renderNavBanner();
+  }, (error) => {
+    if (state.nav !== nav) return;
+    nav.issue = error.code === 1 ? 'denied' : 'unavailable';
+    renderNavBanner();
+  }, { enableHighAccuracy: true, maximumAge: 3_000, timeout: 20_000 });
+  try {
+    const lock = await navigator.wakeLock?.request('screen');
+    if (state.nav === nav && !nav.progress?.hasArrived) wakeLock = lock;
+    else await lock?.release();
+  } catch { /* Screen may dim; navigation still works. */ }
 }
 
 function stopWatching() {
@@ -1831,19 +1875,51 @@ function stopNavigation() {
   stopWatching();
   if (!state.nav) return;
   state.nav = null;
+  syncNavControls();
   renderNavBanner();
 }
 
+function syncNavControls() {
+  $('route-inputs')?.toggleAttribute('disabled', !!state.nav);
+  $('close-trip')?.toggleAttribute('disabled', !!state.nav);
+  $('transport-preference')?.querySelectorAll('button').forEach((button) => { button.disabled = !!state.nav; });
+  renderWhen();
+}
+
+function resumeNavigation() {
+  const nav = state.nav;
+  if (!nav) return;
+  nav.following = true;
+  state.onMap = state.expanded = nav.id;
+  state.focus = null;
+  clearMapStop();
+  mapTouched = false;
+  renderSheet();
+  renderNavBanner();
+  if (nav.here) mapView.follow(nav.here);
+  else fitPlanMap(true);
+}
+
 function renderNavBanner() {
-  $('nav-banner')?.remove();
-  if (!state.nav || state.tab !== 'plan') return;
-  const { progress, path, issue } = state.nav;
-  const text = issue === 'denied' ? t('導航需要定位權限，請在瀏覽器設定開啟。', 'Navigation needs Location access. Turn it on in your browser settings.')
+  const banner = $('nav-banner');
+  if (!state.nav || state.tab !== 'plan') return banner?.remove();
+  const { progress, path, issue, following } = state.nav;
+  const preview = !showingNavigation(), paused = !following;
+  const text = preview ? t('正在預覽其他方案，原有導航繼續。', 'Previewing another route. Navigation is still running.')
+    : issue === 'denied' ? t('導航需要定位權限，請在瀏覽器設定開啟。', 'Navigation needs Location access. Turn it on in your browser settings.')
     : !progress ? (issue ? t('暫時未能定位，稍後會再試。', "Can't find you right now. Still trying.") : t('正在取得你的位置…', 'Finding your location…'))
       : instruction(path, progress, state.lang, name);
-  $('app').append(h('div', { id: 'nav-banner', class: 'nav-banner' }, icon('navigate', 20, true),
-    h('span', { class: 'grow' }, text),
-    h('button', { onclick: () => { stopNavigation(); renderSheet(); drawMap(); fitPlanMap(); } }, progress?.hasArrived ? t('完成', 'Done') : t('結束', 'End'))));
+  const resume = preview ? t('回到導航', 'Return to navigation') : paused ? t('回到我的位置', 'Recenter') : '';
+  const end = progress?.hasArrived ? t('完成', 'Done') : t('結束', 'End');
+  const signature = JSON.stringify([text, resume, end]);
+  if (banner?.dataset.signature === signature) return;
+  const next = banner ?? h('div', { id: 'nav-banner', class: 'nav-banner' });
+  next.dataset.signature = signature;
+  clear(next, icon('navigate', 20, true), h('span', { class: 'grow' }, text),
+    h('div', { class: 'nav-actions' },
+      resume && h('button', { onclick: resumeNavigation }, resume),
+      h('button', { onclick: () => { stopNavigation(); renderSheet(); fitPlanMap(); } }, end)));
+  if (!banner) $('app').append(next);
 }
 
 // MARK: Voice
@@ -1906,7 +1982,7 @@ function chatPrompt() {
 
 // MARK: Actions
 
-function search() {
+function search(places = {}) {
   if (!state.db || !state.destination.trim()) return;
   stopSuggesting();
   renderPlaceHistory(null);
@@ -1917,7 +1993,7 @@ function search() {
   renderBottomStatus();
   document.activeElement?.blur();
   showRouteView();
-  runPlan({ kind: 'search' });
+  runPlan({ kind: 'search', ...places });
 }
 
 const MOST_QUESTIONS = 2;
@@ -1940,6 +2016,7 @@ function chatContext() {
 
 function askAI(text) {
   if (!state.aiConfig) return;
+  if (state.nav) return showToast(t('請先結束導航，再搜尋新路線。', 'End navigation before searching for a new route.'));
   const { stage, wish, suggestions } = state.discovery ?? state.lastSearch ?? {}, context = chatContext(), current = currentTrip();
   const discovery = state.discovery;
   remember('Rider', text);
@@ -1955,6 +2032,7 @@ function askAI(text) {
 function sendChat() {
   const text = state.chat.trim();
   if (!state.aiConfig || !text || !state.db) return;
+  if (state.nav) return showToast(t('請先結束導航，再搜尋新路線。', 'End navigation before searching for a new route.'));
   history.add('chat', text);
   state.chat = '';
   const input = $('chat-input');
@@ -1970,9 +2048,30 @@ function sendChat() {
 
 function swapEnds() {
   const start = state.origin.trim(), end = state.destination.trim();
+  const resolved = !state.planDirty && state.from && state.to && plannedInputs?.[0] === state.origin && plannedInputs[1] === state.destination;
+  const places = resolved ? { start: state.to, place: state.from } : {};
   state.origin = isCurrentLocation(end) ? '' : end;
   state.destination = start || t('我的位置', 'My location');
   syncPlaceInputs();
+  search(places);
+}
+
+function editTripPlace(field, value) {
+  state[field] = value;
+  if (!state.routeView || state.planDirty || (!state.to && state.phase === 'idle')) return;
+  const wasPlanning = PHASES[state.phase];
+  planRun++;
+  transitRequest?.abort();
+  clearTimeout(whenTimer);
+  state.planDirty = true;
+  state.phase = 'idle';
+  state.error = null;
+  state.focus = null;
+  if (wasPlanning && state.thread?.busy) state.thread = null;
+  clearExplore();
+  renderNearStops();
+  renderBottomStatus();
+  renderSheet();
 }
 
 function syncPlaceInputs() {
@@ -2081,21 +2180,24 @@ function chooseSite(site) {
 }
 
 async function searchStops(aroundMe = false, chosen = null) {
-  if (!state.db) return;
+  if (!state.db || state.tab !== 'stops') return;
   const run = ++stopRun, text = state.stopQuery.trim(), index = siteIndex();
   state.stopSuggesting = false;
   state.focus = null;
   state.stopError = null;
-  state.stopOpen = null;
-  let place = null;
+  selectNearbyStop(null);
+  let place = null, error = null;
   state.stopBusy = true;
+  state.stopPlace = null;
+  state.stops = [];
   renderSheet();
+  drawMap();
   if (chosen) {
     history.add('stops', text);
     place = chosen;
   } else if (aroundMe) {
-    place = await here();
-    if (!place) state.stopError = t('未能取得你的位置，請允許定位。', "Couldn't get your location. Allow Location access.");
+    place = await here().catch(() => null);
+    if (!place) error = t('未能取得你的位置，請允許定位。', "Couldn't get your location. Allow Location access.");
   } else if (text) {
     history.add('stops', text);
     const site = exactSite(text, index);
@@ -2105,12 +2207,14 @@ async function searchStops(aroundMe = false, chosen = null) {
       // A map reads 理大 as any name containing those characters, so expand nicknames first.
       let full = text;
       try { full = (await client()?.intent(searchMessage(null, text, 'fastest')))?.destination ?? text; } catch { /* Search the text as typed. */ }
-      place = await resolvePlace(full);
+      if (run !== stopRun) return;
+      place = await resolvePlace(full).catch(() => null);
       if (place && full !== text) place = { ...place, name: full };
     }
-    if (!place) state.stopError = t(`找不到「${text}」，請換個說法。`, `Couldn't find "${text}". Try another name.`);
+    if (!place) error = t(`找不到「${text}」，請換個說法。`, `Couldn't find "${text}". Try another name.`);
   }
-  if (run !== stopRun) return;
+  if (run !== stopRun || state.tab !== 'stops') return;
+  state.stopError = error;
   state.stopPlace = place;
   state.stops = place ? stopsNear(index, place.location, state.stopRadius) : [];
   state.stopBusy = false;
@@ -2118,9 +2222,14 @@ async function searchStops(aroundMe = false, chosen = null) {
   stagger();
   renderSheet();
   drawMap();
-  if (place) mapView.fit([offset(place.location, state.stopRadius, -1), offset(place.location, state.stopRadius, 1)], 18);
+  if (place) fitStopArea();
 }
 let stopRun = 0;
+function cancelStopSearch() {
+  stopRun++;
+  state.stopBusy = false;
+  state.stopError = null;
+}
 const offset = (l, m, sign) => ({ lat: l.lat + (sign * m) / 111_000, lng: l.lng + (sign * m) / 103_000 });
 
 function planTo(site) {
@@ -2128,6 +2237,7 @@ function planTo(site) {
 }
 
 function planToPlace(place) {
+  if (state.tab === 'stops') cancelStopSearch();
   state.tab = 'plan';
   // A start the rider picked is waiting for this destination.
   if (!pickedPlaces.has(state.origin)) state.origin = '';
@@ -2203,16 +2313,97 @@ function starButton(key, seq, op) {
 function visitRow(visit) {
   const route = state.db.routes[visit.routeKey];
   if (!route) return null;
-  return h('div', { class: 'row' },
-    h('button', {
-      class: 'tap grow', onclick: () => {
+  const key = `${visit.routeKey}|${visit.op}|${visit.seq}`, id = `visit-${key}`, expanded = state.stopVisit === key;
+  const row = h('div', { id, class: 'stop-visit' },
+    h('div', { class: 'row' },
+      h('button', { class: 'tap grow', 'aria-expanded': String(expanded), onclick: () => {
+        state.stopVisit = expanded ? null : key;
+        renderSheet();
+        $(id)?.querySelector('button')?.focus({ preventScroll: true });
+      } }, h('div', { class: 'row' },
+        badge(visit.op, route.route), h('span', { class: 'small ellipsis grow' }, `→ ${nameText(route.dest, state.lang)}`),
+        h('span', { class: 'tiny muted visit-next' }, t('等候查詢', 'Waiting')),
+        icon(expanded ? 'up' : 'down', 13))),
+      starButton(visit.routeKey, visit.seq, visit.op)),
+    expanded && h('div', { class: 'stack' },
+      h('div', { class: 'eta-grid visit-arrivals' }),
+      h('button', { class: 'link visit-route', onclick: () => {
+        stopListView = { scroll: $('sheet').scrollTop, size: sheet.current };
         focusRoute(visit.routeKey, visit.op, visit.seq);
         renderSheet();
         $('sheet').scrollTop = 0;
-      },
-    }, h('div', { class: 'row' }, badge(visit.op, route.route), h('span', { class: 'small ellipsis grow' }, `→ ${nameText(route.dest, state.lang)}`), h('span', { class: 'muted' }, icon('down', 15)))),
-    starButton(visit.routeKey, visit.seq, visit.op));
+      } }, t('查看全程路線', 'View full route'))));
+  row.arrivalRequest = { route, seq: visit.seq, op: visit.op, key: `${state.lang}|${key}` };
+  return row;
 }
+
+const stopArrivalCache = new Map(), visibleStopArrivals = new Set();
+const STOP_ARRIVAL_MAX_PENDING = 4;
+let stopArrivalPending = 0;
+
+const stopArrivalObserver = new IntersectionObserver((entries) => {
+  for (const { isIntersecting, target } of entries) {
+    if (isIntersecting && target.isConnected) visibleStopArrivals.add(target);
+    else visibleStopArrivals.delete(target);
+  }
+  refreshVisibleStopArrivals();
+}, { root: $('sheet') });
+
+function watchVisibleStopArrivals() {
+  stopArrivalObserver.disconnect();
+  visibleStopArrivals.clear();
+  if (state.tab !== 'stops' || sheet.mapOnly) return;
+  $('sheet').querySelectorAll('.stop-visit').forEach((row) => stopArrivalObserver.observe(row));
+}
+
+function refreshVisibleStopArrivals() {
+  if (document.hidden || state.tab !== 'stops' || sheet.mapOnly) return;
+  const now = Date.now();
+  for (const row of visibleStopArrivals) {
+    if (!row.isConnected) continue;
+    const { key, route, seq, op } = row.arrivalRequest;
+    let record = stopArrivalCache.get(key);
+    if (!record) {
+      if (stopArrivalCache.size >= 256) stopArrivalCache.delete(stopArrivalCache.keys().next().value);
+      stopArrivalCache.set(key, record = { checked: 0, etas: null, error: false });
+    }
+    if (now - record.checked >= VEHICLE_REFRESH && stopArrivalPending < STOP_ARRIVAL_MAX_PENDING) {
+      record.checked = now;
+      stopArrivalPending++;
+      fetchETA(route, seq, state.db, state.lang, op).then((etas) => {
+        record.etas = etas;
+        record.error = false;
+      }).catch(() => {
+        record.etas = null;
+        record.error = true;
+      }).finally(() => {
+        stopArrivalPending--;
+        refreshVisibleStopArrivals();
+      });
+    }
+    const next = record.etas?.find(stillDue), minutes = next && minutesUntil(next.date);
+    const text = next ? (minutes ? t(`${minutes} 分鐘`, `${minutes} min`) : t('即到', 'Now'))
+      : record.etas ? t('暫無時間', 'No times')
+        : record.error ? t('未能取得', 'Unavailable') : record.checked ? t('查詢中…', 'Checking…') : t('等候查詢', 'Waiting');
+    const label = row.querySelector('.visit-next');
+    if (label.dataset.text !== text) {
+      label.dataset.text = text;
+      label.textContent = text;
+      label.classList.toggle('live', !!next);
+      label.classList.toggle('muted', !next);
+    }
+    const detail = row.querySelector('.visit-arrivals');
+    if (!detail) continue;
+    const signature = record.etas ? record.etas.filter(stillDue).slice(0, 2).map((eta) => `${eta.date}:${minutesUntil(eta.date)}`).join('|') : text;
+    if (detail.lastArrivals === record.etas && detail.lastSignature === signature) continue;
+    detail.lastArrivals = record.etas;
+    detail.lastSignature = signature;
+    if (record.etas) fillArrivals(detail, record.etas);
+    else clear(detail, h('span', { class: 'small muted', role: 'status' }, text));
+  }
+}
+
+setInterval(refreshVisibleStopArrivals, 5_000);
 
 // MARK: Plan tab
 
@@ -2254,6 +2445,8 @@ function transitModePicker() {
       runPlan({ kind: 'replan' });
     }
   });
+  picker.id = 'transport-preference';
+  if (state.nav) picker.querySelectorAll('button').forEach((button) => { button.disabled = true; });
   picker.setAttribute('role', 'group');
   picker.setAttribute('aria-label', t('交通工具偏好', 'Transport preference'));
   return picker;
@@ -2277,7 +2470,7 @@ function renderPlanTop() {
     h('input', {
       id: `${field}-input`, value: state[field], placeholder, enterkeyhint: 'search', autocomplete: 'off',
       oninput: (event) => {
-        state[field] = event.target.value;
+        editTripPlace(field, event.target.value);
         sheet.snap('full');
         suggestPlaces(field);
       },
@@ -2290,19 +2483,24 @@ function renderPlanTop() {
     }), trailing);
   clear($('top'),
     h('div', { class: 'row' }, h('span', { class: 'title grow' }, t('路線', 'Directions')),
-      h('button', { class: 'round', 'aria-label': t('關閉', 'Close'), onclick: closeTrip }, icon('close', 16))),
-    h('div', { class: 'search-card' },
+      h('button', { id: 'close-trip', class: 'round', disabled: !!state.nav, 'aria-label': t('關閉', 'Close'), onclick: closeTrip }, icon('close', 16))),
+    h('fieldset', { id: 'route-inputs', class: 'search-card', disabled: !!state.nav },
       h('div', { class: 'places' },
         h('div', { class: 'rail' }, h('i'), h('b'), h('i', { class: 'end' })),
         place('origin', t('我的位置', 'My location'), h('button', {
           class: 'icon-button on', 'aria-label': t('由我的位置出發', 'Start from my location'),
-          onclick: (event) => { event.preventDefault(); state.origin = ''; syncPlaceInputs(); getFix(true); },
+          onclick: (event) => {
+            event.preventDefault();
+            if (state.origin) editTripPlace('origin', '');
+            syncPlaceInputs();
+            getFix(true);
+          },
         }, icon('locate', 19))),
         h('hr'),
         place('destination', t('要去哪裡？', 'Where to?'))),
       h('div', { class: 'stack', style: 'align-items:center' },
         h('button', { class: 'icon-button', 'aria-label': t('對調起點及目的地', 'Swap start and destination'), onclick: swapEnds }, icon('swap', 19)),
-        h('button', { class: 'go', 'aria-label': t('搜尋', 'Search'), onclick: search }, icon('search', 19)))),
+        h('button', { class: 'go', 'aria-label': t('搜尋', 'Search'), onclick: () => search() }, icon('search', 19)))),
     transitModePicker(),
     h('div', { id: 'plan-when' }),
     h('div', { id: 'place-history' }));
@@ -2331,7 +2529,7 @@ function whenLabel() {
 /** Times the trip on screen again; with no trip yet, the time waits for the search. */
 function planAgainForTime() {
   clearTimeout(whenTimer);
-  if (state.to) runPlan({ kind: 'place', place: state.to });
+  if (state.from && state.to && !state.planDirty && !state.nav) runPlan({ kind: 'replan' });
 }
 
 /** The choices take up the sheet's half, so it opens fully to keep the routes in view as they change. */
@@ -2354,6 +2552,7 @@ function chooseWhen(mode) {
 
 /** Takes a day, an hour or a minute. A time already gone moves up to the next one still possible. */
 function pickWhen(change) {
+  if (!state.when) return;
   const wanted = fromParts({ ...timeParts(state.when.at), ...change });
   const at = Math.max(wanted, Math.ceil((Date.now() + 60_000) / FIVE_MINUTES_MS) * FIVE_MINUTES_MS), moved = at !== state.when.at;
   state.when.at = at;
@@ -2381,7 +2580,7 @@ function wheel(values, value, label, pick) {
     const index = Math.min(values.length - 1, Math.max(0, Math.round(list.scrollTop / WHEEL_ROW)));
     mark(index);
     clearTimeout(settling);
-    settling = setTimeout(() => pick(values[index]), WHEEL_SETTLES_MS);
+    settling = setTimeout(() => { if (list.isConnected) pick(values[index]); }, WHEEL_SETTLES_MS);
   });
   const start = Math.max(0, values.indexOf(value));
   mark(start);
@@ -2407,7 +2606,7 @@ function renderWhen() {
   if (!slot) return;
   clear(slot,
     h('button', {
-      class: 'when-chip', 'aria-expanded': String(whenOpen),
+      class: 'when-chip', disabled: !!state.nav, 'aria-expanded': String(whenOpen),
       onclick: () => { showWhen(!whenOpen); renderWhen(); },
     }, icon('clock', 15), h('span', { id: 'when-label' }, whenLabel()), icon('down', 12)),
     h('span', { id: 'near-stops' }),
@@ -2420,8 +2619,8 @@ function renderWhen() {
 /** Beside the time, and apart from it, so that planning again leaves a half-picked time alone. */
 function renderNearStops() {
   const slot = $('near-stops');
-  if (slot) clear(slot, state.to && h('button', { class: 'when-chip', onclick: () => showStopsNear(state.to) }, icon('bus', 15), t('目的地附近站點', 'Stops near destination')),
-    state.to && inHongKong(state.to.location) && h('button', { id: 'explore-destination', class: 'when-chip', onclick: openExplore },
+  if (slot) clear(slot, !state.planDirty && state.to && h('button', { class: 'when-chip', onclick: () => showStopsNear(state.to) }, icon('bus', 15), t('目的地附近站點', 'Stops near destination')),
+    !state.planDirty && state.to && inHongKong(state.to.location) && h('button', { id: 'explore-destination', class: 'when-chip', onclick: openExplore },
       icon('search', 15), t('探索目的地附近', 'Explore nearby')));
 }
 
@@ -2641,10 +2840,13 @@ function journeyCard(journey) {
     h('button', {
       class: 'tap', 'aria-expanded': String(isOpen), onclick: () => {
         state.onMap = id;
+        state.pickedJourney = true;
         state.expanded = isOpen ? null : id;
         state.justOpened = isOpen ? null : id;
         state.focus = null;
+        clearMapStop();
         renderSheet();
+        renderNavBanner();
         // The route is what was asked for, so a sheet covering the map makes way for it.
         if (!isOpen) closeSheetForMap();
         fitPlanMap();
@@ -2655,6 +2857,7 @@ function journeyCard(journey) {
         h('span', { class: 'minutes' }, Math.round(totalMinutes(journey))),
         h('span', { class: 'small muted' }, t('分鐘', 'min')),
         h('span', { class: 'grow' }),
+        isNavigating && h('span', { class: 'tiny live bold' }, t('導航中', 'Navigating')),
         h('span', { class: 'tiny muted bold' }, journey.provider === 'transitous' ? 'Transitous' : journey.provider === 'google' ? 'Google Maps' : t('內置規劃', 'Built-in planner')),
         rides(journey).some((ride) => ride.liveDeparture) && h('span', { class: 'row tiny live bold', style: 'gap:6px' }, h('i', { class: 'pulse' }), t('實時', 'Live')),
         h('span', { class: `small ${arrivesLate(journey) ? 'late' : 'muted'}` }, state.when ? `${clock(journey.departure)} – ${arrive}` : t(`${arrive} 到達`, `Arrive ${arrive}`))),
@@ -2671,8 +2874,14 @@ function journeyCard(journey) {
     isOpen && !canNavigate && h('a', { class: 'link', href: googleDirections(), target: '_blank', rel: 'noopener' }, t('在 Google 地圖查看', 'View in Google Maps')),
     isOpen && canNavigate && h('button', {
       class: `primary wide${isNavigating ? ' danger' : ''}`,
-      onclick: () => { if (isNavigating) { stopNavigation(); renderSheet(); drawMap(); fitPlanMap(); } else { stopNavigation(); startNavigation(journey); } },
-    }, icon(isNavigating ? 'stop' : 'navigate', 18, true), isNavigating ? t('結束導航', 'End navigation') : t('開始導航', 'Start navigation')));
+      onclick: () => {
+        stopNavigation();
+        if (!isNavigating) return startNavigation(journey);
+        renderSheet();
+        fitPlanMap();
+      },
+    }, icon(isNavigating ? 'stop' : 'navigate', 18, true), isNavigating ? t('結束導航', 'End navigation')
+      : state.nav ? t('切換到此路線導航', 'Switch navigation to this route') : t('開始導航', 'Start navigation')));
 }
 
 function legDetail(leg) {
@@ -2896,6 +3105,9 @@ function planSheet() {
     return items;
   }
   items.push(h('div', { id: 'plan-stop' }, planStopCard()));
+  if (state.planDirty) return [...items, h('div', { class: 'notice', role: 'status' },
+    t('起點或目的地已更改，請重新搜尋路線。', 'The start or destination has changed. Search again to update the route.'),
+    h('button', { class: 'link', disabled: !state.destination.trim(), onclick: () => search() }, t('搜尋新路線', 'Search new route')))];
   // While the AI thinks, its card says so.
   if (PHASES[state.phase] && !(state.phase === 'understanding' && state.thread)) items.push(h('div', { class: 'status' }, h('span', { class: 'spinner' }), PHASES[state.phase]()));
   if (PHASES[state.phase] && !state.journeys.length) items.push(h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }));
@@ -2903,7 +3115,7 @@ function planSheet() {
   const best = state.journeys[0];
   if (best && arrivesLate(best)) items.push(h('div', { class: 'notice' }, t(`${clock(best.arriveBy)} 前趕不及，最快約 ${clock(arrivalTime(best))} 到達。`, `You can't make it by ${clock(best.arriveBy)}. The earliest is about ${clock(arrivalTime(best))}.`)));
   if (state.candidates.length && state.phase === 'done') {
-    items.push(segments([['lessWalking', t('少行路', 'Less walking')], ['fewerTransfers', t('少轉車', 'Fewer changes')], ['fastest', t('最快', 'Fastest')]], state.preference, (preference) => {
+    if (!state.nav) items.push(segments([['lessWalking', t('少行路', 'Less walking')], ['fewerTransfers', t('少轉車', 'Fewer changes')], ['fastest', t('最快', 'Fastest')]], state.preference, (preference) => {
       if (state.preference === preference) return;
       state.preference = preference;
       runPlan({ kind: 'replan' });
@@ -3018,6 +3230,7 @@ function renderStopsTop() {
       h('input', {
         id: 'stop-input', value: state.stopQuery, placeholder: t('站名或地點，例如：旺角、朗豪坊', 'Stop or place, e.g. Mong Kok'), enterkeyhint: 'search', autocomplete: 'off',
         oninput: (event) => {
+          cancelStopSearch();
           state.stopQuery = event.target.value;
           state.stopSuggesting = !!state.stopQuery.trim();
           getFix();
@@ -3038,12 +3251,14 @@ function stopFilters() {
   return [
     segments([['all', t('全部', 'All')], ['bus', t('巴士', 'Bus')], ['minibus', t('小巴', 'Minibus')], ['mtr', t('港鐵', 'MTR')], ['lightRail', t('輕鐵', 'LRT')]], state.stopMode, (mode) => {
       state.stopMode = mode;
+      if (!visibleStops().some((stop) => stop.site.id === state.stopOpen)) selectNearbyStop(null);
       renderSheet();
       drawMap();
     }),
     segments([[300, '300 m'], [500, '500 m'], [1000, '1 km']], state.stopRadius, (radius) => {
       state.stopRadius = radius;
       state.stops = state.stopPlace ? stopsNear(siteIndex(), state.stopPlace.location, radius) : [];
+      if (!visibleStops().some((stop) => stop.site.id === state.stopOpen)) selectNearbyStop(null);
       renderSheet();
       drawMap();
     }),
@@ -3051,19 +3266,31 @@ function stopFilters() {
 }
 
 const visibleStops = () => state.stops.filter((stop) => siteHasMode(stop.site, state.stopMode));
+let stopListView = null;
+
+function selectNearbyStop(id) {
+  if (id === state.stopOpen) return;
+  state.stopOpen = id;
+  state.stopVisit = null;
+  clearMapStop();
+}
 
 function stopCard(stop, isNearest) {
   const isOpen = state.stopOpen === stop.site.id;
   const numbers = [...new Set(stop.site.visits.map((v) => lineName(v.op, state.db.routes[v.routeKey].route, state.lang)))];
   return h('div', { class: `card${isOpen ? ' open' : ''}`, id: `stop-${stop.site.id}` },
-    h('button', { class: 'tap', 'aria-expanded': String(isOpen), onclick: () => { state.stopOpen = isOpen ? null : stop.site.id; renderSheet(); if (state.focus) leaveFocus(); } },
+    h('button', { class: 'tap', 'aria-expanded': String(isOpen), onclick: () => {
+      selectNearbyStop(isOpen ? null : stop.site.id);
+      renderSheet();
+      $(`stop-${stop.site.id}`)?.querySelector('button')?.focus({ preventScroll: true });
+    } },
       h('div', { class: 'row' }, h('span', { class: 'bold grow' }, nameText(stop.site.name, state.lang)),
         h('span', { class: `small ${isNearest ? 'live bold' : 'muted'}` }, distanceText(stop.distance)), h('span', { class: 'muted' }, icon(isOpen ? 'up' : 'down', 16))),
       h('div', { class: 'tiny muted ellipsis' }, numbers.slice(0, 8).join(' · ') + (numbers.length > 8 ? ` +${numbers.length - 8}` : ''))),
     isOpen && [
-      h('button', { class: 'primary wide', onclick: () => planTo(stop.site) }, icon('route', 18), t('規劃路線到這裡', 'Plan a trip here')),
-      h('div', { class: 'tiny muted' }, t('此站路線 · 點選查看最近兩班', 'Routes at this stop · tap for arrivals')),
+      h('div', { class: 'tiny muted' }, t('點選路線查看最近兩班', 'Tap a route to see its next two arrivals')),
       stop.site.visits.filter(MODES[state.stopMode]).map(visitRow),
+      h('button', { class: 'link visit-route', onclick: () => planTo(stop.site) }, icon('route', 16), t('規劃路線到這裡', 'Plan a trip here')),
     ]);
 }
 
@@ -3075,7 +3302,10 @@ function stopsSheet() {
       state.focus = null;
       renderSheet();
       leaveFocus();
-      $('sheet').scrollTop = 0;
+      if (stopListView) {
+        sheet.snap(stopListView.size);
+        $('sheet').scrollTop = stopListView.scroll;
+      }
     });
   }
   const stops = visibleStops();
@@ -3547,6 +3777,23 @@ function settingsSheet() {
 
 // MARK: Bottom sheet
 
+function clearMapStop() {
+  $('map-stop-preview')?.remove();
+}
+
+function showMapStop(stopName, reveal = () => { $('sheet').scrollTop = 0; }) {
+  clearMapStop();
+  $('app').append(h('div', { id: 'map-stop-preview', class: 'row map-stop-preview' },
+    h('span', { class: 'small bold grow', role: 'status' }, stopName),
+    h('button', { class: 'link', onclick: () => {
+      mapTouched = true;
+      sheet.snap('half');
+      sheet.setMapOnly(false);
+      requestAnimationFrame(reveal);
+    } }, t('查看到站', 'View arrivals')),
+    h('button', { class: 'round', 'aria-label': t('關閉', 'Close'), onclick: clearMapStop }, icon('close', 15))));
+}
+
 const PANEL_SIZES = ['map', 'peek', 'half', 'full'];
 
 /** Keep the last menu size while the panel is hidden. */
@@ -3592,13 +3839,16 @@ const sheet = {
     open.hidden = !on;
     this.measure();
     this.updateControls();
+    if (!on) clearMapStop();
+    watchVisibleStopArrivals();
     (on ? open : wideLayout.matches ? $('hide-panel') : $('grabber')).focus({ preventScroll: true });
 
     if (showsEmbed()) return showEmbed();
     if (!on && (mapTouched || (!wideLayout.matches && this.current === 'full'))) return;
     const preview = state.explore?.preview?.target;
-    if (state.nav?.here) mapView.follow(state.nav.here);
-    else if (preview) mapView.follow(preview.location, 17, true, exploreMapOffset());
+    if (state.tab === 'plan' && showingNavigation()) {
+      if (state.nav.here && state.nav.following) mapView.follow(state.nav.here);
+    } else if (preview) mapView.follow(preview.location, 17, true, exploreMapOffset());
     else if (state.tab === 'plan' && (state.from || state.to)) fitPlanMap();
     else if (state.focus) fitWholeRoute();
     else if (state.tab === 'stops' && state.stopPlace) fitStopArea();
@@ -3614,7 +3864,7 @@ const sheet = {
     panel.addEventListener('pointerdown', (event) => {
       swallowClick = false;
       if (!event.isPrimary || event.button !== 0 || !grabber.offsetParent || event.target.closest?.('.no-drag')) return;
-      if ((this.current === 'full' || state.explore) && list.contains(event.target)) return;
+      if ((this.current === 'full' || state.explore || (state.tab === 'stops' && state.stopOpen && !state.focus)) && list.contains(event.target)) return;
       fromGrabber = grabber.contains(event.target);
       if (!fromGrabber && event.target === document.activeElement) return;
       startX = event.clientX;
@@ -3693,6 +3943,7 @@ const sheet = {
 function renderSheet() {
   const sheets = { plan: planSheet, stops: stopsSheet, routes: routesSheet, saved: savedSheet, settings: settingsSheet };
   clear($('sheet'), sheets[state.tab]());
+  watchVisibleStopArrivals();
   state.justOpened = null;
   document.querySelectorAll('.reveal .leg, .reveal > .primary').forEach((element, index) => element.style.setProperty('--i', index));
   if (staggerNext) {
@@ -3737,21 +3988,24 @@ function drawMap() {
   }
   if (state.tab === 'stops') {
     if (state.stopPlace) {
-      mapView.ends(null, state.stopPlace);
-      mapView.stops(visibleStops(), state.stopPlace.location, state.stopRadius, (stop) => {
-        state.stopOpen = stop.site.id;
+      const stops = visibleStops(), center = state.stopPlace.location;
+      if (!stops.some((stop) => meters(stop.site.location, center) < 8)) mapView.ends(null, state.stopPlace);
+      mapView.stops(stops, center, state.stopRadius, (stop) => {
+        selectNearbyStop(stop.site.id);
         renderSheet();
-        $(`stop-${stop.site.id}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        const reveal = () => $(`stop-${stop.site.id}`)?.scrollIntoView({ block: 'start', behavior: calm.matches ? 'auto' : 'smooth' });
+        if (sheet.mapOnly) showMapStop(nameText(stop.site.name, state.lang), reveal);
+        else reveal();
       });
     }
     return;
   }
   if (state.tab !== 'plan') return moveVehicles();
-  if (state.nav) {
+  if (showingNavigation()) {
     // Navigation shows only what is still ahead, and the legs not reached yet light.
     mapView.path(pathAhead(state.nav.path, state.nav.progress, state.nav.here), chooseLineStop, animate);
   } else {
-    const path = selectedPath();
+    const path = state.planDirty ? null : selectedPath();
     if (path) {
       mapView.path(withRoads(path), chooseLineStop, animate);
       loadRoads(path).then((arrived) => {
@@ -3762,9 +4016,9 @@ function drawMap() {
       });
     }
   }
-  const choosing = state.discovery?.stage === 'choosing' && !state.journeys.length && state.phase === 'idle';
+  const choosing = !state.planDirty && state.discovery?.stage === 'choosing' && !state.journeys.length && state.phase === 'idle';
   if (choosing && !showsEmbed()) mapView.numbered(state.discovery.suggestions, choosePlace);
-  mapView.ends(state.from, state.to);
+  if (!state.planDirty || showingNavigation()) mapView.ends(state.from, state.to);
   showChosenStop();
   moveVehicles();
 }
@@ -3779,10 +4033,34 @@ function closeSheetForMap() {
 
 // Once the rider moves the map it is theirs, until they choose something to look at.
 let mapTouched = false;
-for (const gesture of ['pointerdown', 'wheel']) $('map').addEventListener(gesture, () => { mapTouched = true; }, { passive: true });
+let mapPointer = null;
+function pauseNavigationFollow() {
+  if (!showingNavigation() || !state.nav.following) return;
+  state.nav.following = false;
+  renderNavBanner();
+}
+$('map').addEventListener('pointerdown', (event) => {
+  mapTouched = true;
+  if (!event.isPrimary && event.pointerType === 'touch') pauseNavigationFollow();
+  if (event.isPrimary) mapPointer = { id: event.pointerId, x: event.clientX, y: event.clientY };
+}, { capture: true, passive: true });
+$('map').addEventListener('pointermove', (event) => {
+  if (mapPointer?.id !== event.pointerId || !event.buttons) return;
+  if (Math.hypot(event.clientX - mapPointer.x, event.clientY - mapPointer.y) > 6) pauseNavigationFollow();
+}, { capture: true, passive: true });
+for (const event of ['pointerup', 'pointercancel']) {
+  window.addEventListener(event, (pointer) => { if (mapPointer?.id === pointer.pointerId) mapPointer = null; }, { capture: true, passive: true });
+}
+$('map').addEventListener('wheel', () => { mapTouched = true; pauseNavigationFollow(); }, { capture: true, passive: true });
+$('map').addEventListener('keydown', (event) => {
+  if (['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', '+', '-', '='].includes(event.key)) {
+    mapTouched = true;
+    pauseNavigationFollow();
+  }
+}, true);
 
-function fitPlanMap() {
-  if (state.explore?.preview) return;
+function fitPlanMap(includeNavigation = false) {
+  if (state.tab !== 'plan' || state.explore?.preview || state.planDirty || (showingNavigation() && !includeNavigation)) return;
   mapTouched = false;
   const path = selectedPath();
   const points = path ? withRoads(path).segments.flatMap((s) => s.line ?? s.points) : [state.from?.location, state.to?.location].filter(Boolean);
@@ -3820,6 +4098,8 @@ function fitStopArea() {
 }
 
 function setTab(tab) {
+  if (state.tab === 'stops' && tab !== 'stops') cancelStopSearch();
+  clearMapStop();
   if (tab !== 'plan') clearExplore();
   const direction = tab === 'plan' ? 'back' : 'forward', hadFocus = !!state.focus;
   state.tab = tab;
@@ -3832,7 +4112,8 @@ function setTab(tab) {
   if (tab === 'stops' && state.stopPlace) fitStopArea();
   else if (hadFocus && tab !== 'plan') showHomeMap();
   if (tab === 'plan') {
-    if (state.from || state.to) fitPlanMap();
+    if (showingNavigation() && state.nav.following && state.nav.here) mapView.follow(state.nav.here);
+    else if (state.from || state.to) fitPlanMap();
     else showHomeMap();
   }
 }
@@ -3869,6 +4150,7 @@ renderTab();
 mapView.home();
 clear($('locate'), icon('arrow', 20));
 $('locate').addEventListener('click', async () => {
+  if (state.tab === 'plan' && state.nav) return resumeNavigation();
   const fix = await getFix(true);
   if (!fix) return;
   drawMap();
