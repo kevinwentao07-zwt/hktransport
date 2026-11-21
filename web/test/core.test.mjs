@@ -5,6 +5,7 @@ import * as E from '../js/eta.js';
 import * as A from '../js/ai.js';
 import * as P from '../js/places.js';
 import { toSimplified } from '../js/hans.js';
+import { eduhkDeparture, includesEdUHK, withEdUHKShuttle } from '../js/eduhk.js';
 
 const raw = {
   routeList: {
@@ -863,4 +864,33 @@ test('sharing the boarding ETA across candidates still checks each train destina
   } finally {
     globalThis.fetch = previousFetch;
   }
+});
+
+
+test('EdUHK Tai Wai departures follow the published term timetable and Hong Kong holidays', () => {
+  const at = (day, time) => Date.parse(`${day}T${time}:00+08:00`);
+  const inRoute = 'eduhk-tai-wai-in', outRoute = 'eduhk-tai-wai-out';
+  assert.equal(eduhkDeparture(inRoute, at('2026-11-23', '08:03')), at('2026-11-23', '08:10'));
+  assert.equal(eduhkDeparture(inRoute, at('2026-11-23', '17:19')), at('2026-11-23', '17:30'));
+  assert.equal(eduhkDeparture(outRoute, at('2026-11-23', '21:24')), at('2026-11-23', '21:30'));
+  assert.equal(eduhkDeparture(outRoute, at('2026-11-23', '21:41')), null);
+  assert.equal(eduhkDeparture(inRoute, at('2026-11-21', '08:03')), null);
+  assert.equal(eduhkDeparture(inRoute, at('2026-12-25', '08:03')), null);
+  assert.equal(eduhkDeparture(inRoute, at('2027-07-01', '08:03')), null);
+});
+
+test('the opt-in shuttle is routable and retimed from its timetable without a live ETA lookup', async () => {
+  const augmented = withEdUHKShuttle(db), shuttleNetwork = T.buildNetwork(augmented);
+  const from = augmented.stops['eduhk-tai-wai-b'].location;
+  const to = augmented.stops['eduhk-campus-b1b2'].location;
+  const departure = Date.parse('2026-11-23T08:03:00+08:00');
+  assert.equal(T.search(network, from, to, departure).some(includesEdUHK), false);
+  const journey = T.search(shuttleNetwork, from, to, departure).find(includesEdUHK);
+  assert.ok(journey);
+  const result = await T.retime({ ...journey, departure: departure + 8 * 60_000 }, () => {
+    assert.fail('A shuttle leg must not request real-time departures');
+  });
+  const [ride] = T.rides(result);
+  assert.equal(ride.scheduledDeparture, Date.parse('2026-11-23T08:20:00+08:00'));
+  assert.equal(ride.liveDeparture, null);
 });

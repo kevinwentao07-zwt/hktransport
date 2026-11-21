@@ -1,10 +1,11 @@
 // Route data, the RAPTOR search and journey maths. No DOM, so it also runs in
-// the worker and in Node tests.
+// the worker and in Node tests. A port of RoutePlanner.swift and friends.
+import { eduhkDeparture, includesEdUHK } from './eduhk.js?v=dev';
 
 export const OPERATORS = ['kmb', 'ctb', 'nlb', 'gmb', 'lightRail', 'mtr'];
 
 export const OP_COLORS = {
-  kmb: '#e3242b', ctb: '#ffd100', nlb: '#1ca39c', gmb: '#3dad4a', lightRail: '#f29900', mtr: '#6e8cd6',
+  kmb: '#e3242b', ctb: '#ffd100', nlb: '#1ca39c', gmb: '#3dad4a', lightRail: '#f29900', mtr: '#6e8cd6', eduhk: '#75429b',
 };
 export const OP_LABELS = { kmb: 'KMB·LWB', ctb: 'CTB', nlb: 'NLB', gmb: 'GMB', lightRail: 'LRT', mtr: 'MTR' };
 
@@ -18,6 +19,7 @@ const MTR_LINES = {
 
 /** What riders call a route: "東鐵綫" rather than the MTR's "EAL". */
 export function lineName(op, route, lang) {
+  if (op === 'eduhk') return lang === 'zh' ? '教大校巴' : 'EdUHK shuttle';
   const line = op === 'mtr' ? MTR_LINES[route] : null;
   return line ? line[lang === 'zh' ? 1 : 0] : route;
 }
@@ -230,13 +232,20 @@ export function waitFromBands(bands, t, maxWait) {
 }
 
 class WaitEstimator {
-  constructor(network, clock) {
+  constructor(network, clock, departure) {
     this.network = network;
     this.clock = clock;
     this.cache = new Map();
+    this.departure = departure;
   }
   wait(p, position, minutesAfterDeparture) {
     const pattern = this.network.patterns[p];
+    if (pattern.op === 'eduhk') {
+      const readyAt = this.departure + minutesAfterDeparture * 60_000;
+      const scheduled = eduhkDeparture(pattern.routeKey, readyAt);
+      return scheduled == null || scheduled - readyAt > SETTINGS.maxWaitMinutes * 60_000
+        ? null : Math.max(0, (scheduled - readyAt) / 60_000);
+    }
     const hours = RAIL_HOURS[pattern.op];
     if (!pattern.frequency && !hours) return HEADWAY[pattern.op] / 2;
     let t = (this.clock.minuteOfDay + minutesAfterDeparture - pattern.offsets[position]) % 1440;
@@ -493,7 +502,7 @@ export function search(network, origin, destination, departure, bannedFirstRoute
   if (!access.length || !egressList.length) return [];
 
   const n = network.stopIDs.length, rounds = Math.max(1, SETTINGS.maxTransitLegs);
-  const estimator = new WaitEstimator(network, serviceClock(new Date(departure), network.holidays));
+  const estimator = new WaitEstimator(network, serviceClock(new Date(departure), network.holidays), departure);
   const layer = (value) => Array.from({ length: rounds + 1 }, () => new Array(n).fill(value));
   const arrival = layer(Infinity), rideArrival = layer(Infinity), rideParent = layer(null), walkParent = layer(null);
   const best = new Array(n).fill(Infinity);
@@ -534,7 +543,7 @@ export function search(network, origin, destination, departure, bannedFirstRoute
     const improved = [];
     for (const [p, start] of [...queue].sort((a, b) => a[0] - b[0])) {
       const pattern = network.patterns[p];
-      let base = Infinity, boardPosition = -1, boardTransfer = 0, boardWait = 0;
+      let base = Infinity, boardPosition = -1, boardTransfer = 0, boardWait = 0, boardTime = null;
       for (let i = start; i < pattern.stops.length; i++) {
         const stop = pattern.stops[i];
         if (boardPosition >= 0) {
@@ -543,7 +552,7 @@ export function search(network, origin, destination, departure, bannedFirstRoute
             best[stop] = time;
             arrival[k][stop] = time;
             rideArrival[k][stop] = time;
-            rideParent[k][stop] = { pattern: p, board: boardPosition, alight: i, transfer: boardTransfer, wait: boardWait };
+            rideParent[k][stop] = { pattern: p, board: boardPosition, alight: i, transfer: boardTransfer, wait: boardWait, boardTime };
             walkParent[k][stop] = null;
             improved.push(stop);
           }
@@ -559,6 +568,7 @@ export function search(network, origin, destination, departure, bannedFirstRoute
           boardPosition = i;
           boardTransfer = transfer;
           boardWait = wait;
+          boardTime = pattern.op === 'eduhk' ? Math.round(departure + (previous + transfer + wait) * 60_000) : null;
         }
       }
     }
@@ -623,6 +633,7 @@ function reconstruct(network, round, endStop, egressMeters, accessMeters, depart
       boardStopID: network.stopIDs[pattern.stops[step.board]], alightStopID: network.stopIDs[pattern.stops[step.alight]],
       transferMinutes: step.transfer, waitMinutes: step.wait,
       rideMinutes: pattern.offsets[step.alight] - pattern.offsets[step.board],
+      ...(step.boardTime != null && { scheduledDeparture: step.boardTime }),
       liveDeparture: null, isProjected: false, livePlatform: null,
     });
     stop = pattern.stops[step.board];
@@ -696,7 +707,11 @@ export function planArriving(network, origin, destination, arriveBy, now, prefer
     const closer = planner(network, origin, destination, latestStart(found[0], arriveBy), preference, limit);
     if (closer.length) found = closer;
   }
-  return found.map((journey) => ({ ...journey, departure: Math.max(now, latestStart(journey, arriveBy)), arriveBy }));
+  return found.map((journey) => ({
+    ...journey,
+    departure: Math.max(now, includesEdUHK(journey) ? journey.departure : latestStart(journey, arriveBy)),
+    arriveBy,
+  }));
 }
 
 // MARK: Plans from the AI
@@ -899,6 +914,15 @@ export async function retime(journey, arrivals) {
     }
     const ride = { ...leg };
     const atStop = clock + ride.transferMinutes * 60_000;
+    if (ride.op === 'eduhk') {
+      const scheduled = eduhkDeparture(ride.routeKey, atStop);
+      if (scheduled == null || scheduled - atStop > SETTINGS.maxWaitMinutes * 60_000) return { ...journey, missedConnection: true };
+      ride.scheduledDeparture = scheduled;
+      ride.waitMinutes = Math.max(0, (scheduled - atStop) / 60_000);
+      clock = scheduled + ride.rideMinutes * 60_000;
+      legs.push(ride);
+      continue;
+    }
     const live = await arrivals(ride);
     const next = live ? nextDeparture(live, atStop, ride.op === 'mtr' || ride.op === 'lightRail') : null;
     if (next) {
@@ -1420,7 +1444,7 @@ export function buildStopIndex(db) {
 
 export const MODES = {
   all: () => true,
-  bus: (visit) => ['kmb', 'ctb', 'nlb'].includes(visit.op),
+  bus: (visit) => ['kmb', 'ctb', 'nlb', 'eduhk'].includes(visit.op),
   minibus: (visit) => visit.op === 'gmb',
   mtr: (visit) => visit.op === 'mtr',
   lightRail: (visit) => visit.op === 'lightRail',

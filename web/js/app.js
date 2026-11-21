@@ -11,6 +11,7 @@ import { HONG_KONG, cleanArea, exploreDestination, exploreWebSearchURL, googlePl
 
 import { googleJourneys, requestGoogleTransit } from './google-transit.js?v=dev';
 import { requestTransitous, transitousJourneys } from './transitous.js?v=dev';
+import { EDUHK_TIMETABLE, EDUHK_TRANSPORT, includesEdUHK, withEdUHKShuttle } from './eduhk.js?v=dev';
 
 // MARK: Storage
 
@@ -69,6 +70,7 @@ const state = {
   lang: store.get('lang', 'zh'), script: store.get('script', 'hant'), tab: 'plan', db: null, dbError: null, index: null,
   origin: '', destination: '', when: null, chat: '', preference: store.get('preference', 'lessWalking'), phase: 'idle', error: null, planDirty: false,
   transitMode: ['mtr', 'bus'].includes(savedTransitMode) ? savedTransitMode : 'all',
+  eduhkShuttle: store.get('eduhkShuttle', false) === true,
   fareProfile: Object.hasOwn(FARE_PROFILES, savedFareProfile) ? savedFareProfile : 'adult',
   aiConfig: savedAIConfig(), aiKeyRejected: false,
   from: null, to: null, journeys: [], candidates: [], allowLongWalk: false, onMap: null, pickedJourney: false, expanded: null, explanation: null, aiNotice: null, lastChat: null,
@@ -78,7 +80,7 @@ const state = {
   talk: [], focus: null, routeView: false, nav: null, fix: null, speechLang: store.get('speechLang', 'zh-HK'), listening: false,
 };
 const t = (zh, en) => (state.lang === 'zh' ? zh : en);
-const name = (id) => stopName(id, state.db, state.lang);
+const name = (id) => stopName(id, planningDB(), state.lang);
 // Everything is written in Traditional, as stop names and replies are, so Simplified converts what
 // lands on the page rather than each string on its way there.
 const TEXT_ATTRIBUTES = ['placeholder', 'title', 'aria-label', 'aria-valuetext'];
@@ -945,12 +947,18 @@ const ask = (message, patience) => new Promise((resolve, reject) => {
   worker.postMessage({ ...message, id });
 });
 
+let shuttleDB = null;
+function planningDB() {
+  return state.eduhkShuttle && state.db ? (shuttleDB ??= withEdUHKShuttle(state.db)) : state.db;
+}
+
 async function loadDB() {
   for (const source of DB_SOURCES) {
     try {
       const response = await fetch(source);
       if (!response.ok) continue;
       state.db = normalizeDB(await response.json());
+      shuttleDB = null;
       await ask({ type: 'init', db: state.db });
       state.dbError = null;
       renderTab();
@@ -966,6 +974,7 @@ async function loadDB() {
 // MARK: Planning
 
 let planRun = 0, transitRequest, plannedInputs;
+let replanEdUHK = false;
 const SAME_PLACE_METERS = 30;
 const railFares = new Map(), railFareRequests = new Set();
 const usesRail = (journey) => rides(journey).some((ride) => ride.op === 'mtr' || ride.op === 'lightRail');
@@ -1167,7 +1176,7 @@ async function runPlan(request) {
   const preference = state.preference;
   const departure = mode === 'depart' ? at : now, arriveBy = mode === 'arrive' ? at : null;
   const local = async () => (await ask({
-    type: 'plan', from: start.location, to: end.location, preference, preferredMode: state.transitMode, departure, arriveBy,
+    type: 'plan', from: start.location, to: end.location, preference, preferredMode: state.transitMode, departure, arriveBy, includeEdUHK: state.eduhkShuttle,
   }, 6000)).journeys;
   transitRequest = new AbortController();
   const options = { preference, mode, at, lang: state.lang, signal: transitRequest.signal };
@@ -1184,8 +1193,11 @@ async function runPlan(request) {
 
   const batches = await Promise.allSettled(providers.map((provider) => provider()));
   if (stale()) return;
-  const found = batches.flatMap((batch) => batch.status === 'fulfilled' ? batch.value : [])
-    .filter((journey) => journey.provider !== 'google' || mapView === googleMap);
+  const rawPlans = batches.flatMap((batch) => batch.status === 'fulfilled' ? batch.value : [])
+    .filter((journey) => (journey.provider !== 'google' || mapView === googleMap) && (state.eduhkShuttle || !includesEdUHK(journey)));
+  const found = (await Promise.all(rawPlans.map((journey) => includesEdUHK(journey) ? retime(journey, () => null) : journey)))
+    .filter((journey) => !journey.missedConnection);
+  if (stale()) return;
   if (!found.length) {
     return setPhase('failed', t('找不到可搭乘的公共交通路線，請試另一個時間或上車地點。', 'No public transport route found. Try another time or boarding location.'));
   }
@@ -1197,7 +1209,7 @@ async function runPlan(request) {
   const arrivals = state.arrivals = liveArrivalCache(state.db, state.lang);
   const candidates = (await Promise.all(found.map((journey) => (
     journey.departure - now <= LIVE_AHEAD_MS ? retime(journey, arrivals) : journey
-  )))).filter((journey) => !journey.missedConnection);
+  )))).filter((journey) => !journey.missedConnection && (state.eduhkShuttle || !includesEdUHK(journey)));
   if (stale()) return;
   if (!candidates.length) {
     showTripOptions([]);
@@ -1386,7 +1398,7 @@ let watchID = null, wakeLock = null;
 
 function selectedPath() {
   const journey = state.journeys.find((j) => journeyID(j) === state.onMap);
-  return journey && state.from && state.to ? journeyPath(journey, state.from.location, state.to.location, state.db) : null;
+  return journey && state.from && state.to ? journeyPath(journey, state.from.location, state.to.location, planningDB()) : null;
 }
 
 const VEHICLE_REFRESH = 30_000, SAME_ARRIVAL_MS = 90_000;
@@ -1404,7 +1416,7 @@ function rideOnScreen() {
     const journey = state.journeys.find((j) => journeyID(j) === state.onMap);
     // The buses out there now are not the ones a later trip will catch.
     if (!journey || (!state.nav && journey.departure - Date.now() > LIVE_AHEAD_MS)) return null;
-    return rides(journey).find((ride) => ride.routeKey && !['mtr', 'lightRail'].includes(ride.op));
+    return rides(journey).find((ride) => ride.routeKey && !['mtr', 'lightRail', 'eduhk'].includes(ride.op));
   }
   const focus = state.focus, route = focus && state.db?.routes[focus.routeKey];
   if (!route || ['mtr', 'lightRail'].includes(focus.op)) return null;
@@ -1596,6 +1608,7 @@ function arrivalCard(id, close) {
 function chooseLineStop(segment, index) {
   const position = segment.positions?.[index];
   if (position == null || !segment.routeKey) return;
+  if (segment.op === 'eduhk') return showToast(name(segment.stopIDs[index]));
   const isSame = state.focus?.routeKey === segment.routeKey && state.focus.op === segment.op && state.focus.position === position;
   state.focus = isSame ? null : { routeKey: segment.routeKey, op: segment.op, position };
   if (state.focus) pauseNavigationFollow();
@@ -1734,7 +1747,7 @@ function glideFrame(now) {
   requestAnimationFrame(glideFrame);
 }
 
-const hasRealLine = (segment) => !segment.providerShape && segment.mode === 'ride' && segment.routeKey && !['mtr', 'lightRail'].includes(segment.op);
+const hasRealLine = (segment) => !segment.providerShape && segment.mode === 'ride' && segment.routeKey && !['mtr', 'lightRail', 'eduhk'].includes(segment.op);
 
 const tracks = new Map();
 
@@ -1807,11 +1820,15 @@ async function useWalkTimes() {
   if (mapView !== googleMap || state.phase !== 'done' || !state.candidates.length || !state.from || !state.to) return false;
   const run = planRun, before = state.candidates;
   const updated = before.map((journey) => (journey.provider ? journey
-    : withWalkTimes(journey, walkEnds(journey, state.from.location, state.to.location, state.db), knownWalkTime)));
+    : withWalkTimes(journey, walkEnds(journey, state.from.location, state.to.location, planningDB()), knownWalkTime)));
   if (updated.every((journey, index) => journey === before[index])) return false;
-  const live = await Promise.all(updated.map((journey, index) => (journey === before[index] || !state.arrivals || journey.departure - Date.now() > LIVE_AHEAD_MS ? journey : retime(journey, state.arrivals))));
+  const live = await Promise.all(updated.map((journey, index) => {
+    if (journey === before[index]) return journey;
+    if (state.arrivals && journey.departure - Date.now() <= LIVE_AHEAD_MS) return retime(journey, state.arrivals);
+    return includesEdUHK(journey) ? retime(journey, () => null) : journey;
+  }));
   if (run !== planRun || state.candidates !== before) return false;
-  const moved = showTripOptions(live, true);
+  const moved = showTripOptions(live.filter((journey) => !journey.missedConnection && (state.eduhkShuttle || !includesEdUHK(journey))), true);
   renderSheet();
   if (moved && !mapTouched) fitPlanMap();
   return true;
@@ -2831,12 +2848,13 @@ function journeyCard(journey) {
   const shown = journey.legs.filter((leg) => leg.type === 'ride' || leg.minutes >= 0.5);
   const changes = transfers(journey);
   const arrive = clock(arrivalTime(journey));
-  const cents = journeyFare(journey, state.db, railFares.get(state.fareProfile), state.fareProfile);
+  const shuttle = includesEdUHK(journey);
+  const cents = journeyFare(journey, planningDB(), railFares.get(state.fareProfile), state.fareProfile);
   const money = cents == null ? null : `HK$${(cents / 100).toFixed(2)}`;
   const fare = money ? (cents === 0 ? t(`全程車費 ${money}`, `Total fare ${money}`) : t(`全程車費約 ${money}`, `Est. fare ${money}`))
     : railFareRequests.has(state.fareProfile) && usesRail(journey) ? t('正在查詢車費…', 'Checking fare…')
       : t('全程車費暫缺資料', 'Total fare unavailable');
-  const canNavigate = rides(journey).every((ride) => ride.routeKey || ride.providerStops?.length >= 2);
+  const canNavigate = !shuttle && rides(journey).every((ride) => ride.routeKey || ride.providerStops?.length >= 2);
   return h('div', { class: `card${isOpen ? ' open' : ''}${state.onMap === id ? ' on-map' : ''}${state.justOpened === id ? ' reveal' : ''}`, 'data-journey': id },
     h('button', {
       class: 'tap', 'aria-expanded': String(isOpen), onclick: () => {
@@ -2870,13 +2888,17 @@ function journeyCard(journey) {
         isNavigating && h('span', { class: 'live bold' }, t('導航中', 'Navigating'))),
       h('div', { class: 'journey-summary tiny muted' },
         h('span', {}, `${changes ? t(`轉 ${changes} 次`, `${changes} change${changes > 1 ? 's' : ''}`) : t('直達', 'Direct')} · ${t(`步行 ${Math.round(walkingMeters(journey))} 米`, `walk ${Math.round(walkingMeters(journey))} m`)}`),
+        shuttle && h('span', { class: 'late bold' }, t('只限教大師生', 'EdUHK students and staff only')),
         h('span', { class: cents == null ? 'journey-fare' : 'journey-fare bold' }, fare))),
     isOpen && h('div', { class: 'timeline' }, journey.legs.map(legDetail)),
     isOpen && h('div', { class: 'tiny muted' }, t('規劃來源', 'Route source'), ' · ',
       journey.provider === 'transitous' ? 'Transitous' : journey.provider === 'google' ? 'Google Maps' : t('內置規劃', 'Built-in planner')),
+    isOpen && shuttle && h('div', { class: 'stack' },
+      h('div', { class: 'small muted' }, t('上車須拍教大學生證或職員證。開車時間按校方班表，車程和地圖位置為估算。', 'Tap your EdUHK student or staff card when boarding. Departure times follow the timetable. Journey times and map locations are approximate.')),
+      h('a', { class: 'link', href: EDUHK_TIMETABLE, target: '_blank', rel: 'noopener' }, t('校方時刻表及車費', 'Official timetable and fares'))),
     isOpen && cents > 0 && h('div', { class: 'tiny muted' },
       t('按設定的票價類別估算，實付金額視乎付款方式及優惠。', 'Estimated using the fare profile in Settings. Payment method and discounts may change the actual fare.')),
-    isOpen && !canNavigate && h('a', { class: 'link', href: googleDirections(), target: '_blank', rel: 'noopener' }, t('在 Google 地圖查看', 'View in Google Maps')),
+    isOpen && !canNavigate && !shuttle && h('a', { class: 'link', href: googleDirections(), target: '_blank', rel: 'noopener' }, t('在 Google 地圖查看', 'View in Google Maps')),
     isOpen && canNavigate && h('button', {
       class: `primary wide${isNavigating ? ' danger' : ''}`,
       onclick: () => {
@@ -2900,7 +2922,8 @@ function legDetail(leg) {
   }
   const wait = Math.round(leg.waitMinutes), platform = leg.livePlatform ? ` · ${nameText(leg.livePlatform, state.lang)}` : '';
   const scheduledPlatform = leg.scheduledPlatform ? t(` · 月台 ${leg.scheduledPlatform}`, ` · Platform ${leg.scheduledPlatform}`) : '';
-  const when = !leg.liveDeparture && leg.scheduledDeparture != null ? t(`預計 ${clock(leg.scheduledDeparture)} 開出`, `Expected departure ${clock(leg.scheduledDeparture)}`) + scheduledPlatform
+  const when = leg.op === 'eduhk' ? t(`班表 ${clock(leg.scheduledDeparture)} 開出`, `Timetable departure ${clock(leg.scheduledDeparture)}`)
+    : !leg.liveDeparture && leg.scheduledDeparture != null ? t(`預計 ${clock(leg.scheduledDeparture)} 開出`, `Expected departure ${clock(leg.scheduledDeparture)}`) + scheduledPlatform
     : !leg.liveDeparture ? t(`估算：等候約 ${wait} 分鐘（暫無實時資料）`, `Estimate: about ${wait} min wait (no live data)`)
     : leg.isProjected ? t(`實時推算：約 ${clock(leg.liveDeparture)} 開出（等候約 ${wait} 分鐘）`, `Projected from live: about ${clock(leg.liveDeparture)} (${wait} min wait)`) + platform
       : t(`實時：${clock(leg.liveDeparture)} 開出（等候約 ${wait} 分鐘）`, `Live: departs ${clock(leg.liveDeparture)} (${wait} min wait)`) + platform;
@@ -3732,6 +3755,17 @@ function settingsSheet() {
         store.set('preference', preference);
         renderTab();
       }))),
+    settingGroup(t('校巴', 'Campus shuttles'),
+      setting(t('教大校巴（大圍線）', 'EdUHK shuttle (Tai Wai)'), segments([[false, t('關閉', 'Off')], [true, t('開啟', 'On')]], state.eduhkShuttle, (enabled) => {
+        if (enabled === state.eduhkShuttle) return;
+        state.eduhkShuttle = enabled;
+        store.set('eduhkShuttle', enabled);
+        replanEdUHK = Boolean(state.from && state.to && !state.planDirty && !state.nav);
+        if (!enabled && state.candidates.some(includesEdUHK)) showTripOptions(state.candidates.filter((journey) => !includesEdUHK(journey)), true);
+        renderSheet();
+      })),
+      h('div', { class: 'tiny muted' }, t('開啟後，路線規劃會考慮大圍站往返大埔校園的班次。只限教大學生及教職員，按校方班表估算。', 'When enabled, trip planning can use the Tai Wai–Tai Po Campus shuttle. For EdUHK students and staff only. Times are based on the published timetable.')),
+      h('a', { class: 'link', href: EDUHK_TRANSPORT, target: '_blank', rel: 'noopener' }, t('教大交通及最新安排', 'EdUHK transport and service updates'))),
     settingGroup(t('票價', 'Fares'),
       fareProfilePicker(),
       h('div', { class: 'tiny muted' },
@@ -4139,6 +4173,10 @@ function setTab(tab) {
   if (tab === 'stops' && state.stopPlace) fitStopArea();
   else if (hadFocus && tab !== 'plan') showHomeMap();
   if (tab === 'plan') {
+    if (replanEdUHK) {
+      replanEdUHK = false;
+      if (state.from && state.to && !state.planDirty && !state.nav) return void runPlan({ kind: 'replan' });
+    }
     if (showingNavigation() && state.nav.following && state.nav.here) mapView.follow(state.nav.here);
     else if (state.from || state.to) fitPlanMap();
     else showHomeMap();
