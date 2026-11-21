@@ -3766,7 +3766,7 @@ function settingsSheet() {
         if (!enabled && state.candidates.some(includesEdUHK)) showTripOptions(state.candidates.filter((journey) => !includesEdUHK(journey)), true);
         renderSheet();
       })),
-      h('div', { class: 'tiny muted' }, t('包括大圍站往返大埔校園，以及大學站往大埔校園的回校班次。只限教大學生及教職員，按校方班表估算。', 'Includes Tai Wai–Tai Po Campus in both directions and University Station to Tai Po Campus. For EdUHK students and staff only. Times are based on the published timetable.')),
+      h('div', { class: 'tiny muted' }, t('包括大圍站線及大學站線，兩線均往返大埔校園。只限教大學生及教職員，按校方班表估算。', 'Includes both directions between Tai Po Campus and Tai Wai or University Station. For EdUHK students and staff only. Times are based on the published timetable.')),
       h('a', { class: 'link', href: EDUHK_TRANSPORT, target: '_blank', rel: 'noopener' }, t('教大交通及最新安排', 'EdUHK transport and service updates'))),
     settingGroup(t('票價', 'Fares'),
       fareProfilePicker(),
