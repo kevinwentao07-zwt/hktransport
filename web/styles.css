@@ -63,12 +63,15 @@ svg.icon.solid { fill: currentColor; }
 .map-stop-preview { position: absolute; z-index: 11; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 78px); translate: -50% 0; width: max-content; max-width: min(420px, calc(100% - 24px)); padding: 5px 8px 5px 12px; border-radius: 16px; background: var(--float); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); box-shadow: var(--rim), var(--shadow); }
 .map-stop-preview .link { min-height: 44px; white-space: nowrap; }
 .stop-visit + .stop-visit { padding-top: 6px; border-top: 1px solid var(--line); }
-.visit-next { white-space: nowrap; }
+.visit-next { min-inline-size: 7.25em; text-align: end; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.visit-next.live { font-weight: 700; }
 .visit-route { align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; min-height: 36px; }
 /* Vertical drags move the sheet until it is full; sideways swipes still scroll chips. */
 #top, #bottom, #app:not(.sheet-full) #sheet { touch-action: pan-x; }
-#grabber { flex: none; padding: 9px 0 7px; display: grid; place-items: center; touch-action: none; cursor: grab; }
+#grabber { flex: none; min-height: 32px; display: grid; place-items: center; touch-action: none; cursor: grab; }
 #grabber::before { content: ""; width: 36px; height: 5px; border-radius: 3px; background: var(--faint); }
+#map-gesture-hint { position: absolute; z-index: 11; left: 50%; bottom: calc(var(--panel-h) + var(--keyboard, 0px) + env(safe-area-inset-bottom) + 18px); translate: -50% 0; display: flex; align-items: center; gap: 6px; padding: 6px 11px; border-radius: 999px; background: var(--surface); box-shadow: var(--rim), var(--shadow); color: var(--ink); font-size: 13px; white-space: nowrap; pointer-events: none; }
+#app.sheet-full #map-gesture-hint, #app:has(#panel.dragging) #map-gesture-hint { display: none; }
 #sheet { flex: 1 1 0; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 2px 14px 14px; display: flex; flex-direction: column; gap: 10px; }
 #sheet > * { flex: none; }
 #bottom { flex: none; padding: 6px 12px 10px; display: flex; flex-direction: column; gap: 6px; }
@@ -102,6 +105,7 @@ svg.icon.solid { fill: currentColor; }
 .search-card.single { background: var(--raised); box-shadow: none; padding: 0 4px 0 10px; height: 40px; border-radius: 14px; flex: 1; min-width: 0; transition: background .25s, box-shadow .25s; }
 .search-card.single:focus-within { background: var(--tile); box-shadow: var(--rim), 0 0 0 2.5px color-mix(in srgb, var(--accent) 45%, transparent); }
 .search-card.single .icon-button { width: 32px; height: 32px; }
+.search-card.single.home-search { min-height: 48px; padding-inline-start: 13px; }
 .round { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border-radius: 50%; background: var(--tile); box-shadow: var(--rim), var(--tile-shadow); color: var(--muted); transition: transform .35s var(--pop); }
 .round:active { transform: scale(.88); }
 .view-title { font-size: 28px; font-weight: 700; letter-spacing: -.02em; line-height: 1.15; }
@@ -155,6 +159,12 @@ svg.icon.solid { fill: currentColor; }
 .card.open { box-shadow: var(--rim), var(--shadow); }
 .card.on-map:not(.open) { box-shadow: var(--rim), 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent), var(--tile-shadow); }
 .tap { text-align: left; width: 100%; display: block; color: inherit; }
+.journey-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 4px 12px; }
+.journey-duration { display: inline-flex; align-items: baseline; gap: 5px; }
+.journey-arrival { font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.journey-chips { margin-top: 9px; }
+.journey-ride { display: inline-flex; align-items: center; gap: 4px; }
+.journey-live { color: var(--live); font-size: 12px; font-weight: 600; white-space: nowrap; }
 .minutes { font-size: 30px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1; }
 .badge { display: inline-block; min-width: 30px; padding: 2px 8px; border-radius: 7px; font-size: 12.5px; font-weight: 700; text-align: center; color: #fff; white-space: nowrap; }
 .badge.dark { color: #15181c; }
@@ -162,9 +172,6 @@ svg.icon.solid { fill: currentColor; }
 .journey-summary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 3px 10px; margin-top: 7px; }
 .journey-fare.bold { color: var(--ink); font-variant-numeric: tabular-nums; }
 .walk { display: inline-flex; align-items: center; gap: 1px; font-size: 12.5px; color: var(--muted); }
-.pulse { position: relative; width: 7px; height: 7px; border-radius: 50%; background: var(--live); flex: none; }
-.pulse::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: var(--live); animation: ripple 1.8s var(--ease-out) infinite; }
-@keyframes ripple { from { transform: scale(1); opacity: .6; } to { transform: scale(3.2); opacity: 0; } }
 .notice { color: var(--warn); font-size: 13px; }
 .status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 .spinner { width: 15px; height: 15px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; flex: none; }
@@ -403,6 +410,7 @@ svg.icon.solid { fill: currentColor; }
   #app.sheet-full #map { transform: none; filter: none; border-radius: 0; }
   #app.sheet-full #locate { opacity: 1; transform: none; pointer-events: auto; }
   #grabber { display: none; }
+  #map-gesture-hint { display: none; }
   #hide-panel { display: block; flex: none; align-self: flex-end; margin: 8px 14px 0; color: var(--accent); background: var(--raised); }
   .gm-style a[href*="maps.google"], .gm-style .gm-style-cc { transform: none; }
   #top, #bottom, #app:not(.sheet-full) #sheet { touch-action: auto; }

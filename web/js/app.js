@@ -2454,9 +2454,10 @@ function transitModePicker() {
 
 function renderPlanTop() {
   if (!state.routeView) {
+    const prompt = state.script === 'hans' ? '你想去哪里？' : '你想去邊度？';
     clear($('top'), h('div', { class: 'row' },
-      h('label', { class: 'search-card single' }, h('span', { class: 'muted' }, icon('search', 18)), h('input', {
-        id: 'destination-input', value: state.destination, placeholder: t('搜尋地點或站名', 'Search places or stops'), enterkeyhint: 'search', autocomplete: 'off',
+      h('label', { class: 'search-card single home-search' }, h('span', { class: 'muted' }, icon('search', 18)), h('input', {
+        id: 'destination-input', value: state.destination, placeholder: t(prompt, 'Where do you want to go?'), enterkeyhint: 'search', autocomplete: 'off',
         oninput: (event) => {
           state.destination = event.target.value;
           suggestPlaces();
@@ -2853,22 +2854,26 @@ function journeyCard(journey) {
         if (!isOpen) document.querySelector('.card.open')?.scrollIntoView({ block: 'nearest', behavior: calm.matches ? 'auto' : 'smooth' });
       },
     },
-      h('div', { class: 'row', style: 'align-items:baseline' },
-        h('span', { class: 'minutes' }, Math.round(totalMinutes(journey))),
-        h('span', { class: 'small muted' }, t('分鐘', 'min')),
-        h('span', { class: 'grow' }),
-        isNavigating && h('span', { class: 'tiny live bold' }, t('導航中', 'Navigating')),
-        h('span', { class: 'tiny muted bold' }, journey.provider === 'transitous' ? 'Transitous' : journey.provider === 'google' ? 'Google Maps' : t('內置規劃', 'Built-in planner')),
-        rides(journey).some((ride) => ride.liveDeparture) && h('span', { class: 'row tiny live bold', style: 'gap:6px' }, h('i', { class: 'pulse' }), t('實時', 'Live')),
-        h('span', { class: `small ${arrivesLate(journey) ? 'late' : 'muted'}` }, state.when ? `${clock(journey.departure)} – ${arrive}` : t(`${arrive} 到達`, `Arrive ${arrive}`))),
-      h('div', { class: 'chips', style: 'margin-top:9px' }, shown.flatMap((leg, index) => [
+      h('div', { class: 'journey-heading' },
+        h('span', { class: 'journey-duration' },
+          h('span', { class: 'minutes' }, Math.round(totalMinutes(journey))),
+          h('span', { class: 'small muted' }, t('分鐘', 'min'))),
+        h('span', { class: `journey-arrival${arrivesLate(journey) ? ' late' : ''}` }, t(`${arrive} 到達`, `Arrive ${arrive}`))),
+      h('div', { class: 'chips journey-chips' }, shown.flatMap((leg, index) => [
         index > 0 && icon('next', 13),
-        leg.type === 'walk' ? h('span', { class: 'walk' }, icon('walk', 15), Math.max(1, Math.round(leg.minutes))) : badge(leg.op, leg.route),
+        leg.type === 'walk' ? h('span', { class: 'walk' }, icon('walk', 15), Math.max(1, Math.round(leg.minutes)))
+          : h('span', { class: 'journey-ride' }, badge(leg.op, leg.route),
+            leg.liveDeparture && h('span', { class: 'journey-live' }, leg.isProjected ? t('實時推算', 'Live estimate') : t('實時', 'Live'))),
       ])),
+      (state.when || isNavigating) && h('div', { class: 'journey-summary tiny muted' },
+        state.when && h('span', {}, t(`${clock(journey.departure)} 出發`, `Leave ${clock(journey.departure)}`)),
+        isNavigating && h('span', { class: 'live bold' }, t('導航中', 'Navigating'))),
       h('div', { class: 'journey-summary tiny muted' },
         h('span', {}, `${changes ? t(`轉 ${changes} 次`, `${changes} change${changes > 1 ? 's' : ''}`) : t('直達', 'Direct')} · ${t(`步行 ${Math.round(walkingMeters(journey))} 米`, `walk ${Math.round(walkingMeters(journey))} m`)}`),
         h('span', { class: cents == null ? 'journey-fare' : 'journey-fare bold' }, fare))),
     isOpen && h('div', { class: 'timeline' }, journey.legs.map(legDetail)),
+    isOpen && h('div', { class: 'tiny muted' }, t('規劃來源', 'Route source'), ' · ',
+      journey.provider === 'transitous' ? 'Transitous' : journey.provider === 'google' ? 'Google Maps' : t('內置規劃', 'Built-in planner')),
     isOpen && cents > 0 && h('div', { class: 'tiny muted' },
       t('按設定的票價類別估算，實付金額視乎付款方式及優惠。', 'Estimated using the fare profile in Settings. Payment method and discounts may change the actual fare.')),
     isOpen && !canNavigate && h('a', { class: 'link', href: googleDirections(), target: '_blank', rel: 'noopener' }, t('在 Google 地圖查看', 'View in Google Maps')),
@@ -3228,7 +3233,7 @@ function renderStopsTop() {
     h('div', { class: 'search-card single' },
       h('span', { class: 'muted' }, icon('search', 19)),
       h('input', {
-        id: 'stop-input', value: state.stopQuery, placeholder: t('站名或地點，例如：旺角、朗豪坊', 'Stop or place, e.g. Mong Kok'), enterkeyhint: 'search', autocomplete: 'off',
+        id: 'stop-input', value: state.stopQuery, placeholder: t('搜尋站名或地點', 'Search for a stop or place'), enterkeyhint: 'search', autocomplete: 'off',
         oninput: (event) => {
           cancelStopSearch();
           state.stopQuery = event.target.value;
@@ -3795,6 +3800,24 @@ function showMapStop(stopName, reveal = () => { $('sheet').scrollTop = 0; }) {
 }
 
 const PANEL_SIZES = ['map', 'peek', 'half', 'full'];
+let mapGestureHintSeen = store.get('mapGestureHintSeen', false);
+
+function rememberMapGesture() {
+  if (mapGestureHintSeen) return;
+  mapGestureHintSeen = true;
+  store.set('mapGestureHintSeen', true);
+}
+
+function showMapGestureHint() {
+  if (state.tab !== 'plan' || !state.journeys.length || state.planDirty || state.nav || state.explore || sheet.mapOnly || wideLayout.matches) {
+    return $('map-gesture-hint')?.remove();
+  }
+  if (sheet.current === 'full' || mapGestureHintSeen) return;
+  const hint = h('div', { id: 'map-gesture-hint', role: 'status' }, icon('down', 15), t('向下拉可查看全圖', 'Pull down to see the full map'));
+  $('app').append(hint);
+  rememberMapGesture();
+  setTimeout(() => hint.remove(), 6500);
+}
 
 /** Keep the last menu size while the panel is hidden. */
 const sheet = {
@@ -3821,6 +3844,7 @@ const sheet = {
     this.current = name;
     this.measure();
     this.updateControls();
+    showMapGestureHint();
   },
   updateControls() {
     const size = this.mapOnly ? 'map' : this.current;
@@ -3832,6 +3856,8 @@ const sheet = {
   },
   setMapOnly(on) {
     this.mapOnly = on;
+    if (on && !wideLayout.matches) rememberMapGesture();
+    $('map-gesture-hint')?.remove();
     const panel = $('panel'), open = $('open-panel');
     if (on && panel.contains(document.activeElement)) document.activeElement.blur();
     $('app').classList.toggle('sheet-hidden', on);
@@ -3943,6 +3969,7 @@ const sheet = {
 function renderSheet() {
   const sheets = { plan: planSheet, stops: stopsSheet, routes: routesSheet, saved: savedSheet, settings: settingsSheet };
   clear($('sheet'), sheets[state.tab]());
+  showMapGestureHint();
   watchVisibleStopArrivals();
   state.justOpened = null;
   document.querySelectorAll('.reveal .leg, .reveal > .primary').forEach((element, index) => element.style.setProperty('--i', index));
