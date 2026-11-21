@@ -199,6 +199,32 @@ export function buildNetwork(db) {
   };
 }
 
+/** Duplicate stop states so the destination is reachable only after taking an EdUHK shuttle. */
+export function requireEdUHKShuttle(network) {
+  const offset = network.stopIDs.length, patterns = [];
+  const stopIDs = [...network.stopIDs, ...network.stopIDs];
+  const patternsAtStop = stopIDs.map(() => []);
+  const add = (pattern, stops) => {
+    const index = patterns.push({ ...pattern, stops }) - 1;
+    stops.slice(0, -1).forEach((stop, position) => patternsAtStop[stop].push({ pattern: index, position }));
+  };
+  for (const pattern of network.patterns) {
+    if (pattern.op === 'eduhk') {
+      // These are point-to-point services. Boarding advances the search to the second layer.
+      const [board, alight] = pattern.stops;
+      add(pattern, [board, alight + offset]);
+    } else {
+      add(pattern, pattern.stops);
+      add(pattern, pattern.stops.map((stop) => stop + offset));
+    }
+  }
+  return {
+    ...network, stopIDs, patterns, patternsAtStop,
+    footpaths: [...network.footpaths, ...network.footpaths.map((paths) => paths.map((path) => ({ ...path, to: path.to + offset })))],
+    egressNear: (place, radius) => network.near(place, radius).map((near) => ({ ...near, stop: near.stop + offset })),
+  };
+}
+
 // MARK: Service times
 
 /** The departure expressed the way the timetable data is keyed: Hong Kong time, holidays as Sunday. */
@@ -494,11 +520,11 @@ export function rank(journeys, preference, limit) {
 
 /** Round-based transit routing (RAPTOR): round k finds the fastest way to every stop using k vehicles. */
 export function search(network, origin, destination, departure, bannedFirstRoutes = new Set(), options = {}) {
-  const near = (place) => {
-    const stops = network.near(place, options.radius ?? SETTINGS.accessRadius);
-    return options.radius || stops.length ? stops : network.near(place, SETTINGS.fallbackAccessRadius);
+  const near = (lookup, place) => {
+    const stops = lookup(place, options.radius ?? SETTINGS.accessRadius);
+    return options.radius || stops.length ? stops : lookup(place, SETTINGS.fallbackAccessRadius);
   };
-  const access = near(origin), egressList = near(destination);
+  const access = near(network.near, origin), egressList = near(network.egressNear ?? network.near, destination);
   if (!access.length || !egressList.length) return [];
 
   const n = network.stopIDs.length, rounds = Math.max(1, SETTINGS.maxTransitLegs);
@@ -683,7 +709,7 @@ export function planLocal(network, origin, destination, departure, preference, p
   if (preferredMode !== 'all') found.push(...scan(comfortableRadius, preferredMode));
   if (!found.some(fitsWalkLimit)) found.push(...scan(SETTINGS.fallbackAccessRadius));
   const distance = meters(origin, destination);
-  if (distance <= SETTINGS.walkOnlyRadius) {
+  if (!network.egressNear && distance <= SETTINGS.walkOnlyRadius) {
     found.push({ legs: [{ type: 'walk', meters: distance, minutes: walkMinutes(distance), to: null }], departure });
   }
   return rankTripOptions(found, preference, 8, journeyID, preferredMode);

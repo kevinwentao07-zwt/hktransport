@@ -922,3 +922,26 @@ test('EdUHK University Station shuttle uses separate inbound and outbound weekda
   const trip = T.search(shuttleNetwork, to, from, at('2026-11-21', '08:11')).find(includesEdUHK);
   assert.equal(T.rides(trip)[0].routeKey, outbound);
 });
+
+test('EdUHK-only planning can use public transport before and after the shuttle', () => {
+  const data = withEdUHKShuttle(db);
+  const start = { lat: 22.400, lng: 114.20 };
+  const end = { lat: 22.480, lng: 114.18 };
+  data.stops.start = { location: start };
+  data.stops.end = { location: end };
+  for (const [key, from, to, duration] of [
+    ['before', 'start', 'eduhk-university-b', 10],
+    ['after', 'eduhk-campus-a', 'end', 10],
+    ['direct', 'start', 'end', 20],
+  ]) {
+    data.routes[key] = { key, route: key, operators: ['kmb'], stops: { kmb: [from, to] }, journeyMinutes: duration };
+  }
+  const departure = Date.parse('2026-11-23T09:00:00+08:00');
+  const ordinary = T.buildNetwork(data), required = T.requireEdUHKShuttle(ordinary);
+  assert.equal(T.rides(T.planLocal(ordinary, start, end, departure, 'fastest')[0])[0].routeKey, 'direct');
+  const plans = T.planLocal(required, start, end, departure, 'fastest');
+  assert.ok(plans.length && plans.every(includesEdUHK));
+  assert.deepEqual(T.rides(plans[0]).map(ride => ride.routeKey), ['before', 'eduhk-university-in', 'after']);
+  assert.deepEqual(T.planLocal(required, start, end, departure + 6 * 86_400_000, 'fastest'), []);
+  assert.deepEqual(T.planLocal(required, start, start, departure, 'fastest'), []);
+});

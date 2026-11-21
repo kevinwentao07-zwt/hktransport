@@ -71,6 +71,7 @@ const state = {
   origin: '', destination: '', when: null, chat: '', preference: store.get('preference', 'lessWalking'), phase: 'idle', error: null, planDirty: false,
   transitMode: ['mtr', 'bus'].includes(savedTransitMode) ? savedTransitMode : 'all',
   eduhkShuttle: store.get('eduhkShuttle', false) === true,
+  shuttleOnly: false,
   fareProfile: Object.hasOwn(FARE_PROFILES, savedFareProfile) ? savedFareProfile : 'adult',
   aiConfig: savedAIConfig(), aiKeyRejected: false,
   from: null, to: null, journeys: [], candidates: [], allowLongWalk: false, onMap: null, pickedJourney: false, expanded: null, explanation: null, aiNotice: null, lastChat: null,
@@ -948,8 +949,11 @@ const ask = (message, patience) => new Promise((resolve, reject) => {
 });
 
 let shuttleDB = null;
+const usesShuttleNetwork = () => state.shuttleOnly || state.eduhkShuttle;
+const matchesShuttleOption = (journey) => state.shuttleOnly ? includesEdUHK(journey)
+  : state.eduhkShuttle || !includesEdUHK(journey);
 function planningDB() {
-  return state.eduhkShuttle && state.db ? (shuttleDB ??= withEdUHKShuttle(state.db)) : state.db;
+  return usesShuttleNetwork() && state.db ? (shuttleDB ??= withEdUHKShuttle(state.db)) : state.db;
 }
 
 async function loadDB() {
@@ -1049,7 +1053,7 @@ function closeTrip() {
   planRun++;
   stopNavigation();
   resetPlan();
-  Object.assign(state, { origin: '', destination: '', when: null, discovery: null, lastSearch: null, lastChat: null, talk: [], thread: null, routeView: false, phase: 'idle' });
+  Object.assign(state, { origin: '', destination: '', when: null, discovery: null, lastSearch: null, lastChat: null, talk: [], thread: null, routeView: false, phase: 'idle', shuttleOnly: false });
   whenOpen = false;
   stagger();
   renderTab();
@@ -1176,15 +1180,17 @@ async function runPlan(request) {
   const preference = state.preference;
   const departure = mode === 'depart' ? at : now, arriveBy = mode === 'arrive' ? at : null;
   const local = async () => (await ask({
-    type: 'plan', from: start.location, to: end.location, preference, preferredMode: state.transitMode, departure, arriveBy, includeEdUHK: state.eduhkShuttle,
+    type: 'plan', from: start.location, to: end.location, preference, departure, arriveBy,
+    preferredMode: state.shuttleOnly ? 'all' : state.transitMode,
+    includeEdUHK: usesShuttleNetwork(), shuttleOnly: state.shuttleOnly,
   }, 6000)).journeys;
   transitRequest = new AbortController();
   const options = { preference, mode, at, lang: state.lang, signal: transitRequest.signal };
   const providers = [];
-  if (state.transitous) providers.push(async () => transitousJourneys(
+  if (!state.shuttleOnly && state.transitous) providers.push(async () => transitousJourneys(
     await requestTransitous(start.location, end.location, options), state.db, departure, arriveBy, now,
   ));
-  if (mapView === googleMap) providers.push(async () => {
+  if (!state.shuttleOnly && mapView === googleMap) providers.push(async () => {
     if (mapView !== googleMap) return [];
     const routes = await requestGoogleTransit(start.location, end.location, options);
     return mapView === googleMap ? googleJourneys(routes, state.db, departure, arriveBy, now) : [];
@@ -1194,11 +1200,12 @@ async function runPlan(request) {
   const batches = await Promise.allSettled(providers.map((provider) => provider()));
   if (stale()) return;
   const rawPlans = batches.flatMap((batch) => batch.status === 'fulfilled' ? batch.value : [])
-    .filter((journey) => (journey.provider !== 'google' || mapView === googleMap) && (state.eduhkShuttle || !includesEdUHK(journey)));
+    .filter((journey) => (journey.provider !== 'google' || mapView === googleMap) && matchesShuttleOption(journey));
   const found = (await Promise.all(rawPlans.map((journey) => includesEdUHK(journey) ? retime(journey, () => null) : journey)))
     .filter((journey) => !journey.missedConnection);
   if (stale()) return;
   if (!found.length) {
+    if (state.shuttleOnly) return setPhase('failed', t('這個時間或行程沒有合適的教大校巴方案。可以改時間，或選「不限」查看其他交通。', 'No EdUHK shuttle itinerary fits this trip or time. Try another time or choose Any transport.'));
     return setPhase('failed', t('找不到可搭乘的公共交通路線，請試另一個時間或上車地點。', 'No public transport route found. Try another time or boarding location.'));
   }
   if (found.some(usesRail)) loadRailFares();
@@ -1209,7 +1216,7 @@ async function runPlan(request) {
   const arrivals = state.arrivals = liveArrivalCache(state.db, state.lang);
   const candidates = (await Promise.all(found.map((journey) => (
     journey.departure - now <= LIVE_AHEAD_MS ? retime(journey, arrivals) : journey
-  )))).filter((journey) => !journey.missedConnection && (state.eduhkShuttle || !includesEdUHK(journey)));
+  )))).filter((journey) => !journey.missedConnection && matchesShuttleOption(journey));
   if (stale()) return;
   if (!candidates.length) {
     showTripOptions([]);
@@ -1234,7 +1241,7 @@ async function runPlan(request) {
 
 function showTripOptions(candidates, keepSelection = false) {
   state.candidates = candidates;
-  const ranked = rankCombinedTripOptions(candidates, state.preference, 8, state.transitMode);
+  const ranked = rankCombinedTripOptions(candidates, state.preference, 8, state.shuttleOnly ? 'all' : state.transitMode);
   state.journeys = (state.allowLongWalk ? ranked : ranked.filter(fitsWalkLimit)).slice(0, 5);
   const nav = state.nav;
   if (nav && !state.journeys.some((journey) => journeyID(journey) === nav.id)) {
@@ -1828,7 +1835,7 @@ async function useWalkTimes() {
     return includesEdUHK(journey) ? retime(journey, () => null) : journey;
   }));
   if (run !== planRun || state.candidates !== before) return false;
-  const moved = showTripOptions(live.filter((journey) => !journey.missedConnection && (state.eduhkShuttle || !includesEdUHK(journey))), true);
+  const moved = showTripOptions(live.filter((journey) => !journey.missedConnection && matchesShuttleOption(journey)), true);
   renderSheet();
   if (moved && !mapTouched) fitPlanMap();
   return true;
@@ -2449,11 +2456,16 @@ function transitModePicker() {
     ['all', t('不限', 'Any transport')],
     ['mtr', t('優先港鐵', 'Prefer MTR')],
     ['bus', t('優先巴士', 'Prefer buses')],
+    ['eduhk', t('教大校巴', 'EdUHK shuttle')],
   ];
-  const picker = segments(options, state.transitMode, (mode) => {
-    if (mode === state.transitMode) return;
-    state.transitMode = mode;
-    store.set('transitMode', mode);
+  const active = state.shuttleOnly ? 'eduhk' : state.transitMode;
+  const picker = segments(options, active, (mode) => {
+    if (mode === active) return;
+    state.shuttleOnly = mode === 'eduhk';
+    if (!state.shuttleOnly) {
+      state.transitMode = mode;
+      store.set('transitMode', mode);
+    }
     const hadFocus = picker.contains(document.activeElement);
     const updated = transitModePicker();
     picker.replaceWith(updated);
@@ -3762,8 +3774,8 @@ function settingsSheet() {
         if (enabled === state.eduhkShuttle) return;
         state.eduhkShuttle = enabled;
         store.set('eduhkShuttle', enabled);
-        replanEdUHK = Boolean(state.from && state.to && !state.planDirty && !state.nav);
-        if (!enabled && state.candidates.some(includesEdUHK)) showTripOptions(state.candidates.filter((journey) => !includesEdUHK(journey)), true);
+        replanEdUHK = Boolean(state.from && state.to && !state.planDirty && !state.nav && !state.shuttleOnly);
+        if (!usesShuttleNetwork() && state.candidates.some(includesEdUHK)) showTripOptions(state.candidates.filter((journey) => !includesEdUHK(journey)), true);
         renderSheet();
       })),
       h('div', { class: 'tiny muted' }, t('包括大圍站線及大學站線，兩線均往返大埔校園。只限教大學生及教職員，按校方班表估算。', 'Includes both directions between Tai Po Campus and Tai Wai or University Station. For EdUHK students and staff only. Times are based on the published timetable.')),
