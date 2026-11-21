@@ -409,13 +409,14 @@ export function rankTripOptions(journeys, preference, limit = 5, identity = jour
   const walkByGroup = new Map();
   const options = journeys.map((journey) => {
     const group = [Number(!fitsWalkLimit(journey)), Number(arrivesLate(journey))];
+    const changes = transfers(journey);
+    if (preference === 'fewerTransfers') group.push(Number(!rides(journey).length), changes);
     if (sourcePriority) group.push(sourcePriority(journey));
     if (preferredMode !== 'all') group.push(Number(!mostlyUsesMode(journey, preferredMode)));
     const duration = totalMinutes(journey);
     if (preference === 'fastest') return { journey, group, duration };
-    group.push(Number(!rides(journey).length));
-    const changes = transfers(journey), walk = walkingMinutes(journey);
-    if (preference === 'fewerTransfers') group.push(changes);
+    if (preference !== 'fewerTransfers') group.push(Number(!rides(journey).length));
+    const walk = walkingMinutes(journey);
     const key = group.join();
     walkByGroup.set(key, Math.min(walkByGroup.get(key) ?? Infinity, walk));
     return { journey, group, duration, walk, changes, key };
@@ -462,14 +463,17 @@ export function rankCombinedTripOptions(journeys, preference, limit = 8, preferr
     return google.length ? google : eligible;
   });
   const fastestGoogle = new Map(), fastestRegular = new Map();
+  const sourceGroup = (journey) => preference === 'fewerTransfers'
+    ? `${tripEligibility(journey)}|${Number(!rides(journey).length)}|${transfers(journey)}`
+    : tripEligibility(journey);
   for (const journey of comparable) {
     if (includesEdUHK(journey)) continue;
     const times = journey.provider === 'google' ? fastestGoogle : fastestRegular;
-    const group = tripEligibility(journey);
+    const group = sourceGroup(journey);
     times.set(group, Math.min(times.get(group) ?? Infinity, totalMinutes(journey)));
   }
   const sourcePriority = (journey) => {
-    const group = tripEligibility(journey);
+    const group = sourceGroup(journey);
     const reference = fastestGoogle.get(group) ?? fastestRegular.get(group);
     if (includesEdUHK(journey) && reference != null && totalMinutes(journey) < reference) return 0;
     return journey.provider === 'google' ? 1 : 2;

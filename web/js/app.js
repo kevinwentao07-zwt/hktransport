@@ -2904,8 +2904,6 @@ function journeyCard(journey) {
         shuttle && h('span', { class: 'late bold' }, t('只限教大師生', 'EdUHK students and staff only')),
         h('span', { class: cents == null ? 'journey-fare' : 'journey-fare bold' }, fare))),
     isOpen && h('div', { class: 'timeline' }, journey.legs.map(legDetail)),
-    isOpen && h('div', { class: 'tiny muted' }, t('規劃來源', 'Route source'), ' · ',
-      journey.provider === 'transitous' ? 'Transitous' : journey.provider === 'google' ? 'Google Maps' : t('內置規劃', 'Built-in planner')),
     isOpen && shuttle && h('div', { class: 'stack' },
       h('div', { class: 'small muted' }, t('上車須拍教大學生證或職員證。開車時間按校方班表，車程和地圖位置為估算。', 'Tap your EdUHK student or staff card when boarding. Departure times follow the timetable. Journey times and map locations are approximate.')),
       h('a', { class: 'link', href: universityShuttle ? EDUHK_UNIVERSITY : EDUHK_TIMETABLE, target: '_blank', rel: 'noopener' },
@@ -2929,10 +2927,9 @@ function legDetail(leg) {
   if (leg.type === 'walk') {
     const minutes = Math.max(1, Math.round(leg.minutes)), target = leg.targetName ?? (leg.to ? name(leg.to) : t('目的地', 'destination'));
     // Google's walks follow the streets; without one, the time is from the straight line.
-    const source = leg.walkSource === 'transitous' ? t('（Transitous 步行路線）', ' (Transitous walking route)')
-      : leg.walkFromMap ? t('（Google 步行路線）', ' (Google walking route)') : t('（按直線估算）', ' (estimated from the straight line)');
+    const estimate = leg.walkSource === 'transitous' || leg.walkFromMap ? '' : t('（按直線估算）', ' (estimated from the straight line)');
     return h('div', { class: 'leg walking' }, h('div', { class: 'track' }),
-      h('div', { class: 'body small muted' }, t(`步行約 ${minutes} 分鐘（${Math.round(leg.meters)} 米）到 ${target}`, `Walk about ${minutes} min (${Math.round(leg.meters)} m) to ${target}`) + source));
+      h('div', { class: 'body small muted' }, t(`步行約 ${minutes} 分鐘（${Math.round(leg.meters)} 米）到 ${target}`, `Walk about ${minutes} min (${Math.round(leg.meters)} m) to ${target}`) + estimate));
   }
   const wait = Math.round(leg.waitMinutes), platform = leg.livePlatform ? ` · ${nameText(leg.livePlatform, state.lang)}` : '';
   const scheduledPlatform = leg.scheduledPlatform ? t(` · 月台 ${leg.scheduledPlatform}`, ` · Platform ${leg.scheduledPlatform}`) : '';
@@ -3181,13 +3178,13 @@ function planSheet() {
       items.push(suggestionList(state.discovery));
     }
   }
-  if (state.candidates.some((journey) => journey.provider === 'transitous')) {
+  items.push(state.journeys.map(journeyCard));
+  if (state.journeys.some((journey) => journey.provider === 'transitous')) {
     items.push(h('div', { class: 'tiny muted' },
       h('a', { href: 'https://transitous.org/sources/', target: '_blank', rel: 'noopener' }, t('Transitous 資料來源', 'Transitous data sources')),
       ' · ',
       h('a', { href: 'https://www.openstreetmap.org/copyright', target: '_blank', rel: 'noopener' }, '© OpenStreetMap contributors')));
   }
-  items.push(state.journeys.map(journeyCard));
   const isWaitingForAnswer = state.discovery?.stage === 'asking';
   if (!state.routeView && (!state.discovery || isWaitingForAnswer) && state.phase === 'idle') items.push(state.destination.trim() && state.db ? placeSuggestions() : homeSheet());
   return items;

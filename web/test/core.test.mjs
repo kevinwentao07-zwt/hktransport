@@ -980,3 +980,17 @@ test('matching itineraries prefer Google without discarding an on-time alternati
   assert.deepEqual(T.rankCombinedTripOptions([transitous, google], 'fastest'), [google]);
   assert.deepEqual(T.rankCombinedTripOptions([late, transitous], 'fastest'), [transitous]);
 });
+
+test('fewer transfers outranks provider priority, then compares Google and faster shuttles within each tier', () => {
+  const ride = (op, rideMinutes) => ({ type: 'ride', op, rideMinutes, waitMinutes: 0, transferMinutes: 0 });
+  const trip = (id, provider, legs) => ({ id, provider, departure: noon, legs });
+  const google = trip('google', 'google', [ride('mtr', 8), ride('kmb', 8)]);
+  const schoolTransfer = trip('school-transfer', null, [ride('mtr', 5), ride('eduhk', 10)]);
+  const directGoogle = trip('google-direct', 'google', [ride('mtr', 40)]);
+  const directSchool = trip('school-direct', null, [ride('eduhk', 38)]);
+  const directLocal = trip('local-direct', 'transitous', [ride('kmb', 35)]);
+  const options = [google, schoolTransfer, directLocal, directGoogle, directSchool];
+  assert.deepEqual(T.rankCombinedTripOptions(options, 'fewerTransfers', 8, 'mtr'),
+    [directSchool, directGoogle, directLocal, schoolTransfer, google]);
+  assert.deepEqual(T.rankCombinedTripOptions([google, directLocal], 'fastest'), [google, directLocal]);
+});
